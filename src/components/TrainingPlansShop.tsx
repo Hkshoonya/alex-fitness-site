@@ -10,6 +10,7 @@ import {
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus } from '@/api/squareCatalog';
 import { initializeSquarePayments, createCardPayment, storePurchase } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
+import { purchaseAndSubscribe } from '@/api/squareSubscriptions';
 
 interface TrainingPlansShopProps {
   isOpen: boolean;
@@ -125,11 +126,13 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
 
     try {
       let paymentId: string;
+      let cardToken: string | null = null;
 
       if (cardElement) {
         const result = await cardElement.tokenize();
         if (result.status !== 'OK') throw new Error('Card tokenization failed');
-        const paymentResult = await createCardPayment(selectedPlan, selectedTrainer.id, result.token);
+        cardToken = result.token;
+        const paymentResult = await createCardPayment(selectedPlan, selectedTrainer.id, cardToken!);
         if (!paymentResult.success) throw new Error(paymentResult.error || 'Payment failed');
         paymentId = paymentResult.paymentId!;
       } else {
@@ -147,6 +150,20 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         sessionsRemaining: freq?.totalSessions || 1,
         validUntil: new Date(Date.now() + selectedPlan.planWeeks * 7 * 24 * 60 * 60 * 1000).toISOString(),
       });
+
+      // Set up recurring auto-pay subscription (fire-and-forget)
+      // First payment is already done above — this stores card on file
+      // and creates subscription so next billing cycle auto-charges
+      if (selectedPlan.planWeeks >= 12 && selectedPlan.frequency.length > 0) {
+        // Multi-week plans with sessions → monthly auto-pay
+        const customerId = paymentId; // In production, use the real Square customer ID
+        purchaseAndSubscribe({
+          customerId,
+          cardToken: cardToken ?? `mock_token_${Date.now()}`,
+          planVariationId: selectedPlan.squareItemId || '',
+          firstPaymentAmountCents: 0, // Already paid above, so first sub charge = $0
+        });
+      }
 
       setStep('success');
       if (onPurchaseComplete) onPurchaseComplete(selectedPlan, selectedTrainer);

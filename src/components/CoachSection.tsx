@@ -82,13 +82,23 @@ export default function CoachSection({ onBookCall, onBookMeeting }: CoachSection
   const loadCoaches = async () => {
     const team = await getTeamMembers();
 
-    // Filter out consultation entry and Alex (we have him hardcoded)
+    // Find Alex (owner) from Square to get his real team_member_id
+    const alexFromSquare = team.find(m => m.role === 'head-coach');
+
+    // Update Alex's hardcoded profile with his Square ID (needed for calendar booking)
+    const alex: CoachProfile = {
+      ...ALEX_DAVIS,
+      id: alexFromSquare?.squareTeamMemberId || alexFromSquare?.id || ALEX_DAVIS.id,
+    };
+
+    // Additional coaches from Square (not Alex, not consultation)
     const additional = team
-      .filter(m => m.role === 'coach' && m.id !== 'alex-davis' && m.id !== 'consultation')
+      .filter(m => m.role === 'coach' && m.id !== alex.id && m.id !== 'consultation')
       .map(teamMemberToProfile);
 
-    // Alex first, then others from Square
-    setCoaches([ALEX_DAVIS, ...additional]);
+    // Alex always first, then others from Square
+    // If a coach is removed in Square, they simply won't appear in `team` → won't be in `additional`
+    setCoaches([alex, ...additional]);
   };
 
   const coach = coaches[activeIndex];

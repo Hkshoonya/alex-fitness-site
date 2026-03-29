@@ -2,9 +2,10 @@
 // This module handles all interactions with Square API for booking management
 
 import type { Booking, BookingRequest, BookingResponse } from '@/types/booking';
-import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE } from '@/api/squareConfig';
+import { getSquareConfig, getSquareHeaders, getConsultationServiceId, SQUARE_API_BASE } from '@/api/squareConfig';
 
-const { locationId: SQUARE_LOCATION_ID, serviceId: SQUARE_SERVICE_ID } = getSquareConfig();
+const { locationId: SQUARE_LOCATION_ID } = getSquareConfig();
+const SQUARE_SERVICE_ID = getConsultationServiceId();
 
 // Business hours configuration
 const BUSINESS_HOURS = {

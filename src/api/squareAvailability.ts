@@ -2,7 +2,7 @@
 // Fetches team members, their schedules, and real-time availability from Square Bookings API
 
 import { asset } from '@/lib/assets';
-import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE } from '@/api/squareConfig';
+import { getSquareConfig, getSquareHeaders, getServiceId, SQUARE_API_BASE } from '@/api/squareConfig';
 
 const { locationId: SQUARE_LOCATION_ID } = getSquareConfig();
 
@@ -159,6 +159,19 @@ async function fetchTeamFromSquare(): Promise<TeamMember[]> {
 
 /**
  * Get team members (cached daily)
+ *
+ * How coach sync works:
+ * - Square Team Members API is the source of truth
+ * - Alex Davis (owner) is ALWAYS shown even if API fails
+ * - New coaches added in Square auto-appear on next cache refresh (24h)
+ * - Coaches removed in Square auto-disappear on next refresh
+ * - Each coach's squareTeamMemberId is used for:
+ *   - Searching their calendar availability
+ *   - Creating bookings on their specific calendar
+ *   - The same service IDs (consultation/30min/60min) work for all coaches
+ *   - Square routes the booking to the correct coach's calendar via team_member_id
+ *
+ * To force refresh: call refreshTeamMembers()
  */
 export async function getTeamMembers(): Promise<TeamMember[]> {
   if (isTeamCacheFresh()) {
@@ -172,27 +185,41 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
   const squareTeam = await fetchTeamFromSquare();
 
   if (squareTeam.length > 0) {
-    // Merge with fallback to preserve images/specialties
-    const merged = squareTeam.map(sq => {
+    // Square is source of truth — only show coaches active in Square
+    // Enrich with fallback data (images, specialties) where names match
+    const enriched = squareTeam.map(sq => {
       const fallback = FALLBACK_TEAM.find(f =>
         f.name.toLowerCase().includes(sq.name.split(' ')[0].toLowerCase())
       );
-      return fallback ? { ...sq, image: fallback.image, specialties: fallback.specialties, role: fallback.role, title: fallback.title } : sq;
+      if (fallback) {
+        return { ...sq, image: fallback.image, specialties: fallback.specialties, role: fallback.role, title: fallback.title };
+      }
+      // New coach from Square with no local fallback — uses defaults
+      return sq;
     });
 
-    // Always include consultation
-    const hasConsult = merged.some(m => m.role === 'consultation');
-    if (!hasConsult) merged.push(FALLBACK_TEAM.find(f => f.role === 'consultation')!);
+    // Always include consultation entry (not a real coach)
+    const hasConsult = enriched.some(m => m.role === 'consultation');
+    if (!hasConsult) enriched.push(FALLBACK_TEAM.find(f => f.role === 'consultation')!);
 
-    const cache: TeamCache = { members: merged, fetchedAt: new Date().toISOString() };
+    const cache: TeamCache = { members: enriched, fetchedAt: new Date().toISOString() };
     localStorage.setItem(TEAM_CACHE_KEY, JSON.stringify(cache));
-    return merged;
+    return enriched;
   }
 
-  // Fallback
+  // API not configured or failed — use fallback (Alex is always present)
   const cache: TeamCache = { members: FALLBACK_TEAM, fetchedAt: new Date().toISOString() };
   localStorage.setItem(TEAM_CACHE_KEY, JSON.stringify(cache));
   return FALLBACK_TEAM;
+}
+
+/**
+ * Force refresh team members (bypasses 24h cache)
+ * Call this from an admin action or after knowing coaches changed
+ */
+export async function refreshTeamMembers(): Promise<TeamMember[]> {
+  localStorage.removeItem(TEAM_CACHE_KEY);
+  return getTeamMembers();
 }
 
 // ===== AVAILABILITY =====
@@ -250,7 +277,7 @@ async function fetchAvailabilityFromSquare(
           },
           location_id: SQUARE_LOCATION_ID,
           segment_filters: [{
-            service_variation_id: getSquareConfig().serviceId || undefined,
+            service_variation_id: getServiceId(duration) || undefined,
             team_member_id_filter: teamMemberId ? {
               any: [teamMemberId],
             } : undefined,
@@ -458,7 +485,7 @@ export async function createBooking(
           appointment_segments: [{
             duration_minutes: duration,
             team_member_id: teamMemberId,
-            service_variation_id: getSquareConfig().serviceId || undefined,
+            service_variation_id: getServiceId(duration) || undefined,
           }],
           customer_note: `Name: ${customerInfo.name}\nGoals: ${customerInfo.goals || 'Not specified'}`,
         },

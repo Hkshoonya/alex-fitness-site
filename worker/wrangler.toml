@@ -2,6 +2,13 @@ name = "alex-fitness-webhook"
 main = "webhook-handler.js"
 compatibility_date = "2024-01-01"
 
+# KV namespace for challenges storage
+# Create with: wrangler kv namespace create CHALLENGES_KV
+# Then paste the ID below
+[[kv_namespaces]]
+binding = "CHALLENGES_KV"
+id = "" # Fill after running: wrangler kv namespace create CHALLENGES_KV
+
 # Set these in Cloudflare Dashboard > Workers > Settings > Variables
 # DO NOT put actual keys here — use the dashboard
 [vars]

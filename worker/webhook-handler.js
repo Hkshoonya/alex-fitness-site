@@ -41,7 +41,59 @@ const PLAN_CREDITS = {
 
 export default {
   async fetch(request, env) {
-    // Only accept POST
+    const url = new URL(request.url);
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    };
+
+    // CORS preflight
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+
+    // ===== CHALLENGES API =====
+    // GET /challenges — list active challenges (website fetches this)
+    // POST /challenges — add a challenge (from admin or Zapier/Trainerize webhook)
+    // DELETE /challenges/:id — remove a challenge
+
+    if (url.pathname === '/challenges' && request.method === 'GET') {
+      const challenges = await getChallenges(env);
+      const now = new Date();
+      const active = challenges.filter(c => new Date(c.endDate) > now);
+      return new Response(JSON.stringify(active), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    if (url.pathname === '/challenges' && request.method === 'POST') {
+      const data = await request.json();
+      const challenge = {
+        id: `ch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        title: data.title || '',
+        description: data.description || '',
+        startDate: data.startDate || data.start_date || '',
+        endDate: data.endDate || data.end_date || '',
+        duration: data.duration || '4 Weeks',
+        prize: data.prize || null,
+        spots: data.spots || null,
+        spotsLeft: data.spots || null,
+        price: data.price || 0,
+        tags: data.tags || [],
+        trainerizeId: data.trainerizeId || data.trainerize_id || null,
+        createdAt: new Date().toISOString(),
+      };
+
+      await saveChallenge(challenge, env);
+      return new Response(JSON.stringify(challenge), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    if (url.pathname.startsWith('/challenges/') && request.method === 'DELETE') {
+      const id = url.pathname.split('/challenges/')[1];
+      await deleteChallenge(id, env);
+      return new Response(JSON.stringify({ deleted: id }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ===== SQUARE WEBHOOK =====
     if (request.method !== 'POST') {
       return new Response('OK', { status: 200 });
     }
@@ -293,4 +345,26 @@ async function verifySignature(body, signature, key) {
   const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
 
   return computed === signature;
+}
+
+// ===== CHALLENGES KV STORAGE =====
+
+async function getChallenges(env) {
+  if (!env.CHALLENGES_KV) return [];
+  const raw = await env.CHALLENGES_KV.get('challenges');
+  return raw ? JSON.parse(raw) : [];
+}
+
+async function saveChallenge(challenge, env) {
+  if (!env.CHALLENGES_KV) return;
+  const all = await getChallenges(env);
+  all.push(challenge);
+  await env.CHALLENGES_KV.put('challenges', JSON.stringify(all));
+}
+
+async function deleteChallenge(id, env) {
+  if (!env.CHALLENGES_KV) return;
+  const all = await getChallenges(env);
+  const filtered = all.filter(c => c.id !== id);
+  await env.CHALLENGES_KV.put('challenges', JSON.stringify(filtered));
 }

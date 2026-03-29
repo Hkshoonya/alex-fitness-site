@@ -26,6 +26,7 @@ import GoogleReviews from '@/components/GoogleReviews';
 import AboutPage from '@/components/AboutPage';
 import QuickMessageModal from '@/components/QuickMessageModal';
 import CoachSection from '@/components/CoachSection';
+import ChallengesSection from '@/components/ChallengesSection';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -574,6 +575,9 @@ function App() {
           <GoogleReviews />
         </div>
       </section>
+
+      {/* Challenges */}
+      <ChallengesSection onBooking={() => setBookingModalOpen(true)} />
 
       {/* Section 8: Book Your Session */}
       <section id="book" ref={bookRef} className="relative min-h-screen flex items-center">

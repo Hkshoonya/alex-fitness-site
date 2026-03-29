@@ -115,7 +115,7 @@ export default {
 
       console.log(`Webhook received: ${eventType}`);
 
-      // Handle subscription renewal (auto-pay succeeded)
+      // ---- SUBSCRIPTION EVENTS ----
       if (eventType === 'subscription.updated') {
         const subscription = event.data?.object?.subscription;
         if (!subscription) return new Response('OK', { status: 200 });
@@ -123,22 +123,56 @@ export default {
         const status = subscription.status;
 
         if (status === 'ACTIVE') {
-          // Subscription renewed — add credits in Trainerize
           await handleSubscriptionRenewal(subscription, env);
+          await syncPaymentStatusToTrainerize(subscription.customer_id, 'paid', subscription, env);
         } else if (status === 'CANCELED' || status === 'DEACTIVATED') {
-          // Subscription ended — log it
-          console.log(`Subscription ${subscription.id} ended: ${status}`);
+          await syncPaymentStatusToTrainerize(subscription.customer_id, 'canceled', subscription, env);
+        } else if (status === 'PAUSED') {
+          await syncPaymentStatusToTrainerize(subscription.customer_id, 'paused', subscription, env);
+        } else if (status === 'PENDING') {
+          await syncPaymentStatusToTrainerize(subscription.customer_id, 'due', subscription, env);
         }
       }
 
-      // Handle payment completed (covers both one-time and subscription payments)
+      // ---- PAYMENT COMPLETED ----
       if (eventType === 'payment.completed') {
         const payment = event.data?.object?.payment;
         if (!payment) return new Response('OK', { status: 200 });
 
-        // Check if this payment is from a subscription
         if (payment.subscription_id) {
           await handleSubscriptionPayment(payment, env);
+        }
+        // Mark client as paid in Trainerize
+        if (payment.customer_id) {
+          await syncPaymentStatusToTrainerize(payment.customer_id, 'paid', payment, env);
+        }
+      }
+
+      // ---- PAYMENT FAILED ----
+      if (eventType === 'payment.failed') {
+        const payment = event.data?.object?.payment;
+        if (payment?.customer_id) {
+          await syncPaymentStatusToTrainerize(payment.customer_id, 'unpaid', payment, env);
+        }
+      }
+
+      // ---- INVOICE EVENTS ----
+      if (eventType === 'invoice.payment_made') {
+        const invoice = event.data?.object?.invoice;
+        if (invoice?.primary_recipient?.customer_id) {
+          await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'paid', invoice, env);
+        }
+      }
+
+      if (eventType === 'invoice.payment_failed' || eventType === 'invoice.updated') {
+        const invoice = event.data?.object?.invoice;
+        if (invoice?.primary_recipient?.customer_id) {
+          const invStatus = invoice.status;
+          if (invStatus === 'UNPAID' || invStatus === 'PAYMENT_PENDING') {
+            await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'unpaid', invoice, env);
+          } else if (invStatus === 'OVERDUE') {
+            await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'overdue', invoice, env);
+          }
         }
       }
 
@@ -282,6 +316,135 @@ async function sendTrainerizeMessage(email, message, env) {
   } catch (error) {
     console.error('Trainerize message failed:', error);
   }
+}
+
+/**
+ * Sync payment status to Trainerize
+ * Updates client's profile so both Alex and the client see the status:
+ *
+ * 1. TAGS — Alex sees at a glance in client list:
+ *    payment-paid, payment-due, payment-unpaid, payment-overdue, payment-canceled
+ *
+ * 2. NOTES — detailed payment history on client profile
+ *
+ * 3. MESSAGE — client gets notified in Trainerize app
+ */
+async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData, env) {
+  const apiBase = env.TRAINERIZE_API_URL || 'https://api.trainerize.com/v2';
+  const apiKey = env.TRAINERIZE_API_KEY;
+
+  if (!apiKey) {
+    console.log('Trainerize API key not set — skipping payment status sync');
+    return;
+  }
+
+  const email = await getCustomerEmail(squareCustomerId, env);
+  if (!email) return;
+
+  const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  const amount = eventData?.amount_money?.amount
+    ? `$${(eventData.amount_money.amount / 100).toFixed(2)}`
+    : eventData?.payment_requests?.[0]?.computed_amount_money?.amount
+      ? `$${(eventData.payment_requests[0].computed_amount_money.amount / 100).toFixed(2)}`
+      : '';
+
+  // Calculate next due date from subscription
+  let nextDueDate = '';
+  if (eventData?.charged_through_date) {
+    nextDueDate = eventData.charged_through_date;
+  } else if (eventData?.next_payment_date) {
+    nextDueDate = eventData.next_payment_date;
+  }
+
+  // Tag definitions
+  const allPaymentTags = ['payment-paid', 'payment-due', 'payment-unpaid', 'payment-overdue', 'payment-canceled', 'payment-paused'];
+  const newTag = `payment-${status}`;
+
+  // 1. Remove old payment tags, add new one
+  try {
+    // Remove all old payment tags
+    for (const tag of allPaymentTags) {
+      await fetch(`${apiBase}/clients/tags/remove`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_email: email, tag }),
+      });
+    }
+
+    // Add current status tag
+    await fetch(`${apiBase}/clients/tags`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_email: email, tag: newTag }),
+    });
+
+    // Add next-due-date tag if available
+    if (nextDueDate) {
+      await fetch(`${apiBase}/clients/tags`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_email: email, tag: `next-due:${nextDueDate}` }),
+      });
+    }
+  } catch (e) {
+    console.error('Trainerize tag update failed:', e);
+  }
+
+  // 2. Update client notes with payment history
+  const noteLines = {
+    paid: `✅ Payment received ${amount} on ${now}${nextDueDate ? `. Next due: ${nextDueDate}` : ''}`,
+    due: `📅 Payment due ${amount}${nextDueDate ? ` on ${nextDueDate}` : ''}`,
+    unpaid: `❌ Payment failed ${amount} on ${now}. Card on file was declined.`,
+    overdue: `🚨 Payment overdue ${amount} as of ${now}. Please update payment method.`,
+    canceled: `⛔ Subscription canceled on ${now}.`,
+    paused: `⏸️ Subscription paused on ${now}.`,
+  };
+
+  try {
+    // Get existing notes
+    const clientRes = await fetch(`${apiBase}/clients?email=${encodeURIComponent(email)}`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+    });
+    let existingNotes = '';
+    if (clientRes.ok) {
+      const clientData = await clientRes.json();
+      existingNotes = clientData.clients?.[0]?.notes || '';
+    }
+
+    // Append new payment note (keep last 10 entries)
+    const noteHistory = existingNotes.split('\n---\n').filter(Boolean).slice(-9);
+    noteHistory.push(noteLines[status] || `Payment status: ${status}`);
+    const updatedNotes = noteHistory.join('\n---\n');
+
+    await fetch(`${apiBase}/clients`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email,
+        notes: updatedNotes,
+        trainer_id: env.TRAINERIZE_TRAINER_ID || undefined,
+        send_invite: false,
+      }),
+    });
+  } catch (e) {
+    console.error('Trainerize note update failed:', e);
+  }
+
+  // 3. Send message to client (they see it in Trainerize app)
+  const clientMessages = {
+    paid: `Your payment of ${amount} has been received. Thank you! 💪${nextDueDate ? `\n\nNext payment: ${nextDueDate}` : ''}`,
+    due: `Reminder: Your payment of ${amount} is coming up${nextDueDate ? ` on ${nextDueDate}` : ''}. Make sure your payment method is up to date!`,
+    unpaid: `Your payment of ${amount} could not be processed. Please update your payment method to continue your training plan.`,
+    overdue: `Your payment of ${amount} is overdue. Please update your payment method as soon as possible to avoid interruption to your training.`,
+    canceled: `Your subscription has been canceled. If you'd like to resume training, book a session anytime!`,
+    paused: `Your subscription has been paused. When you're ready to resume, just let us know!`,
+  };
+
+  if (clientMessages[status]) {
+    await sendTrainerizeMessage(email, clientMessages[status], env);
+  }
+
+  console.log(`Payment status synced to Trainerize: ${email} → ${status} ${amount}`);
 }
 
 /**

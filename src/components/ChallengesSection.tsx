@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Trophy, Calendar, Users, Tag, Clock, ChevronRight, Flame, Plus, X, Check } from 'lucide-react';
 import { getActiveChallenges, addChallenge, removeChallenge, seedDemoChallenges, type Challenge } from '@/api/challenges';
+import { asset } from '@/lib/assets';
 
 interface ChallengesSectionProps {
   onBooking: () => void;
@@ -25,9 +26,12 @@ export default function ChallengesSection({ onBooking }: ChallengesSectionProps)
   if (challenges.length === 0 && !showAdmin) return null;
 
   return (
-    <section className="bg-[#0B0B0D] py-24 px-6 lg:px-[6vw] relative overflow-hidden">
-      {/* Accent glow */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-96 h-96 bg-[#FF4D2E]/5 rounded-full blur-3xl" />
+    <section className="relative py-24 px-6 lg:px-[6vw] overflow-hidden">
+      {/* Blurred ambient background — matches coach section */}
+      <div className="absolute inset-0">
+        <img src={asset("/images/alex-portrait.jpg")} alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-125 opacity-50" style={{ objectPosition: 'center 18%' }} />
+        <div className="absolute inset-0 bg-black/60" />
+      </div>
 
       <div className="max-w-5xl mx-auto relative z-10">
         <div className="text-center mb-12">

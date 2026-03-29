@@ -8,7 +8,7 @@ import {
   type Trainer,
 } from '@/data/trainingPlans';
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus } from '@/api/squareCatalog';
-import { initializeSquarePayments, createCardPayment, storePurchase } from '@/api/squarePayments';
+import { initializeAllPaymentMethods, createCardPayment, storePurchase, type PaymentMethods } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
 import { purchaseAndSubscribe } from '@/api/squareSubscriptions';
 
@@ -29,6 +29,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   const [selectedTrainer, setSelectedTrainer] = useState<Trainer>(trainers[0]);
   const [step, setStep] = useState<'browse' | 'configure' | 'trainer' | 'payment' | 'success'>('browse');
   const [cardElement, setCardElement] = useState<any>(null);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethods | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,14 +68,25 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
 
   const initializeSquareSdk = async () => {
     try {
-      const payments = await initializeSquarePayments();
-      if (payments) {
-        const card = await payments.card();
-        await card.attach('#card-container');
-        setCardElement(card);
+      const methods = await initializeAllPaymentMethods(getCurrentPrice() * 100 || 10000);
+      if (methods) {
+        setPaymentMethods(methods);
+        if (methods.card) {
+          await methods.card.attach('#card-container');
+          setCardElement(methods.card);
+        }
+        if (methods.applePay) {
+          await methods.applePay.attach('#apple-pay-button');
+        }
+        if (methods.googlePay) {
+          await methods.googlePay.attach('#google-pay-button');
+        }
+        if (methods.cashAppPay) {
+          await methods.cashAppPay.attach('#cashapp-button');
+        }
       }
     } catch {
-      console.log('Square SDK not available - using mock mode');
+      // SDK not available — payment form shows card-only fallback
     }
   };
 
@@ -521,14 +533,29 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                   <span>Secure payment powered by Square</span>
                 </div>
 
+                {/* Digital wallet buttons — show based on device */}
+                <div className="space-y-2">
+                  <div id="apple-pay-button" className="min-h-0" />
+                  <div id="google-pay-button" className="min-h-0" />
+                  <div id="cashapp-button" className="min-h-0" />
+                </div>
+
+                {/* Divider if any wallet button is available */}
+                {(paymentMethods?.applePay || paymentMethods?.googlePay || paymentMethods?.cashAppPay) && (
+                  <div className="flex items-center gap-4 my-2">
+                    <div className="flex-1 h-px bg-white/10" />
+                    <span className="text-white/30 text-xs">or pay with card</span>
+                    <div className="flex-1 h-px bg-white/10" />
+                  </div>
+                )}
+
+                {/* Card input */}
                 <div className="bg-white/5 border border-white/10 rounded-xl p-4">
-                  <label className="text-white/60 text-sm mb-2 block">Card Information</label>
                   <div id="card-container" className="min-h-[50px]">
                     {!cardElement && (
                       <div className="bg-white/5 rounded-lg p-4 text-center">
                         <CreditCard className="mx-auto mb-2 text-white/40" size={32} />
-                        <p className="text-white/50 text-sm">Demo Mode - No real payment</p>
-                        <p className="text-white/30 text-xs">Click below to simulate purchase</p>
+                        <p className="text-white/50 text-sm">Loading payment form...</p>
                       </div>
                     )}
                   </div>

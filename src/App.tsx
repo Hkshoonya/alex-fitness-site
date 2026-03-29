@@ -555,8 +555,12 @@ function App() {
       </section>
 
       {/* Section 7: Reviews */}
-      <section id="testimonials" ref={testimonialsRef} className="bg-[#0B0B0D] py-24 px-6 lg:px-[6vw]">
-        <div className="max-w-5xl mx-auto">
+      <section id="testimonials" ref={testimonialsRef} className="relative py-24 px-6 lg:px-[6vw] overflow-hidden">
+        <div className="absolute inset-0">
+          <img src={asset("/images/alex-portrait.jpg")} alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-125 opacity-50" style={{ objectPosition: 'center 18%' }} />
+          <div className="absolute inset-0 bg-black/60" />
+        </div>
+        <div className="max-w-5xl mx-auto relative z-10">
           <div className="text-center mb-4">
             <p className="micro-label text-[#FF4D2E]/80 mb-4">CLIENT REVIEWS</p>
             <h2 className="headline-xl text-white text-3xl sm:text-5xl break-words mb-4">WHAT CLIENTS SAY</h2>
@@ -739,6 +743,38 @@ function App() {
               <Instagram size={16} />
               @alexdavisfit
             </a>
+          </div>
+
+          {/* Accepted Payment Methods */}
+          <div className="flex items-center justify-center gap-2 mb-8 flex-wrap">
+            {/* Visa */}
+            <div className="bg-white/[0.06] border border-white/[0.06] rounded px-2.5 py-1.5">
+              <svg viewBox="0 0 48 32" width="36" height="24" fill="none"><rect width="48" height="32" rx="4" fill="#1A1F71"/><path d="M19.5 21h-3l1.9-10h3l-1.9 10zm12.4-9.7c-.6-.2-1.5-.5-2.7-.5-3 0-5 1.5-5 3.7 0 1.6 1.5 2.5 2.6 3 1.1.6 1.5 1 1.5 1.5 0 .8-1 1.2-1.8 1.2-1.2 0-1.9-.2-2.9-.6l-.4-.2-.4 2.5c.7.3 2 .6 3.4.6 3.2 0 5.2-1.5 5.2-3.8 0-1.3-.8-2.3-2.5-3.1-1-.5-1.7-.9-1.7-1.4 0-.5.5-1 1.7-1 1 0 1.7.2 2.2.4l.3.1.5-2.4zM37 11h-2.3c-.7 0-1.3.2-1.6 1l-4.5 9.5h3.2l.6-1.7h3.9l.4 1.7H40L37 11zm-3.8 6.5l1.6-4.2.9 4.2h-2.5zM17 11l-3 7-.3-1.5c-.5-1.8-2.2-3.7-4-4.7l2.7 9.7h3.2l4.8-10.5H17z" fill="#fff"/><path d="M12 12.5c-.2-.7-.7-.9-1.4-.9H6.1L6 12c3.6.9 6 3 7 5.5l-1-5z" fill="#F9A533"/></svg>
+            </div>
+            {/* Mastercard */}
+            <div className="bg-white/[0.06] border border-white/[0.06] rounded px-2.5 py-1.5">
+              <svg viewBox="0 0 48 32" width="36" height="24" fill="none"><rect width="48" height="32" rx="4" fill="#252525"/><circle cx="19" cy="16" r="8" fill="#EB001B"/><circle cx="29" cy="16" r="8" fill="#F79E1B"/><path d="M24 9.8a8 8 0 010 12.4 8 8 0 000-12.4z" fill="#FF5F00"/></svg>
+            </div>
+            {/* Amex */}
+            <div className="bg-white/[0.06] border border-white/[0.06] rounded px-2.5 py-1.5">
+              <svg viewBox="0 0 48 32" width="36" height="24" fill="none"><rect width="48" height="32" rx="4" fill="#2E77BB"/><path d="M6 16l2.5-5h3l1.4 3.4L14.4 11h3L20 16l-2.5 5h-3l-1.4-3.4L11.6 21h-3L6 16zm18-5h8l1.5 2L35 11h7l-5 5 5 5h-7l-1.5-2-1.5 2h-8l5-5-5-5z" fill="#fff"/></svg>
+            </div>
+            {/* Discover */}
+            <div className="bg-white/[0.06] border border-white/[0.06] rounded px-2.5 py-1.5">
+              <svg viewBox="0 0 48 32" width="36" height="24" fill="none"><rect width="48" height="32" rx="4" fill="#fff"/><rect x=".5" y=".5" width="47" height="31" rx="3.5" stroke="#ddd"/><circle cx="28" cy="16" r="6" fill="#F48120"/><text x="8" y="19" fontFamily="Arial" fontSize="8" fontWeight="bold" fill="#333">DISC</text></svg>
+            </div>
+            {/* Apple Pay */}
+            <div className="bg-white/[0.06] border border-white/[0.06] rounded px-2.5 py-1.5">
+              <svg viewBox="0 0 48 32" width="36" height="24" fill="none"><rect width="48" height="32" rx="4" fill="#000"/><text x="24" y="19" textAnchor="middle" fontFamily="system-ui" fontSize="10" fontWeight="600" fill="#fff">Pay</text><path d="M15 10c-.8 0-1.7.5-2.2 1.1-.5.6-.8 1.3-.7 2.1.8 0 1.6-.4 2.1-1 .5-.6.8-1.3.8-2.2zm.1 2.5c-1.2 0-2.2.7-2.8.7-.6 0-1.5-.6-2.5-.6-1.3 0-2.5.7-3.1 1.9-1.3 2.3-.3 5.6 1 7.5.6.9 1.4 2 2.4 1.9 1-.1 1.3-.6 2.4-.6 1.1 0 1.4.6 2.5.6 1 0 1.7-1 2.3-1.9.7-1 1-2 1-2.1-1-.4-1.7-1.6-1.7-3 0-1.2.6-2.2 1.4-2.9-.8-1-1.9-1.5-2.9-1.5z" fill="#fff"/></svg>
+            </div>
+            {/* Google Pay */}
+            <div className="bg-white/[0.06] border border-white/[0.06] rounded px-2.5 py-1.5">
+              <svg viewBox="0 0 48 32" width="36" height="24" fill="none"><rect width="48" height="32" rx="4" fill="#fff"/><rect x=".5" y=".5" width="47" height="31" rx="3.5" stroke="#ddd"/><text x="28" y="20" fontFamily="system-ui" fontSize="10" fontWeight="500" fill="#5F6368">Pay</text><path d="M18.5 18v-3.5h2.3c.6 0 1.1.2 1.5.6.4.4.6.9.6 1.2s-.2.8-.6 1.2c-.4.4-.9.5-1.5.5h-2.3z" fill="#4285F4"/><circle cx="15" cy="16" r="3" fill="#EA4335"/><path d="M15 13l2.5 3H15v-3z" fill="#FBBC04"/><path d="M15 19l2.5-3H15v3z" fill="#34A853"/></svg>
+            </div>
+            {/* Cash App */}
+            <div className="bg-white/[0.06] border border-white/[0.06] rounded px-2.5 py-1.5">
+              <svg viewBox="0 0 48 32" width="36" height="24" fill="none"><rect width="48" height="32" rx="4" fill="#00D632"/><text x="24" y="20" textAnchor="middle" fontFamily="system-ui" fontSize="12" fontWeight="700" fill="#fff">$</text></svg>
+            </div>
           </div>
 
           <p className="text-white/40 text-sm">

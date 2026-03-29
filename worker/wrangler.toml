@@ -18,3 +18,13 @@ SQUARE_WEBHOOK_SIGNATURE_KEY = ""
 TRAINERIZE_API_KEY = ""
 TRAINERIZE_API_URL = "https://api.trainerize.com/v2"
 TRAINERIZE_TRAINER_ID = ""
+
+# Square Webhook Events to subscribe to:
+# (configure these in Square Dashboard > Developer > Webhooks > Add endpoint)
+#
+# subscription.updated    → renewal success, canceled, paused
+# payment.completed       → payment went through
+# payment.failed          → card declined
+# invoice.payment_made    → invoice paid
+# invoice.payment_failed  → invoice payment failed
+# invoice.updated         → invoice status changed (overdue, etc.)

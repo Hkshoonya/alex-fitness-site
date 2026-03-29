@@ -1,19 +1,24 @@
 // Square Payment Processing API
+// Supports: Card, Apple Pay, Google Pay, Cash App Pay
+// Auto-detects device and shows available payment methods
+
 import type { TrainingPlan } from '@/data/trainingPlans';
-import { getSquareConfig, SQUARE_API_BASE, SQUARE_WEB_SDK_URL } from '@/api/squareConfig';
+import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE, SQUARE_WEB_SDK_URL } from '@/api/squareConfig';
 
 const { applicationId: SQUARE_APPLICATION_ID, locationId: SQUARE_LOCATION_ID } = getSquareConfig();
 
-// Load Square Web Payments SDK
 let squarePayments: any = null;
+
+export interface PaymentMethods {
+  card: any;
+  applePay: any | null;
+  googlePay: any | null;
+  cashAppPay: any | null;
+}
 
 export const loadSquareSdk = (): Promise<void> => {
   return new Promise((resolve, reject) => {
-    if (window.Square) {
-      resolve();
-      return;
-    }
-
+    if (window.Square) { resolve(); return; }
     const script = document.createElement('script');
     script.src = SQUARE_WEB_SDK_URL;
     script.async = true;
@@ -24,12 +29,10 @@ export const loadSquareSdk = (): Promise<void> => {
 };
 
 export const initializeSquarePayments = async () => {
-  if (!window.Square) {
-    await loadSquareSdk();
-  }
+  if (!window.Square) await loadSquareSdk();
 
   if (!SQUARE_APPLICATION_ID) {
-    console.warn('Square Application ID not configured - using mock mode');
+    console.warn('Square Application ID not configured');
     return null;
   }
 
@@ -42,54 +45,118 @@ export const initializeSquarePayments = async () => {
   }
 };
 
+/**
+ * Initialize all available payment methods
+ * Auto-detects device capabilities:
+ * - Card: always available
+ * - Apple Pay: Safari on iOS/macOS with configured wallet
+ * - Google Pay: Chrome/Android with configured wallet
+ * - Cash App Pay: always available
+ */
+export const initializeAllPaymentMethods = async (
+  amountCents: number
+): Promise<PaymentMethods | null> => {
+  const payments = await initializeSquarePayments();
+  if (!payments) return null;
+
+  const methods: PaymentMethods = {
+    card: null,
+    applePay: null,
+    googlePay: null,
+    cashAppPay: null,
+  };
+
+  // Card — always available
+  try {
+    methods.card = await payments.card();
+  } catch (e) {
+    console.error('Card init failed:', e);
+  }
+
+  // Apple Pay — only on supported devices
+  try {
+    const paymentRequest = payments.paymentRequest({
+      countryCode: 'US',
+      currencyCode: 'USD',
+      total: { amount: String(amountCents), label: 'Alex Davis Fitness' },
+    });
+    methods.applePay = await payments.applePay(paymentRequest);
+  } catch {
+    // Apple Pay not available on this device — that's fine
+  }
+
+  // Google Pay — only on supported devices
+  try {
+    const paymentRequest = payments.paymentRequest({
+      countryCode: 'US',
+      currencyCode: 'USD',
+      total: { amount: String(amountCents), label: 'Alex Davis Fitness' },
+    });
+    methods.googlePay = await payments.googlePay(paymentRequest);
+  } catch {
+    // Google Pay not available on this device — that's fine
+  }
+
+  // Cash App Pay — available everywhere
+  try {
+    const paymentRequest = payments.paymentRequest({
+      countryCode: 'US',
+      currencyCode: 'USD',
+      total: { amount: String(amountCents), label: 'Alex Davis Fitness' },
+    });
+    methods.cashAppPay = await payments.cashAppPay(paymentRequest, {
+      redirectURL: window.location.href,
+      referenceId: `cashapp_${Date.now()}`,
+    });
+  } catch {
+    // Cash App not available — that's fine
+  }
+
+  return methods;
+};
+
 export const createCardPayment = async (
   plan: TrainingPlan,
   trainerId: 'alex1' | 'alex2',
   cardToken: string
 ): Promise<{ success: boolean; paymentId?: string; error?: string }> => {
-  // Mock mode for development
   if (!SQUARE_APPLICATION_ID) {
-    console.log('Mock payment processing...');
     await new Promise(resolve => setTimeout(resolve, 2000));
-    return {
-      success: true,
-      paymentId: `mock_payment_${Date.now()}`,
-    };
+    return { success: true, paymentId: `mock_payment_${Date.now()}` };
   }
 
   try {
     const response = await fetch(`${SQUARE_API_BASE}/payments`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getSquareHeaders(),
       body: JSON.stringify({
-        sourceId: cardToken,
-        amount: Math.round(plan.price * 100), // Convert to cents
-        currency: 'USD',
-        referenceId: plan.id,
+        source_id: cardToken,
+        idempotency_key: `pay_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        amount_money: {
+          amount: Math.round(plan.price * 100),
+          currency: 'USD',
+        },
+        location_id: SQUARE_LOCATION_ID,
+        reference_id: plan.id,
         note: `${plan.name} - ${trainerId}`,
+        autocomplete: true,
       }),
     });
 
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error || 'Payment failed');
+      throw new Error(data.errors?.[0]?.detail || 'Payment failed');
     }
 
-    return {
-      success: true,
-      paymentId: data.payment.id,
-    };
+    return { success: true, paymentId: data.payment.id };
   } catch (error) {
     console.error('Payment error:', error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Payment failed',
-    };
+    return { success: false, error: error instanceof Error ? error.message : 'Payment failed' };
   }
 };
 
-// Store purchase in localStorage for demo
+// Store purchase in localStorage
 export const storePurchase = (purchase: {
   planId: string;
   trainerId: 'alex1' | 'alex2';
@@ -100,33 +167,22 @@ export const storePurchase = (purchase: {
   validUntil: string;
 }) => {
   const purchases = JSON.parse(localStorage.getItem('purchases') || '[]');
-  purchases.push({
-    ...purchase,
-    id: `purchase_${Date.now()}`,
-  });
+  purchases.push({ ...purchase, id: `purchase_${Date.now()}` });
   localStorage.setItem('purchases', JSON.stringify(purchases));
   return purchase;
 };
 
-// Get user's purchases
-export const getPurchases = () => {
-  return JSON.parse(localStorage.getItem('purchases') || '[]');
-};
+export const getPurchases = () => JSON.parse(localStorage.getItem('purchases') || '[]');
 
-// Get available sessions from purchases
 export const getAvailableSessions = (trainerId?: 'alex1' | 'alex2') => {
-  const purchases = getPurchases();
   const now = new Date();
-
-  return purchases.filter((p: any) => {
+  return getPurchases().filter((p: any) => {
     if (trainerId && p.trainerId !== trainerId) return false;
     if (new Date(p.validUntil) < now) return false;
-    if (p.sessionsRemaining <= 0) return false;
-    return true;
+    return p.sessionsRemaining > 0;
   });
 };
 
-// Decrement sessions after booking
 export const useSession = (purchaseId: string) => {
   const purchases = getPurchases();
   const purchase = purchases.find((p: any) => p.id === purchaseId);
@@ -138,9 +194,6 @@ export const useSession = (purchaseId: string) => {
   return false;
 };
 
-// Declare global Square type
 declare global {
-  interface Window {
-    Square: any;
-  }
+  interface Window { Square: any; }
 }

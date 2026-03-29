@@ -5,7 +5,7 @@ import {
   refreshReviews,
   getReviewCacheStatus,
   getGoogleReviewsUrl,
-  isGoogleApiConfigured,
+
   type GoogleReview,
 } from '@/api/reviews';
 
@@ -238,11 +238,6 @@ export default function GoogleReviews() {
           See all reviews on Google Maps
           <ExternalLink size={14} />
         </a>
-        {!isGoogleApiConfigured() && (
-          <p className="text-white/20 text-xs mt-2">
-            Live sync available — set VITE_GOOGLE_PLACE_ID and VITE_GOOGLE_MAPS_API_KEY
-          </p>
-        )}
       </div>
     </div>
   );

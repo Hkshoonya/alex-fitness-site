@@ -170,7 +170,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
           </button>
           <div className="flex items-center gap-3">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-main.png" alt="Alex Davis Fitness" className="h-10 w-auto" />
+              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-10 w-auto" />
             </div>
             <span className="font-display font-bold text-xl tracking-tight text-white hidden sm:block">ALEX'S FITNESS</span>
           </div>
@@ -188,7 +188,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
         <div className="relative z-10 px-6 lg:px-[6vw] pt-24 pb-16 w-full">
           <div className="max-w-2xl">
             <p className="about-hero-label micro-label text-[#FF4D2E]/80 mb-6">EST. TEMPLE TERRACE, FL</p>
-            <h1 className="about-hero-headline headline-xl text-white text-5xl sm:text-6xl lg:text-7xl xl:text-8xl mb-6">
+            <h1 className="about-hero-headline headline-xl text-white text-4xl sm:text-6xl lg:text-7xl xl:text-8xl mb-6 break-words">
               MORE THAN<br />A GYM.
             </h1>
             <p className="about-hero-sub text-white/80 text-lg lg:text-xl max-w-lg mb-10">
@@ -215,7 +215,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
         <div className="relative z-10 max-w-5xl mx-auto">
           <div className="text-center mb-16">
             <p className="micro-label text-[#FF4D2E]/80 mb-4">THE JOURNEY</p>
-            <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-4">OUR STORY.</h2>
+            <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-4">OUR STORY.</h2>
             <p className="text-white/60 text-lg max-w-2xl mx-auto">
               From a D1 wrestling mat to a private studio in Temple Terrace — built one client at a time.
             </p>
@@ -254,7 +254,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
         <div className="max-w-6xl mx-auto studio-content">
           <div className="text-center mb-12">
             <p className="micro-label text-[#FF4D2E]/80 mb-4">THE SPACE</p>
-            <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-4">THE STUDIO.</h2>
+            <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-4">THE STUDIO.</h2>
             <p className="text-white/60 text-lg max-w-2xl mx-auto">
               A private, judgment-free training environment designed for one thing — your results.
             </p>
@@ -336,7 +336,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
         <div className="relative z-10 max-w-5xl mx-auto">
           <div className="text-center mb-12">
             <p className="micro-label text-[#FF4D2E]/80 mb-4">OUR PHILOSOPHY</p>
-            <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-4">WHY WE'RE DIFFERENT.</h2>
+            <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-4">WHY WE'RE DIFFERENT.</h2>
             <p className="text-white/60 text-lg max-w-2xl mx-auto">
               This isn't a franchise. It's a coach-owned studio built on 20 years of real experience.
             </p>
@@ -374,7 +374,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
             { num: '1-on-1', label: 'Every Session' },
           ].map((s, i) => (
             <div key={i}>
-              <p className="text-4xl sm:text-5xl font-bold text-[#FF4D2E] font-display">{s.num}</p>
+              <p className="text-3xl sm:text-5xl font-bold text-[#FF4D2E] font-display">{s.num}</p>
               <p className="text-white/50 text-sm mt-2 uppercase tracking-wider">{s.label}</p>
             </div>
           ))}
@@ -432,7 +432,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
           <div className="absolute inset-0 bg-black/70" />
         </div>
         <div className="relative z-10 px-6 lg:px-[6vw] w-full text-center">
-          <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-4">READY TO START?</h2>
+          <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-4">READY TO START?</h2>
           <p className="text-white/70 text-lg mb-10 max-w-xl mx-auto">
             Your first consultation is free. No pressure, no commitment — just a conversation about your goals.
           </p>
@@ -454,7 +454,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
         <div className="max-w-4xl mx-auto text-center">
           <div className="flex flex-col items-center gap-2 mb-2">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-main.png" alt="Alex Davis Fitness" className="h-14 w-auto" />
+              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-14 w-auto" />
             </div>
             <p className="font-display font-bold text-2xl text-white">ALEX'S FITNESS</p>
           </div>

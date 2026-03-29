@@ -156,50 +156,50 @@ export default function CoachSection({ onBookCall, onBookMeeting }: CoachSection
           </div>
 
           {/* Right: Content panel */}
-          <div className="bg-white/[0.04] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-8 lg:p-10">
+          <div className="bg-white/[0.04] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-5 sm:p-8 lg:p-10 overflow-hidden">
             <p className="coach-label micro-label text-[#FF4D2E]/80 mb-4">
               {coach.isHead ? 'MEET YOUR COACH' : 'MEET THE TEAM'}
             </p>
-            <h2 className="coach-headline headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-2">
+            <h2 className="coach-headline headline-xl text-white text-3xl sm:text-5xl lg:text-6xl mb-2 break-words">
               {coach.name.split(' ')[0].toUpperCase()}<br />{coach.name.split(' ').slice(1).join(' ').toUpperCase() || ''}.
             </h2>
-            <p className="text-white/50 text-sm mb-6">{coach.title}</p>
-            <p className="coach-sub text-white/80 text-lg mb-8">
+            <p className="text-white/50 text-sm mb-4 sm:mb-6">{coach.title}</p>
+            <p className="coach-sub text-white/80 text-base sm:text-lg mb-6 sm:mb-8">
               {coach.bio}
             </p>
 
             {/* Stats */}
-            <div className="grid grid-cols-3 gap-3 mb-8">
+            <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-6 sm:mb-8">
               {coach.stats.map((stat, i) => (
-                <div key={i} className="coach-stat bg-white/[0.06] backdrop-blur-sm border border-white/[0.06] rounded-xl p-5 text-center">
-                  <p className="text-3xl sm:text-4xl font-bold text-[#FF4D2E] font-display">{stat.value}</p>
-                  <p className="text-white/70 text-xs mt-1 uppercase tracking-wider">{stat.label}</p>
+                <div key={i} className="coach-stat bg-white/[0.06] backdrop-blur-sm border border-white/[0.06] rounded-xl p-3 sm:p-5 text-center">
+                  <p className="text-2xl sm:text-4xl font-bold text-[#FF4D2E] font-display">{stat.value}</p>
+                  <p className="text-white/70 text-[10px] sm:text-xs mt-1 uppercase tracking-wider">{stat.label}</p>
                 </div>
               ))}
             </div>
 
             {/* Credentials */}
-            <div className="space-y-3 mb-8">
+            <div className="space-y-2 sm:space-y-3 mb-6 sm:mb-8">
               {coach.credentials.map((cred, i) => (
-                <div key={i} className="coach-credential flex items-center gap-3 bg-white/[0.04] backdrop-blur-sm border border-white/[0.06] rounded-lg px-4 py-3">
-                  <div className="w-10 h-10 rounded-full bg-[#FF4D2E]/20 flex items-center justify-center flex-shrink-0">
-                    <CredentialIcon icon={cred.icon} />
+                <div key={i} className="coach-credential flex items-center gap-3 bg-white/[0.04] backdrop-blur-sm border border-white/[0.06] rounded-lg px-3 sm:px-4 py-2.5 sm:py-3">
+                  <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-[#FF4D2E]/20 flex items-center justify-center flex-shrink-0">
+                    <CredentialIcon icon={cred.icon} size={14} />
                   </div>
-                  <div>
-                    <p className="text-white text-sm font-semibold">{cred.title}</p>
-                    <p className="text-white/50 text-xs">{cred.subtitle}</p>
+                  <div className="min-w-0">
+                    <p className="text-white text-xs sm:text-sm font-semibold truncate">{cred.title}</p>
+                    <p className="text-white/50 text-[10px] sm:text-xs truncate">{cred.subtitle}</p>
                   </div>
                 </div>
               ))}
             </div>
 
             {/* CTAs */}
-            <div className="grid grid-cols-2 gap-3 coach-cta">
+            <div className="flex flex-col sm:grid sm:grid-cols-2 gap-3 coach-cta">
               <button onClick={onBookCall} className="btn-primary flex items-center gap-2 justify-center text-xs">
                 <Phone size={16} />
                 Book a Free Call
               </button>
-              <button onClick={onBookMeeting} className="bg-white/10 hover:bg-white/20 text-white px-6 py-4 rounded-full font-semibold text-xs uppercase tracking-wider transition-all flex items-center gap-2 justify-center">
+              <button onClick={onBookMeeting} className="bg-white/10 hover:bg-white/20 text-white px-4 sm:px-6 py-4 rounded-full font-semibold text-xs uppercase tracking-wider transition-all flex items-center gap-2 justify-center">
                 <Calendar size={16} />
                 Meet Me
               </button>

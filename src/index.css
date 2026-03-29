@@ -35,10 +35,12 @@
   }
   html {
     scroll-behavior: smooth;
+    overflow-x: hidden;
   }
   body {
     @apply bg-[#0B0B0D] text-white antialiased;
     font-family: 'Inter', sans-serif;
+    overflow-x: hidden;
   }
 }
 

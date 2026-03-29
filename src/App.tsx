@@ -32,6 +32,7 @@ gsap.registerPlugin(ScrollTrigger);
 function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bookingModalOpen, setBookingModalOpen] = useState(false);
+  const [bookNowModalOpen, setBookNowModalOpen] = useState(false);
   const [shopOpen, setShopOpen] = useState(false);
   const [postPurchaseOpen, setPostPurchaseOpen] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -305,7 +306,7 @@ function App() {
           {/* Logo */}
           <button onClick={() => scrollToSection('hero')} className="flex items-center gap-3 group">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-main.png" alt="Alex Davis Fitness" className="h-10 w-auto group-hover:scale-105 transition-transform" />
+              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-10 w-auto group-hover:scale-105 transition-transform" />
             </div>
             <span className="font-display font-bold text-xl tracking-tight text-white hidden sm:block">ALEX'S FITNESS</span>
           </button>
@@ -327,13 +328,13 @@ function App() {
             <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-sm text-white/80 hover:text-white transition-colors flex items-center gap-1">
               <Instagram size={16} />
             </a>
-            <button onClick={() => setBookingModalOpen(true)} className="btn-primary text-xs">
+            <button onClick={() => setBookNowModalOpen(true)} className="btn-primary text-xs">
               Book Now
             </button>
           </div>
 
           {/* Mobile menu button */}
-          <button 
+          <button
             className="lg:hidden text-white"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           >
@@ -352,7 +353,7 @@ function App() {
               <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-white/80 py-2 flex items-center gap-2">
                 <Instagram size={18} /> Follow on Instagram
               </a>
-              <button onClick={() => setBookingModalOpen(true)} className="btn-primary text-xs w-fit mt-2">Book Now</button>
+              <button onClick={() => { setBookNowModalOpen(true); setMobileMenuOpen(false); }} className="btn-primary text-xs w-fit mt-2">Book Now</button>
             </div>
           </div>
         )}
@@ -376,7 +377,7 @@ function App() {
             <p className="micro-label text-white/70 mb-6 hero-label">
               PERSONAL TRAINING • TEMPLE TERRACE
             </p>
-            <h1 className="headline-xl text-white text-5xl sm:text-6xl lg:text-7xl xl:text-8xl mb-6 hero-headline">
+            <h1 className="headline-xl text-white text-4xl sm:text-6xl lg:text-7xl xl:text-8xl mb-6 hero-headline break-words">
               BE THE BEST YOU.
             </h1>
             <p className="text-white/80 text-lg lg:text-xl max-w-lg mb-10 hero-subheadline">
@@ -415,7 +416,7 @@ function App() {
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">
           <div className="flex justify-end">
             <div className="max-w-xl text-right value-content">
-              <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-6">
+              <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-6">
                 STRONGER BODY,<br />STRONGER MIND.
               </h2>
               <p className="text-white/70 text-lg mb-8">
@@ -443,7 +444,7 @@ function App() {
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">
           <div className="grid lg:grid-cols-2 gap-12 items-center">
             <div className="plans-content">
-              <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-4">
+              <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-4">
                 TRAINING PLANS
               </h2>
               <p className="text-white/70 text-lg mb-8">
@@ -504,7 +505,7 @@ function App() {
 
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">
           <div className="max-w-xl studio-content">
-            <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-6">
+            <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-6">
               PRIVATE TRAINING STUDIO.
             </h2>
             <p className="text-white/70 text-lg mb-8">
@@ -523,7 +524,7 @@ function App() {
 
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full text-center">
           <div className="max-w-3xl mx-auto transformations-content">
-            <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-4">
+            <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-4">
               CLIENT TRANSFORMATIONS.
             </h2>
             <p className="text-white/70 text-lg mb-10">
@@ -556,7 +557,7 @@ function App() {
         <div className="max-w-5xl mx-auto">
           <div className="text-center mb-4">
             <p className="micro-label text-[#FF4D2E]/80 mb-4">CLIENT REVIEWS</p>
-            <h2 className="headline-xl text-white text-4xl sm:text-5xl mb-4">WHAT CLIENTS SAY</h2>
+            <h2 className="headline-xl text-white text-3xl sm:text-5xl break-words mb-4">WHAT CLIENTS SAY</h2>
             <p className="text-white/60 mb-12">Honest feedback from real sessions.</p>
           </div>
 
@@ -587,7 +588,7 @@ function App() {
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">
           <div className="max-w-2xl book-content">
             <p className="micro-label text-white/70 mb-6">READY WHEN YOU ARE</p>
-            <h2 className="headline-xl text-white text-4xl sm:text-5xl lg:text-6xl mb-6">
+            <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-6">
               LET'S GET STARTED.
             </h2>
             <p className="text-white/70 text-lg mb-10">
@@ -631,7 +632,7 @@ function App() {
       {/* Section 9: Location & Hours */}
       <section className="bg-[#6B6B6B] py-24 px-6 lg:px-[6vw]">
         <div className="max-w-6xl mx-auto">
-          <h2 className="headline-xl text-white text-4xl sm:text-5xl mb-12">LOCATION & HOURS</h2>
+          <h2 className="headline-xl text-white text-3xl sm:text-5xl break-words mb-12">LOCATION & HOURS</h2>
 
           <div className="grid lg:grid-cols-2 gap-12">
             {/* Map & Address */}
@@ -708,7 +709,7 @@ function App() {
         <div className="max-w-4xl mx-auto text-center">
           <div className="flex flex-col items-center gap-3 mb-4">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-main.png" alt="Alex Davis Fitness" className="h-16 w-auto" />
+              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-16 w-auto" />
             </div>
             <h2 className="font-display font-bold text-3xl sm:text-4xl text-white">ALEX'S FITNESS</h2>
           </div>
@@ -769,10 +770,17 @@ function App() {
         <Instagram size={16} />
       </a>
 
-      {/* Booking Modal */}
+      {/* Consultation Modal (all site buttons) */}
       <BookingModal
         isOpen={bookingModalOpen}
         onClose={() => setBookingModalOpen(false)}
+      />
+
+      {/* Book Now Modal (nav button — shows Session / Consultation choice) */}
+      <BookingModal
+        isOpen={bookNowModalOpen}
+        onClose={() => setBookNowModalOpen(false)}
+        showChoice
       />
 
       {/* Training Plans Shop */}

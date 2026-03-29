@@ -9,6 +9,7 @@ import {
 } from '@/data/trainingPlans';
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus } from '@/api/squareCatalog';
 import { initializeSquarePayments, createCardPayment, storePurchase } from '@/api/squarePayments';
+import { provisionNewClientWithPlan } from '@/api/trainerize';
 
 interface TrainingPlansShopProps {
   isOpen: boolean;
@@ -31,6 +32,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastSynced, setLastSynced] = useState<string | null>(null);
+  const [clientInfo, setClientInfo] = useState({ name: '', email: '', phone: '' });
 
   useEffect(() => {
     if (isOpen) {
@@ -81,6 +83,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     setSelectedTrainer(trainers[0]);
     setStep('browse');
     setError(null);
+    setClientInfo({ name: '', email: '', phone: '' });
   };
 
   const filteredPlans = selectedCategory === 'all'
@@ -147,7 +150,36 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
 
       setStep('success');
       if (onPurchaseComplete) onPurchaseComplete(selectedPlan, selectedTrainer);
-      setTimeout(() => { onClose(); resetState(); }, 3000);
+
+      // Provision client in Trainerize (fire-and-forget)
+      // Creates client account → generates ID + password → sends activation email → assigns plan
+      const nameParts = clientInfo.name.trim().split(' ');
+      provisionNewClientWithPlan(
+        {
+          email: clientInfo.email,
+          firstName: nameParts[0] || '',
+          lastName: nameParts.slice(1).join(' ') || '',
+          phone: clientInfo.phone,
+          tags: ['purchased', selectedPlan.category],
+        },
+        selectedPlan.name,
+        {
+          clientEmail: clientInfo.email,
+          amount: getCurrentPrice(),
+          currency: 'USD',
+          planName: selectedPlan.name,
+          paymentId,
+          date: new Date().toISOString(),
+        },
+        {
+          clientEmail: clientInfo.email,
+          planName: selectedPlan.name,
+          totalSessions: freq?.totalSessions || 1,
+          sessionsUsed: 0,
+          sessionsRemaining: freq?.totalSessions || 1,
+          validUntil: new Date(Date.now() + selectedPlan.planWeeks * 7 * 24 * 60 * 60 * 1000).toISOString(),
+        }
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Payment failed');
     } finally {
@@ -448,7 +480,26 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
               </div>
 
               <div className="space-y-4">
-                <div className="flex items-center gap-3 text-white/60 text-sm mb-4">
+                {/* Client info for Trainerize provisioning */}
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-white/60 text-sm mb-1.5">Full Name *</label>
+                    <input type="text" value={clientInfo.name} onChange={e => setClientInfo(p => ({ ...p, name: e.target.value }))} required placeholder="John Doe"
+                      className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] transition-colors" />
+                  </div>
+                  <div>
+                    <label className="block text-white/60 text-sm mb-1.5">Email *</label>
+                    <input type="email" value={clientInfo.email} onChange={e => setClientInfo(p => ({ ...p, email: e.target.value }))} required placeholder="john@example.com"
+                      className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] transition-colors" />
+                  </div>
+                  <div>
+                    <label className="block text-white/60 text-sm mb-1.5">Phone</label>
+                    <input type="tel" value={clientInfo.phone} onChange={e => setClientInfo(p => ({ ...p, phone: e.target.value }))} placeholder="(813) 421-0633"
+                      className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] transition-colors" />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 text-white/60 text-sm">
                   <Shield size={16} className="text-green-400" />
                   <span>Secure payment powered by Square</span>
                 </div>
@@ -472,7 +523,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
 
                 <button
                   onClick={handlePayment}
-                  disabled={isLoading}
+                  disabled={isLoading || !clientInfo.name || !clientInfo.email}
                   className="w-full btn-primary disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {isLoading ? (
@@ -509,7 +560,10 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                 <p className="text-white/60 text-sm">Amount Paid</p>
                 <p className="text-2xl font-bold text-white">{formatPrice(getCurrentPrice())}</p>
               </div>
-              <p className="text-white/50 text-sm">You can now book your sessions.</p>
+              <p className="text-white/50 text-sm mb-6">You can now book your sessions.</p>
+              <button onClick={() => { onClose(); resetState(); }} className="btn-primary text-sm">
+                Done
+              </button>
             </div>
           )}
         </div>

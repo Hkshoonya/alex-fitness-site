@@ -149,11 +149,6 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer }: 
 
     setIsSubmitting(false);
     setStep('success');
-
-    setTimeout(() => {
-      onClose();
-      resetState();
-    }, 3000);
   };
 
   const resetState = () => {
@@ -489,6 +484,9 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer }: 
               <p className="text-white/50 text-sm mt-4">
                 Confirmation emails have been sent.
               </p>
+              <button onClick={() => { onClose(); resetState(); }} className="btn-primary text-sm mt-6">
+                Done
+              </button>
             </div>
           )}
         </div>

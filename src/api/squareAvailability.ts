@@ -88,6 +88,9 @@ const BUSINESS_HOURS: Record<number, { open: string; close: string } | null> = {
 
 const DEFAULT_SLOT_INTERVAL = 30; // generate slots every 30 min
 
+// Trainerize sync — imported lazily to avoid circular deps
+import { syncNewClient, syncBooking } from '@/api/trainerize';
+
 // ===== API HELPERS =====
 
 function isConfigured(): boolean {
@@ -439,9 +442,10 @@ export async function createBooking(
     const existing = JSON.parse(localStorage.getItem('bookings') || '[]');
     existing.push(booking);
     localStorage.setItem('bookings', JSON.stringify(existing));
-
-    // Invalidate availability cache for this date
     localStorage.removeItem(AVAILABILITY_CACHE_KEY);
+
+    // Sync to Trainerize (fire-and-forget)
+    syncToTrainerize(customerInfo, startAt, duration, teamMemberId);
 
     return { success: true, bookingId };
   }
@@ -494,6 +498,9 @@ export async function createBooking(
     localStorage.setItem('bookings', JSON.stringify(existing));
     localStorage.removeItem(AVAILABILITY_CACHE_KEY);
 
+    // Sync to Trainerize (fire-and-forget)
+    syncToTrainerize(customerInfo, startAt, duration, teamMemberId);
+
     return { success: true, bookingId: data.booking.id };
   } catch (error) {
     return {
@@ -501,6 +508,44 @@ export async function createBooking(
       error: error instanceof Error ? error.message : 'Booking failed',
     };
   }
+}
+
+/**
+ * Sync booking to Trainerize — called automatically from createBooking
+ * Sends client + booking data so Trainerize calendar and client list stay in sync
+ */
+function syncToTrainerize(
+  customerInfo: { name: string; email: string; phone: string; goals?: string },
+  startAt: string,
+  duration: number,
+  teamMemberId: string
+) {
+  const nameParts = customerInfo.name.trim().split(' ');
+  const startDate = new Date(startAt);
+  const isVirtual = (customerInfo.goals || '').includes('[Virtual]');
+  const meetMatch = (customerInfo.goals || '').match(/Meet: (https:\/\/[^\s]+)/);
+
+  // Sync client
+  syncNewClient({
+    email: customerInfo.email,
+    firstName: nameParts[0] || '',
+    lastName: nameParts.slice(1).join(' ') || '',
+    phone: customerInfo.phone,
+    tags: ['website-booking'],
+    notes: customerInfo.goals?.replace(/\[.*?\]/g, '').trim(),
+  });
+
+  // Sync booking
+  syncBooking({
+    clientEmail: customerInfo.email,
+    date: startDate.toISOString().split('T')[0],
+    time: formatTime(startDate.getHours(), startDate.getMinutes()),
+    duration,
+    type: isVirtual ? 'virtual' : 'in-studio',
+    coachName: teamMemberId === 'alex-davis' ? 'Alex Davis' : teamMemberId,
+    service: `${duration} Min ${isVirtual ? 'Virtual' : 'In-Studio'} Session`,
+    meetLink: meetMatch?.[1],
+  });
 }
 
 /**

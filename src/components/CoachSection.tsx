@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Target, Dumbbell, Users, Phone, Calendar } from 'lucide-react';
 import { getTeamMembers, type TeamMember } from '@/api/squareAvailability';
+import { asset } from '@/lib/assets';
 
 interface CoachSectionProps {
   onBookCall: () => void;
@@ -12,7 +13,7 @@ const ALEX_DAVIS: CoachProfile = {
   id: 'alex-davis',
   name: 'Alex Davis',
   title: 'Head Coach & Founder',
-  image: '/images/alex-portrait.jpg',
+  image: asset('/images/alex-portrait.jpg'),
   bio: 'NASM-certified, former D1 athlete, and obsessed with helping busy people get stronger without living in the gym. We\'ll move well, lift smart, and build habits that stick.',
   stats: [
     { value: '20+', label: 'Years' },

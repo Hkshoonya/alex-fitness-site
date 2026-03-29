@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
+import { asset } from '@/lib/assets';
 import { 
   Menu, 
   X, 
@@ -306,7 +307,7 @@ function App() {
           {/* Logo */}
           <button onClick={() => scrollToSection('hero')} className="flex items-center gap-3 group">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-10 w-auto group-hover:scale-105 transition-transform" />
+              <img src={asset("/images/logo-circle.png")} alt="Alex Davis Fitness" className="h-10 w-auto group-hover:scale-105 transition-transform" />
             </div>
             <span className="font-display font-bold text-xl tracking-tight text-white hidden sm:block">ALEX'S FITNESS</span>
           </button>
@@ -364,7 +365,7 @@ function App() {
         {/* Background image */}
         <div className="absolute inset-0 hero-bg">
           <img 
-            src="/images/hero-lifting.jpg" 
+            src={asset("/images/hero-lifting.jpg")}
             alt="Athlete lifting weights" 
             className="w-full h-full object-cover"
           />
@@ -406,7 +407,7 @@ function App() {
       <section ref={valueRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0">
           <img 
-            src="/images/value-seated.jpg" 
+            src={asset("/images/value-seated.jpg")}
             alt="Athlete with dumbbell" 
             className="w-full h-full object-cover"
           />
@@ -434,7 +435,7 @@ function App() {
       <section id="plans" ref={plansRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0">
           <img 
-            src="/images/plans-dumbbells.jpg" 
+            src={asset("/images/plans-dumbbells.jpg")}
             alt="Athlete with dumbbells" 
             className="w-full h-full object-cover"
           />
@@ -496,7 +497,7 @@ function App() {
       <section id="studio" ref={studioRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0">
           <img 
-            src="/images/studio-interior.jpg" 
+            src={asset("/images/studio-interior.jpg")}
             alt="Alex's private training studio" 
             className="w-full h-full object-cover"
           />
@@ -564,7 +565,7 @@ function App() {
           {/* Real client success photo */}
           <div className="mb-12 rounded-xl overflow-hidden">
             <img
-              src="/images/alex-with-client.jpg"
+              src={asset("/images/alex-with-client.jpg")}
               alt="Alex with June 2024 Fitness Challenge Winner"
               className="w-full h-auto object-cover"
             />
@@ -578,7 +579,7 @@ function App() {
       <section id="book" ref={bookRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0">
           <img
-            src="/images/book-lifting.jpg"
+            src={asset("/images/book-lifting.jpg")}
             alt="Athlete lifting"
             className="w-full h-full object-cover"
           />
@@ -639,7 +640,7 @@ function App() {
             <div>
               <div className="bg-white/10 rounded-lg overflow-hidden mb-6">
                 <img 
-                  src="/images/map-static.jpg" 
+                  src={asset("/images/map-static.jpg")}
                   alt="Location map" 
                   className="w-full h-64 object-cover"
                 />
@@ -709,7 +710,7 @@ function App() {
         <div className="max-w-4xl mx-auto text-center">
           <div className="flex flex-col items-center gap-3 mb-4">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-16 w-auto" />
+              <img src={asset("/images/logo-circle.png")} alt="Alex Davis Fitness" className="h-16 w-auto" />
             </div>
             <h2 className="font-display font-bold text-3xl sm:text-4xl text-white">ALEX'S FITNESS</h2>
           </div>

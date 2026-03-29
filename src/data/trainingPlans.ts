@@ -1,3 +1,5 @@
+import { asset } from '@/lib/assets';
+
 export interface TrainingPlan {
   id: string;
   name: string;
@@ -32,7 +34,7 @@ export const trainers: Trainer[] = [
     id: 'alex1',
     name: 'Alex Davis',
     title: 'Head Trainer & Founder',
-    image: '/images/alex-portrait.jpg',
+    image: asset('/images/alex-portrait.jpg'),
     bio: 'NASM-certified personal trainer with 20+ years of experience. Former D1 collegiate athlete specializing in strength training and body transformation.',
     experience: '20+ Years',
     specialties: ['Strength Training', 'Body Transformation', 'Corrective Exercise', 'Nutrition Coaching'],
@@ -43,7 +45,7 @@ export const trainers: Trainer[] = [
     id: 'alex2',
     name: 'Alex Martinez',
     title: 'Associate Trainer',
-    image: '/images/coach-portrait.jpg',
+    image: asset('/images/coach-portrait.jpg'),
     bio: 'Certified personal trainer with 8+ years of experience. Specializes in HIIT, boxing, and functional fitness training.',
     experience: '8+ Years',
     specialties: ['HIIT', 'Boxing', 'Functional Fitness', 'Weight Loss'],

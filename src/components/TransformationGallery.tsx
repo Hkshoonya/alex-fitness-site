@@ -1,19 +1,20 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { asset } from '@/lib/assets';
 
 const transformations = [
-  '/images/transform-1.jpg',
-  '/images/transform-2.jpg',
-  '/images/transform-3.jpg',
-  '/images/transform-4.jpg',
-  '/images/transform-5.jpg',
-  '/images/transform-6.jpg',
-  '/images/transform-7.jpg',
-  '/images/transform-8.jpg',
-  '/images/transform-9.jpg',
-  '/images/transform-10.jpg',
-  '/images/transform-11.jpg',
-  '/images/transform-12.jpg',
+  asset('/images/transform-1.jpg'),
+  asset('/images/transform-2.jpg'),
+  asset('/images/transform-3.jpg'),
+  asset('/images/transform-4.jpg'),
+  asset('/images/transform-5.jpg'),
+  asset('/images/transform-6.jpg'),
+  asset('/images/transform-7.jpg'),
+  asset('/images/transform-8.jpg'),
+  asset('/images/transform-9.jpg'),
+  asset('/images/transform-10.jpg'),
+  asset('/images/transform-11.jpg'),
+  asset('/images/transform-12.jpg'),
 ];
 
 export default function TransformationGallery() {

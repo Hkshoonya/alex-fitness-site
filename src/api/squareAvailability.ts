@@ -1,6 +1,8 @@
 // Square Team & Calendar Availability Sync
 // Fetches team members, their schedules, and real-time availability from Square Bookings API
 
+import { asset } from '@/lib/assets';
+
 const SQUARE_ACCESS_TOKEN = import.meta.env.VITE_SQUARE_ACCESS_TOKEN || '';
 const SQUARE_LOCATION_ID = import.meta.env.VITE_SQUARE_LOCATION_ID || '';
 const SQUARE_API_BASE = 'https://connect.squareup.com/v2';
@@ -54,7 +56,7 @@ const FALLBACK_TEAM: TeamMember[] = [
     name: 'Alex Davis',
     role: 'head-coach',
     title: 'Head Coach & Founder',
-    image: '/images/alex-portrait.jpg',
+    image: asset('/images/alex-portrait.jpg'),
     specialties: ['Strength Training', 'Body Transformation', 'Corrective Exercise'],
   },
   {
@@ -62,7 +64,7 @@ const FALLBACK_TEAM: TeamMember[] = [
     name: 'Free Consultation',
     role: 'consultation',
     title: 'Free 30-min Assessment',
-    image: '/images/logo-circle.png',
+    image: asset('/images/logo-circle.png'),
     specialties: ['Goal Setting', 'Fitness Assessment', 'Program Planning'],
   },
   {
@@ -70,7 +72,7 @@ const FALLBACK_TEAM: TeamMember[] = [
     name: 'Alex Martinez',
     role: 'coach',
     title: 'Associate Trainer',
-    image: '/images/coach-portrait.jpg',
+    image: asset('/images/coach-portrait.jpg'),
     specialties: ['HIIT', 'Boxing', 'Functional Fitness'],
   },
 ];
@@ -150,7 +152,7 @@ async function fetchTeamFromSquare(): Promise<TeamMember[]> {
       name: `${m.given_name || ''} ${m.family_name || ''}`.trim(),
       role: m.is_owner ? 'head-coach' as const : 'coach' as const,
       title: m.is_owner ? 'Head Coach & Founder' : 'Trainer',
-      image: '/images/coach-portrait.jpg',
+      image: asset('/images/coach-portrait.jpg'),
       specialties: [],
       squareTeamMemberId: m.id,
     }));

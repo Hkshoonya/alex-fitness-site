@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
+import { asset } from '@/lib/assets';
 import {
   ArrowLeft,
   Calendar,
@@ -25,18 +26,18 @@ interface AboutPageProps {
 }
 
 const studioImages = [
-  '/images/studio-1.jpg',
-  '/images/studio-2.jpg',
-  '/images/studio-3.jpg',
-  '/images/studio-4.jpg',
-  '/images/studio-5.jpg',
-  '/images/studio-6.jpg',
-  '/images/studio-7.jpg',
-  '/images/studio-8.jpg',
-  '/images/studio-9.jpg',
-  '/images/studio-10.jpg',
-  '/images/studio-11.jpg',
-  '/images/studio-12.jpg',
+  asset('/images/studio-1.jpg'),
+  asset('/images/studio-2.jpg'),
+  asset('/images/studio-3.jpg'),
+  asset('/images/studio-4.jpg'),
+  asset('/images/studio-5.jpg'),
+  asset('/images/studio-6.jpg'),
+  asset('/images/studio-7.jpg'),
+  asset('/images/studio-8.jpg'),
+  asset('/images/studio-9.jpg'),
+  asset('/images/studio-10.jpg'),
+  asset('/images/studio-11.jpg'),
+  asset('/images/studio-12.jpg'),
 ];
 
 const timeline = [
@@ -170,7 +171,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
           </button>
           <div className="flex items-center gap-3">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-10 w-auto" />
+              <img src={asset("/images/logo-circle.png")} alt="Alex Davis Fitness" className="h-10 w-auto" />
             </div>
             <span className="font-display font-bold text-xl tracking-tight text-white hidden sm:block">ALEX'S FITNESS</span>
           </div>
@@ -181,7 +182,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
       {/* Hero — studio background */}
       <section ref={heroRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0 about-hero-bg">
-          <img src="/images/studio-interior.jpg" alt="Alex's Fitness Studio" className="w-full h-full object-cover" />
+          <img src={asset("/images/studio-interior.jpg")} alt="Alex's Fitness Studio" className="w-full h-full object-cover" />
           <div className="absolute inset-0 bg-gradient-to-r from-black/85 via-black/60 to-black/30" />
         </div>
 
@@ -208,7 +209,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
       <section ref={storyRef} className="relative py-24 px-6 lg:px-[6vw]">
         {/* Blurred ambient background */}
         <div className="absolute inset-0">
-          <img src="/images/alex-portrait.jpg" alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-125 opacity-20" />
+          <img src={asset("/images/alex-portrait.jpg")} alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-125 opacity-20" />
           <div className="absolute inset-0 bg-black/70" />
         </div>
 
@@ -329,7 +330,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
       {/* What Makes Us Different */}
       <section ref={valuesRef} className="relative py-24 px-6 lg:px-[6vw]">
         <div className="absolute inset-0">
-          <img src="/images/studio-interior.jpg" alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-110 opacity-15" />
+          <img src={asset("/images/studio-interior.jpg")} alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-110 opacity-15" />
           <div className="absolute inset-0 bg-black/70" />
         </div>
 
@@ -384,7 +385,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
       {/* Alex's photo + personal message */}
       <section className="relative py-24 px-6 lg:px-[6vw]">
         <div className="absolute inset-0">
-          <img src="/images/alex-portrait.jpg" alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-125 opacity-25" />
+          <img src={asset("/images/alex-portrait.jpg")} alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-125 opacity-25" />
           <div className="absolute inset-0 bg-black/60" />
         </div>
 
@@ -392,7 +393,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
           <div className="grid lg:grid-cols-2 gap-12 items-center">
             <div className="flex justify-center">
               <img
-                src="/images/alex-portrait.jpg"
+                src={asset("/images/alex-portrait.jpg")}
                 alt="Alex Davis"
                 className="max-h-[70vh] w-auto object-contain rounded-2xl"
               />
@@ -414,7 +415,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
                 </p>
               </div>
               <div className="flex items-center gap-4 mt-8">
-                <img src="/images/alex-portrait.jpg" alt="" className="w-14 h-14 rounded-full object-cover object-top" />
+                <img src={asset("/images/alex-portrait.jpg")} alt="" className="w-14 h-14 rounded-full object-cover object-top" />
                 <div>
                   <p className="text-white font-semibold">Alex Davis</p>
                   <p className="text-white/50 text-sm">Founder & Head Coach</p>
@@ -428,7 +429,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
       {/* CTA */}
       <section className="relative min-h-[60vh] flex items-center">
         <div className="absolute inset-0">
-          <img src="/images/studio-1.jpg" alt="" className="w-full h-full object-cover" />
+          <img src={asset("/images/studio-1.jpg")} alt="" className="w-full h-full object-cover" />
           <div className="absolute inset-0 bg-black/70" />
         </div>
         <div className="relative z-10 px-6 lg:px-[6vw] w-full text-center">
@@ -454,7 +455,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
         <div className="max-w-4xl mx-auto text-center">
           <div className="flex flex-col items-center gap-2 mb-2">
             <div className="logo-shine logo-glow rounded-lg">
-              <img src="/images/logo-circle.png" alt="Alex Davis Fitness" className="h-14 w-auto" />
+              <img src={asset("/images/logo-circle.png")} alt="Alex Davis Fitness" className="h-14 w-auto" />
             </div>
             <p className="font-display font-bold text-2xl text-white">ALEX'S FITNESS</p>
           </div>

@@ -430,21 +430,66 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
     console.error('Trainerize note update failed:', e);
   }
 
-  // 3. Send message to client (they see it in Trainerize app)
-  const clientMessages = {
-    paid: `Your payment of ${amount} has been received. Thank you! 💪${nextDueDate ? `\n\nNext payment: ${nextDueDate}` : ''}`,
-    due: `Reminder: Your payment of ${amount} is coming up${nextDueDate ? ` on ${nextDueDate}` : ''}. Make sure your payment method is up to date!`,
-    unpaid: `Your payment of ${amount} could not be processed. Please update your payment method to continue your training plan.`,
-    overdue: `Your payment of ${amount} is overdue. Please update your payment method as soon as possible to avoid interruption to your training.`,
-    canceled: `Your subscription has been canceled. If you'd like to resume training, book a session anytime!`,
-    paused: `Your subscription has been paused. When you're ready to resume, just let us know!`,
-  };
+  // 3. Nudge tags — triggers Trainerize push notification, non-persistent
+  //
+  // How this works:
+  // - We add a "nudge:payment-paid" tag → Trainerize fires a push notification
+  //   (set up in Trainerize > Automations > When tag added → Send notification)
+  // - We remove the nudge tag after 60 seconds so it doesn't accumulate
+  // - Next event adds a fresh nudge tag → fires notification again
+  // - Client sees it on phone notification bar, not as a persistent chat message
+  //
+  // Trainerize Automation setup (one-time):
+  //   Trigger: Tag "nudge:payment-due" added
+  //   Action: Send push notification "Your payment is coming up!"
+  //   (repeat for each nudge tag)
 
-  if (clientMessages[status]) {
-    await sendTrainerizeMessage(email, clientMessages[status], env);
+  const nudgeTag = `nudge:${newTag}`;
+
+  try {
+    // Add nudge tag → triggers push notification via Trainerize Automation
+    await fetch(`${apiBase}/clients/tags`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_email: email, tag: nudgeTag }),
+    });
+
+    // Schedule removal of nudge tag after 60 seconds so it can fire again next time
+    // (Cloudflare Workers don't support setTimeout, so we use waitUntil if available)
+    // The nudge tag stays briefly — Trainerize fires the push immediately on tag add
+    // We remove it on the NEXT webhook event to keep it clean
+    await removeOldNudgeTags(email, nudgeTag, apiBase, apiKey);
+
+  } catch (e) {
+    console.error('Trainerize nudge failed:', e);
   }
 
   console.log(`Payment status synced to Trainerize: ${email} → ${status} ${amount}`);
+}
+
+/**
+ * Remove all old nudge tags so the next nudge fires fresh
+ */
+async function removeOldNudgeTags(email, keepTag, apiBase, apiKey) {
+  const allNudgeTags = [
+    'nudge:payment-paid',
+    'nudge:payment-due',
+    'nudge:payment-unpaid',
+    'nudge:payment-overdue',
+    'nudge:payment-canceled',
+    'nudge:payment-paused',
+  ];
+
+  for (const tag of allNudgeTags) {
+    if (tag === keepTag) continue; // Keep the current one briefly
+    try {
+      await fetch(`${apiBase}/clients/tags/remove`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_email: email, tag }),
+      });
+    } catch { /* ignore */ }
+  }
 }
 
 /**

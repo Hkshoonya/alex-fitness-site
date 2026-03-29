@@ -736,8 +736,25 @@ function App() {
           </div>
 
           <p className="text-white/40 text-sm">
-            © {new Date().getFullYear()} Alex's Fitness Training. All rights reserved.
+            &copy; {new Date().getFullYear()} Alex's Fitness Training. All rights reserved.
           </p>
+
+          {/* Built By DocZeus */}
+          <div className="mt-8 pt-6 border-t border-white/5">
+            <a
+              href="https://github.com/Hkshoonya"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex flex-col items-center gap-2 text-white/20 hover:text-white/40 transition-colors group"
+            >
+              <span className="text-[10px] uppercase tracking-[0.2em]">Built by</span>
+              <svg viewBox="0 0 200 48" width="100" height="24" aria-label="DocZeus" className="opacity-40 group-hover:opacity-70 transition-opacity">
+                <rect x="2" y="8" width="32" height="32" rx="8" fill="none" stroke="#FF4D2E" strokeWidth="3"/>
+                <circle cx="18" cy="24" r="6" fill="#FF4D2E"/>
+                <text x="40" y="34" fontFamily="system-ui, -apple-system, sans-serif" fontSize="28" fontWeight="bold" fill="currentColor" letterSpacing="1">oczeus</text>
+              </svg>
+            </a>
+          </div>
         </div>
       </footer>
 

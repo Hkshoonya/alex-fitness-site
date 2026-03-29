@@ -1,5 +1,6 @@
-// Square Catalog Sync
-// Fetches training plans from Square catalog, caches daily, falls back to local data
+// Square Catalog — Fully Automatic Plan Discovery
+// Fetches ALL plans from Square catalog, no hardcoded IDs needed
+// Add/remove/reprice plans in Square Dashboard → website updates automatically
 
 import type { TrainingPlan } from '@/data/trainingPlans';
 import { fourWeekPlans, twelveWeekPlans, onlinePlans } from '@/data/trainingPlans';
@@ -13,139 +14,202 @@ interface CatalogCache {
   fetchedAt: string;
 }
 
-// Known Square catalog item IDs mapped to our plan IDs
-const SQUARE_ID_MAP: Record<string, string> = {
-  '4LBY7LMMLFNTQ7JBT5JB77UB': '4week-30min',
-  '89': '4week-60min',
-  '90': '4week-90min',
-  'JDIHBQ3BBI3GIAQXP7CA7CPL': '12week-30min',
-  '85': '12week-60min',
-  'Q2E6JC7H4QDUO6AKOBKOR2AJ': '12week-90min',
-  'LGZJ2MDG22SJNBDBTCI66ASJ': 'app-only',
-  '82': 'online-monthly',
-  '84': 'online-3month',
-};
-
-/**
- * Check if Square API is configured
- */
 export function isSquareCatalogConfigured(): boolean {
   return getSquareConfig().isConfigured;
 }
 
-/**
- * Check if cache is fresh
- */
 function isCacheFresh(): boolean {
   const raw = localStorage.getItem(CACHE_KEY);
   if (!raw) return false;
   try {
     const cache: CatalogCache = JSON.parse(raw);
     return (Date.now() - new Date(cache.fetchedAt).getTime()) < CACHE_DURATION_MS;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-/**
- * Get cached plans
- */
 function getCachedPlans(): TrainingPlan[] | null {
   const raw = localStorage.getItem(CACHE_KEY);
   if (!raw) return null;
   try {
-    const cache: CatalogCache = JSON.parse(raw);
-    return cache.plans;
-  } catch {
-    return null;
-  }
+    return (JSON.parse(raw) as CatalogCache).plans;
+  } catch { return null; }
 }
 
-/**
- * Save plans to cache
- */
 function cachePlans(plans: TrainingPlan[]): void {
-  const cache: CatalogCache = {
-    plans,
-    fetchedAt: new Date().toISOString(),
-  };
-  localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
+  localStorage.setItem(CACHE_KEY, JSON.stringify({ plans, fetchedAt: new Date().toISOString() }));
 }
 
-/**
- * Get the local fallback plans
- */
 function getLocalPlans(): TrainingPlan[] {
   return [...fourWeekPlans, ...twelveWeekPlans, ...onlinePlans];
 }
 
 /**
- * Fetch catalog from Square API and merge with local plan metadata
+ * Parse a Square catalog item into a TrainingPlan
+ * Reads the item name, description, variations (frequency/pricing), and product type
+ */
+function parseSquareItem(item: any): TrainingPlan | null {
+  const data = item.item_data;
+  if (!data) return null;
+
+  const name = data.name || '';
+  const description = data.description_plaintext || data.description || '';
+  const variations = data.variations || [];
+
+  // Determine category from name/product_type
+  const nameLower = name.toLowerCase();
+  let category: TrainingPlan['category'] = 'personal-4week';
+  let planWeeks = 4;
+  let duration = 60;
+
+  if (nameLower.includes('12 week') || nameLower.includes('12-week') || nameLower.includes('3 month')) {
+    category = 'personal-12week';
+    planWeeks = 12;
+  }
+  if (nameLower.includes('online') || nameLower.includes('custom online')) {
+    category = 'online';
+  }
+  if (nameLower.includes('app') && nameLower.includes('no coaching')) {
+    category = 'app';
+  }
+
+  // Parse duration from name
+  if (nameLower.includes('30 min') || nameLower.includes('30-min')) duration = 30;
+  else if (nameLower.includes('60 min') || nameLower.includes('60-min') || nameLower.includes('1 hour')) duration = 60;
+  else if (nameLower.includes('90 min') || nameLower.includes('90-min')) duration = 90;
+
+  // For online/app plans, duration is 0
+  if (category === 'online' || category === 'app') duration = 0;
+
+  // Parse variations into frequency options
+  const frequency: TrainingPlan['frequency'] = [];
+  let basePrice = 0;
+  let pricePerSession = 0;
+  let salePrice: number | undefined;
+  let originalPrice: number | undefined;
+
+  if (variations.length === 1) {
+    // Single variation — fixed price (online/app/single session)
+    const v = variations[0].item_variation_data || {};
+    const priceMoney = v.price_money || {};
+    basePrice = (priceMoney.amount || 0) / 100;
+
+    // Check for sale pricing
+    if (v.pricing_type === 'FIXED_PRICING' && basePrice > 0) {
+      // Check if there's a strikethrough/compare price in the name
+      const priceMatch = name.match(/\$(\d+)/);
+      if (priceMatch && parseInt(priceMatch[1]) > basePrice) {
+        originalPrice = parseInt(priceMatch[1]);
+        salePrice = basePrice;
+      }
+    }
+  } else if (variations.length > 1) {
+    // Multiple variations — frequency options (1x/week, 2x/week, etc.)
+    variations.forEach((v: any, idx: number) => {
+      const vData = v.item_variation_data || {};
+      const priceMoney = vData.price_money || {};
+      const totalPrice = (priceMoney.amount || 0) / 100;
+      const vName = (vData.name || '').toLowerCase();
+
+      // Parse frequency from variation name
+      let perWeek = idx + 1;
+      const freqMatch = vName.match(/(\d+)x/);
+      if (freqMatch) perWeek = parseInt(freqMatch[1]);
+
+      const totalSessions = perWeek * planWeeks;
+
+      frequency.push({ perWeek, totalSessions, totalPrice });
+    });
+
+    // Base price = first variation price
+    if (frequency.length > 0) {
+      basePrice = frequency[0].totalPrice;
+      const baseSessions = frequency[0].totalSessions;
+      pricePerSession = baseSessions > 0 ? Math.round(basePrice / baseSessions) : 0;
+    }
+  }
+
+  // If no frequency and no price, skip
+  if (basePrice === 0 && frequency.length === 0 && !salePrice) return null;
+
+  // Build features from description
+  const features: string[] = [];
+  if (duration > 0) features.push(`${duration}-minute sessions`);
+  if (planWeeks > 4) features.push(`Save per session vs ${4}-week plan`);
+  if (frequency.length > 0) features.push('Flexible scheduling (1-5x/week)');
+  features.push('Custom workout programming');
+  features.push('Form correction & technique coaching');
+  if (planWeeks >= 12) features.push('Progress tracking & check-ins');
+
+  // Generate stable ID from Square item ID
+  const id = `sq_${item.id}`;
+
+  return {
+    id,
+    name,
+    description,
+    duration,
+    planWeeks,
+    pricePerSession,
+    price: basePrice,
+    frequency,
+    category,
+    features,
+    squareItemId: item.id,
+    salePrice,
+    originalPrice,
+    popular: nameLower.includes('60 min') && planWeeks >= 12,
+  };
+}
+
+/**
+ * Fetch ALL catalog items from Square and convert to TrainingPlans
+ * No hardcoded IDs — discovers everything in the catalog
  */
 async function fetchFromSquare(): Promise<TrainingPlan[]> {
   if (!isSquareCatalogConfigured()) return [];
 
   try {
-    const response = await fetch(`${SQUARE_API_BASE}/catalog/list?types=ITEM`, {
-      headers: getSquareHeaders(),
+    let allItems: any[] = [];
+    let cursor: string | undefined;
+
+    // Paginate through all catalog items
+    do {
+      const url = `${SQUARE_API_BASE}/catalog/list?types=ITEM${cursor ? `&cursor=${cursor}` : ''}`;
+      const response = await fetch(url, { headers: getSquareHeaders() });
+
+      if (!response.ok) throw new Error(`Catalog API ${response.status}`);
+
+      const data = await response.json();
+      const items = data.objects || [];
+      allItems = [...allItems, ...items];
+      cursor = data.cursor;
+    } while (cursor);
+
+    // Parse each item into a TrainingPlan
+    const plans: TrainingPlan[] = [];
+    for (const item of allItems) {
+      // Skip non-sellable items
+      if (item.is_deleted) continue;
+
+      const plan = parseSquareItem(item);
+      if (plan) plans.push(plan);
+    }
+
+    // Sort: personal plans first (by weeks then duration), then online, then app
+    const categoryOrder: Record<string, number> = {
+      'personal-4week': 1,
+      'personal-12week': 2,
+      'online': 3,
+      'app': 4,
+    };
+
+    plans.sort((a, b) => {
+      const catDiff = (categoryOrder[a.category] || 99) - (categoryOrder[b.category] || 99);
+      if (catDiff !== 0) return catDiff;
+      return a.duration - b.duration;
     });
 
-    if (!response.ok) throw new Error(`Square API ${response.status}`);
-
-    const data = await response.json();
-    const items = data.objects || [];
-    const localPlans = getLocalPlans();
-
-    // Map Square items to our plan structure
-    const updatedPlans = localPlans.map(plan => {
-      // Find matching Square item
-      const squareEntry = Object.entries(SQUARE_ID_MAP).find(([, localId]) => localId === plan.id);
-      if (!squareEntry) return plan;
-
-      const [squareId] = squareEntry;
-      const squareItem = items.find((item: any) => item.id === squareId);
-      if (!squareItem) return plan;
-
-      // Extract variations (frequency options) with prices
-      const variations = squareItem.item_data?.variations || [];
-      if (variations.length === 0) return plan;
-
-      // Update frequency pricing from Square
-      const updatedFrequency = plan.frequency.map((freq, idx) => {
-        const variation = variations[idx];
-        if (variation?.item_variation_data?.price_money?.amount) {
-          return {
-            ...freq,
-            totalPrice: variation.item_variation_data.price_money.amount / 100,
-          };
-        }
-        return freq;
-      });
-
-      // For plans without frequency (online/app), update base price
-      if (plan.frequency.length === 0 && variations[0]?.item_variation_data?.price_money?.amount) {
-        const newPrice = variations[0].item_variation_data.price_money.amount / 100;
-        return {
-          ...plan,
-          price: newPrice,
-          salePrice: newPrice,
-        };
-      }
-
-      // Update per-session price if base price changed
-      const basePrice = updatedFrequency[0]?.totalPrice || plan.price;
-      const baseSessions = updatedFrequency[0]?.totalSessions || 1;
-      const newPerSession = Math.round(basePrice / baseSessions);
-
-      return {
-        ...plan,
-        price: basePrice,
-        pricePerSession: newPerSession > 0 ? newPerSession : plan.pricePerSession,
-        frequency: updatedFrequency,
-      };
-    });
-
-    return updatedPlans;
+    return plans;
   } catch (error) {
     console.error('Square catalog fetch failed:', error);
     return [];
@@ -153,16 +217,15 @@ async function fetchFromSquare(): Promise<TrainingPlan[]> {
 }
 
 /**
- * Main entry: Get training plans with daily sync
+ * Get training plans — auto-discovers from Square catalog
+ * Falls back to local hardcoded plans if API unavailable
  */
 export async function getTrainingPlans(): Promise<TrainingPlan[]> {
-  // Fresh cache? Use it
   if (isCacheFresh()) {
     const cached = getCachedPlans();
     if (cached && cached.length > 0) return cached;
   }
 
-  // Try Square API
   const squarePlans = await fetchFromSquare();
   if (squarePlans.length > 0) {
     cachePlans(squarePlans);
@@ -192,11 +255,7 @@ export function getCatalogCacheStatus(): { lastFetched: string | null; isStale: 
   try {
     const cache: CatalogCache = JSON.parse(raw);
     const age = Date.now() - new Date(cache.fetchedAt).getTime();
-    return {
-      lastFetched: cache.fetchedAt,
-      isStale: age >= CACHE_DURATION_MS,
-      isLive: isSquareCatalogConfigured(),
-    };
+    return { lastFetched: cache.fetchedAt, isStale: age >= CACHE_DURATION_MS, isLive: isSquareCatalogConfigured() };
   } catch {
     return { lastFetched: null, isStale: true, isLive: isSquareCatalogConfigured() };
   }

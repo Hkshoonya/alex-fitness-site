@@ -1,0 +1,519 @@
+import { useState, useEffect } from 'react';
+import { X, Check, ChevronRight, Clock, Calendar, User, CreditCard, Shield, Star, Tag, RefreshCw } from 'lucide-react';
+import {
+  trainers,
+  formatPrice,
+  getPriceRange,
+  type TrainingPlan,
+  type Trainer,
+} from '@/data/trainingPlans';
+import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus } from '@/api/squareCatalog';
+import { initializeSquarePayments, createCardPayment, storePurchase } from '@/api/squarePayments';
+
+interface TrainingPlansShopProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onPurchaseComplete?: (plan: TrainingPlan, trainer: Trainer) => void;
+}
+
+type CategoryFilter = 'all' | 'personal-4week' | 'personal-12week' | 'online' | 'app';
+
+export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete }: TrainingPlansShopProps) {
+  const [plans, setPlans] = useState<TrainingPlan[]>([]);
+  const [isLoadingPlans, setIsLoadingPlans] = useState(true);
+  const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>('all');
+  const [selectedPlan, setSelectedPlan] = useState<TrainingPlan | null>(null);
+  const [selectedFrequency, setSelectedFrequency] = useState<number>(0);
+  const [selectedTrainer, setSelectedTrainer] = useState<Trainer>(trainers[0]);
+  const [step, setStep] = useState<'browse' | 'configure' | 'trainer' | 'payment' | 'success'>('browse');
+  const [cardElement, setCardElement] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastSynced, setLastSynced] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+      loadPlans();
+      initializeSquareSdk();
+    } else {
+      document.body.style.overflow = 'unset';
+      resetState();
+    }
+    return () => { document.body.style.overflow = 'unset'; };
+  }, [isOpen]);
+
+  const loadPlans = async () => {
+    setIsLoadingPlans(true);
+    const data = await getTrainingPlans();
+    setPlans(data);
+    const status = getCatalogCacheStatus();
+    setLastSynced(status.lastFetched);
+    setIsLoadingPlans(false);
+  };
+
+  const handleRefreshPlans = async () => {
+    setIsRefreshing(true);
+    const data = await refreshCatalog();
+    setPlans(data);
+    const status = getCatalogCacheStatus();
+    setLastSynced(status.lastFetched);
+    setIsRefreshing(false);
+  };
+
+  const initializeSquareSdk = async () => {
+    try {
+      const payments = await initializeSquarePayments();
+      if (payments) {
+        const card = await payments.card();
+        await card.attach('#card-container');
+        setCardElement(card);
+      }
+    } catch {
+      console.log('Square SDK not available - using mock mode');
+    }
+  };
+
+  const resetState = () => {
+    setSelectedPlan(null);
+    setSelectedFrequency(0);
+    setSelectedTrainer(trainers[0]);
+    setStep('browse');
+    setError(null);
+  };
+
+  const filteredPlans = selectedCategory === 'all'
+    ? plans
+    : plans.filter(plan => plan.category === selectedCategory);
+
+  const handlePlanSelect = (plan: TrainingPlan) => {
+    setSelectedPlan(plan);
+    setSelectedFrequency(0);
+    if (plan.frequency.length > 0) {
+      setStep('configure');
+    } else {
+      setStep('trainer');
+    }
+  };
+
+  const handleFrequencyConfirm = () => {
+    setStep('trainer');
+  };
+
+  const handleTrainerSelect = (trainer: Trainer) => {
+    setSelectedTrainer(trainer);
+    setStep('payment');
+  };
+
+  const getCurrentPrice = (): number => {
+    if (!selectedPlan) return 0;
+    if (selectedPlan.frequency.length > 0) {
+      const freq = selectedPlan.frequency[selectedFrequency];
+      return Math.round(freq.totalPrice * selectedTrainer.priceMultiplier);
+    }
+    return selectedPlan.salePrice || selectedPlan.price;
+  };
+
+  const handlePayment = async () => {
+    if (!selectedPlan) return;
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      let paymentId: string;
+
+      if (cardElement) {
+        const result = await cardElement.tokenize();
+        if (result.status !== 'OK') throw new Error('Card tokenization failed');
+        const paymentResult = await createCardPayment(selectedPlan, selectedTrainer.id, result.token);
+        if (!paymentResult.success) throw new Error(paymentResult.error || 'Payment failed');
+        paymentId = paymentResult.paymentId!;
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        paymentId = `mock_payment_${Date.now()}`;
+      }
+
+      const freq = selectedPlan.frequency[selectedFrequency];
+      storePurchase({
+        planId: selectedPlan.id,
+        trainerId: selectedTrainer.id,
+        paymentId,
+        amount: getCurrentPrice(),
+        purchaseDate: new Date().toISOString(),
+        sessionsRemaining: freq?.totalSessions || 1,
+        validUntil: new Date(Date.now() + selectedPlan.planWeeks * 7 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+
+      setStep('success');
+      if (onPurchaseComplete) onPurchaseComplete(selectedPlan, selectedTrainer);
+      setTimeout(() => { onClose(); resetState(); }, 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Payment failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/90 backdrop-blur-sm" onClick={onClose} />
+
+      <div className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between p-6 border-b border-white/10">
+          <div>
+            <h2 className="text-2xl font-display font-bold text-white">
+              {step === 'browse' && 'Training Plans'}
+              {step === 'configure' && 'Choose Frequency'}
+              {step === 'trainer' && 'Choose Your Trainer'}
+              {step === 'payment' && 'Complete Purchase'}
+              {step === 'success' && 'Purchase Complete!'}
+            </h2>
+            {selectedPlan && step !== 'browse' && step !== 'success' && (
+              <p className="text-white/60 text-sm mt-1">{selectedPlan.name}</p>
+            )}
+          </div>
+          <button onClick={onClose} className="text-white/60 hover:text-white transition-colors">
+            <X size={24} />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+
+          {/* ===== BROWSE PLANS ===== */}
+          {step === 'browse' && (
+            <div>
+              {/* Category Filter + Sync */}
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex gap-2 overflow-x-auto pb-2">
+                  {[
+                    { id: 'all' as CategoryFilter, label: 'All Plans' },
+                    { id: 'personal-4week' as CategoryFilter, label: '4-Week' },
+                    { id: 'personal-12week' as CategoryFilter, label: '12-Week' },
+                    { id: 'online' as CategoryFilter, label: 'Online' },
+                    { id: 'app' as CategoryFilter, label: 'App' },
+                  ].map((cat) => (
+                    <button
+                      key={cat.id}
+                      onClick={() => setSelectedCategory(cat.id)}
+                      className={`px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-all ${
+                        selectedCategory === cat.id
+                          ? 'bg-[#FF4D2E] text-white'
+                          : 'bg-white/5 text-white/70 hover:bg-white/10'
+                      }`}
+                    >
+                      {cat.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Sync indicator */}
+                <div className="flex items-center gap-2 flex-shrink-0 ml-4">
+                  {lastSynced && (
+                    <span className="text-white/20 text-xs hidden sm:block">
+                      {new Date(lastSynced).toLocaleDateString()}
+                    </span>
+                  )}
+                  <button
+                    onClick={handleRefreshPlans}
+                    disabled={isRefreshing}
+                    title="Sync prices"
+                    className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/40 hover:text-white transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Info banner */}
+              <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4 mb-6">
+                <p className="text-white/70 text-sm">
+                  Choose your plan based on the duration of commitment and number of sessions per week. More training time = more muscle adaptation and more calories burned!
+                </p>
+              </div>
+
+              {/* Loading state */}
+              {isLoadingPlans ? (
+                <div className="flex items-center justify-center py-16">
+                  <div className="w-8 h-8 border-2 border-white/20 border-t-[#FF4D2E] rounded-full animate-spin" />
+                </div>
+              ) : (
+                /* Plans Grid */
+                <div className="grid md:grid-cols-2 gap-4">
+                  {filteredPlans.map((plan) => (
+                    <div
+                      key={plan.id}
+                      onClick={() => handlePlanSelect(plan)}
+                      className={`bg-white/5 border rounded-xl p-5 cursor-pointer hover:bg-white/[0.07] transition-all group relative ${
+                        plan.popular ? 'border-[#FF4D2E]/40' : 'border-white/10 hover:border-[#FF4D2E]/30'
+                      }`}
+                    >
+                      {plan.popular && (
+                        <div className="absolute -top-3 left-4 bg-[#FF4D2E] text-white text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1">
+                          <Star size={12} /> Most Popular
+                        </div>
+                      )}
+
+                      {plan.salePrice && plan.originalPrice && (
+                        <div className="absolute -top-3 right-4 bg-green-500 text-white text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1">
+                          <Tag size={12} /> Sale
+                        </div>
+                      )}
+
+                      <div className="flex justify-between items-start mb-3">
+                        <div className="flex-1 pr-4">
+                          <h3 className="text-white font-semibold group-hover:text-[#FF4D2E] transition-colors">
+                            {plan.name}
+                          </h3>
+                          <p className="text-white/50 text-sm mt-1">{plan.description}</p>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          {plan.salePrice && plan.originalPrice ? (
+                            <>
+                              <p className="text-white/40 text-sm line-through">{formatPrice(plan.originalPrice)}</p>
+                              <p className="text-2xl font-bold text-[#FF4D2E]">{formatPrice(plan.salePrice)}</p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xl font-bold text-white">{getPriceRange(plan)}</p>
+                              {plan.pricePerSession > 0 && (
+                                <p className="text-white/50 text-xs">${plan.pricePerSession}/session</p>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-4 text-white/50 text-sm mb-4">
+                        {plan.duration > 0 && (
+                          <span className="flex items-center gap-1">
+                            <Clock size={14} /> {plan.duration} min
+                          </span>
+                        )}
+                        <span className="flex items-center gap-1">
+                          <Calendar size={14} /> {plan.planWeeks} weeks
+                        </span>
+                        {plan.frequency.length > 0 && (
+                          <span>1-5x/week</span>
+                        )}
+                      </div>
+
+                      <ul className="space-y-1 mb-4">
+                        {plan.features.slice(0, 3).map((feature, i) => (
+                          <li key={i} className="text-white/60 text-sm flex items-center gap-2">
+                            <Check size={14} className="text-[#FF4D2E] flex-shrink-0" />
+                            {feature}
+                          </li>
+                        ))}
+                      </ul>
+
+                      <button className="w-full py-2.5 bg-white/10 hover:bg-[#FF4D2E] text-white rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2">
+                        Select Plan <ChevronRight size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ===== CONFIGURE FREQUENCY ===== */}
+          {step === 'configure' && selectedPlan && (
+            <div>
+              <p className="text-white/60 mb-6">How many times per week do you want to train?</p>
+
+              <div className="space-y-3 mb-8">
+                {selectedPlan.frequency.map((freq, idx) => (
+                  <button
+                    key={freq.perWeek}
+                    onClick={() => setSelectedFrequency(idx)}
+                    className={`w-full flex items-center justify-between p-5 rounded-xl border transition-all ${
+                      selectedFrequency === idx
+                        ? 'border-[#FF4D2E] bg-[#FF4D2E]/5'
+                        : 'border-white/10 bg-white/5 hover:border-white/20'
+                    }`}
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-bold ${
+                        selectedFrequency === idx ? 'bg-[#FF4D2E] text-white' : 'bg-white/10 text-white/70'
+                      }`}>
+                        {freq.perWeek}x
+                      </div>
+                      <div className="text-left">
+                        <p className="text-white font-medium">{freq.perWeek}x per week</p>
+                        <p className="text-white/50 text-sm">{freq.totalSessions} total sessions over {selectedPlan.planWeeks} weeks</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xl font-bold text-white">{formatPrice(freq.totalPrice)}</p>
+                      <p className="text-white/50 text-xs">${selectedPlan.pricePerSession}/session</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex gap-3">
+                <button onClick={() => setStep('browse')} className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-white rounded-lg transition-colors">
+                  Back
+                </button>
+                <button onClick={handleFrequencyConfirm} className="flex-[2] btn-primary">
+                  Continue — {formatPrice(selectedPlan.frequency[selectedFrequency].totalPrice)}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ===== SELECT TRAINER ===== */}
+          {step === 'trainer' && selectedPlan && (
+            <div>
+              <p className="text-white/60 mb-6">Choose who you want to train with:</p>
+
+              <div className="space-y-4">
+                {trainers.map((trainer) => (
+                  <div
+                    key={trainer.id}
+                    onClick={() => handleTrainerSelect(trainer)}
+                    className={`bg-white/5 border rounded-xl p-5 cursor-pointer transition-all hover:bg-white/[0.07] ${
+                      selectedTrainer.id === trainer.id
+                        ? 'border-[#FF4D2E] bg-[#FF4D2E]/5'
+                        : 'border-white/10 hover:border-white/20'
+                    }`}
+                  >
+                    <div className="flex gap-4">
+                      <img src={trainer.image} alt={trainer.name} className="w-20 h-20 rounded-lg object-cover" />
+                      <div className="flex-1">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h3 className="text-white font-semibold flex items-center gap-2">
+                              {trainer.name}
+                              {trainer.id === 'alex1' && (
+                                <span className="bg-[#FF4D2E] text-white text-xs px-2 py-0.5 rounded-full">Head Trainer</span>
+                              )}
+                            </h3>
+                            <p className="text-white/50 text-sm">{trainer.title}</p>
+                          </div>
+                          {trainer.discount > 0 && (
+                            <span className="text-green-400 text-sm">Save {trainer.discount}%</span>
+                          )}
+                        </div>
+                        <p className="text-white/60 text-sm mt-2 line-clamp-2">{trainer.bio}</p>
+                        <div className="flex flex-wrap gap-2 mt-3">
+                          {trainer.specialties.map((s) => (
+                            <span key={s} className="text-white/50 text-xs bg-white/5 px-2 py-1 rounded">{s}</span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <button onClick={() => selectedPlan.frequency.length > 0 ? setStep('configure') : setStep('browse')} className="mt-6 text-white/60 hover:text-white text-sm flex items-center gap-1">
+                ← Back
+              </button>
+            </div>
+          )}
+
+          {/* ===== PAYMENT ===== */}
+          {step === 'payment' && selectedPlan && (
+            <div>
+              <div className="bg-white/5 rounded-xl p-4 mb-6">
+                <h3 className="text-white font-medium mb-3">Order Summary</h3>
+                <div className="flex justify-between text-white/70 mb-2">
+                  <span>{selectedPlan.name}</span>
+                </div>
+                {selectedPlan.frequency.length > 0 && (
+                  <div className="flex justify-between text-white/70 mb-2">
+                    <span>{selectedPlan.frequency[selectedFrequency].perWeek}x/week — {selectedPlan.frequency[selectedFrequency].totalSessions} sessions</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-white/70 mb-2">
+                  <span className="flex items-center gap-2">
+                    <User size={14} /> Trainer: {selectedTrainer.name}
+                  </span>
+                  {selectedTrainer.discount > 0 && (
+                    <span className="text-green-400">-{selectedTrainer.discount}%</span>
+                  )}
+                </div>
+                <div className="border-t border-white/10 pt-2 mt-2">
+                  <div className="flex justify-between text-white font-semibold text-lg">
+                    <span>Total</span>
+                    <span>{formatPrice(getCurrentPrice())}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 text-white/60 text-sm mb-4">
+                  <Shield size={16} className="text-green-400" />
+                  <span>Secure payment powered by Square</span>
+                </div>
+
+                <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+                  <label className="text-white/60 text-sm mb-2 block">Card Information</label>
+                  <div id="card-container" className="min-h-[50px]">
+                    {!cardElement && (
+                      <div className="bg-white/5 rounded-lg p-4 text-center">
+                        <CreditCard className="mx-auto mb-2 text-white/40" size={32} />
+                        <p className="text-white/50 text-sm">Demo Mode - No real payment</p>
+                        <p className="text-white/30 text-xs">Click below to simulate purchase</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {error && (
+                  <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm">{error}</div>
+                )}
+
+                <button
+                  onClick={handlePayment}
+                  disabled={isLoading}
+                  className="w-full btn-primary disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isLoading ? (
+                    <>
+                      <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <CreditCard size={18} />
+                      Complete Purchase — {formatPrice(getCurrentPrice())}
+                    </>
+                  )}
+                </button>
+
+                <button onClick={() => setStep('trainer')} className="w-full text-white/60 hover:text-white text-sm py-2">
+                  ← Back to trainer selection
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ===== SUCCESS ===== */}
+          {step === 'success' && (
+            <div className="text-center py-8">
+              <div className="w-20 h-20 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
+                <Check className="text-green-400" size={40} />
+              </div>
+              <h3 className="text-xl font-semibold text-white mb-2">Purchase Successful!</h3>
+              <p className="text-white/70 mb-4">
+                Your {selectedPlan?.name} with {selectedTrainer?.name} is confirmed.
+              </p>
+              <div className="bg-white/5 rounded-lg p-4 mb-4 inline-block">
+                <p className="text-white/60 text-sm">Amount Paid</p>
+                <p className="text-2xl font-bold text-white">{formatPrice(getCurrentPrice())}</p>
+              </div>
+              <p className="text-white/50 text-sm">You can now book your sessions.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,8 +1,8 @@
 // Square Payment Processing API
 import type { TrainingPlan } from '@/data/trainingPlans';
+import { getSquareConfig, SQUARE_API_BASE, SQUARE_WEB_SDK_URL } from '@/api/squareConfig';
 
-const SQUARE_APPLICATION_ID = import.meta.env.VITE_SQUARE_APPLICATION_ID || '';
-const SQUARE_LOCATION_ID = import.meta.env.VITE_SQUARE_LOCATION_ID || '';
+const { applicationId: SQUARE_APPLICATION_ID, locationId: SQUARE_LOCATION_ID } = getSquareConfig();
 
 // Load Square Web Payments SDK
 let squarePayments: any = null;
@@ -15,7 +15,7 @@ export const loadSquareSdk = (): Promise<void> => {
     }
 
     const script = document.createElement('script');
-    script.src = 'https://web.squarecdn.com/v1/square.js';
+    script.src = SQUARE_WEB_SDK_URL;
     script.async = true;
     script.onload = () => resolve();
     script.onerror = () => reject(new Error('Failed to load Square SDK'));
@@ -58,7 +58,7 @@ export const createCardPayment = async (
   }
 
   try {
-    const response = await fetch('/api/square/payments', {
+    const response = await fetch(`${SQUARE_API_BASE}/payments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

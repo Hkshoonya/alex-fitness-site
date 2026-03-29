@@ -3,10 +3,7 @@
 
 import type { TrainingPlan } from '@/data/trainingPlans';
 import { fourWeekPlans, twelveWeekPlans, onlinePlans } from '@/data/trainingPlans';
-
-const SQUARE_ACCESS_TOKEN = import.meta.env.VITE_SQUARE_ACCESS_TOKEN || '';
-const SQUARE_LOCATION_ID = import.meta.env.VITE_SQUARE_LOCATION_ID || '';
-const SQUARE_API_BASE = 'https://connect.squareup.com/v2';
+import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE } from '@/api/squareConfig';
 
 const CACHE_KEY = 'alex_fitness_catalog';
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -33,7 +30,7 @@ const SQUARE_ID_MAP: Record<string, string> = {
  * Check if Square API is configured
  */
 export function isSquareCatalogConfigured(): boolean {
-  return !!(SQUARE_ACCESS_TOKEN && SQUARE_LOCATION_ID);
+  return getSquareConfig().isConfigured;
 }
 
 /**
@@ -90,11 +87,7 @@ async function fetchFromSquare(): Promise<TrainingPlan[]> {
 
   try {
     const response = await fetch(`${SQUARE_API_BASE}/catalog/list?types=ITEM`, {
-      headers: {
-        'Authorization': `Bearer ${SQUARE_ACCESS_TOKEN}`,
-        'Square-Version': '2024-01-18',
-        'Content-Type': 'application/json',
-      },
+      headers: getSquareHeaders(),
     });
 
     if (!response.ok) throw new Error(`Square API ${response.status}`);

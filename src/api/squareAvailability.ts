@@ -2,10 +2,9 @@
 // Fetches team members, their schedules, and real-time availability from Square Bookings API
 
 import { asset } from '@/lib/assets';
+import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE } from '@/api/squareConfig';
 
-const SQUARE_ACCESS_TOKEN = import.meta.env.VITE_SQUARE_ACCESS_TOKEN || '';
-const SQUARE_LOCATION_ID = import.meta.env.VITE_SQUARE_LOCATION_ID || '';
-const SQUARE_API_BASE = 'https://connect.squareup.com/v2';
+const { locationId: SQUARE_LOCATION_ID } = getSquareConfig();
 
 const TEAM_CACHE_KEY = 'alex_fitness_team';
 const AVAILABILITY_CACHE_KEY = 'alex_fitness_availability';
@@ -96,15 +95,11 @@ import { syncNewClient, syncBooking } from '@/api/trainerize';
 // ===== API HELPERS =====
 
 function isConfigured(): boolean {
-  return !!(SQUARE_ACCESS_TOKEN && SQUARE_LOCATION_ID);
+  return getSquareConfig().isConfigured;
 }
 
 function headers() {
-  return {
-    'Authorization': `Bearer ${SQUARE_ACCESS_TOKEN}`,
-    'Square-Version': '2024-01-18',
-    'Content-Type': 'application/json',
-  };
+  return getSquareHeaders();
 }
 
 function formatTime(hours: number, minutes: number): string {
@@ -255,7 +250,7 @@ async function fetchAvailabilityFromSquare(
           },
           location_id: SQUARE_LOCATION_ID,
           segment_filters: [{
-            service_variation_id: import.meta.env.VITE_SQUARE_SERVICE_ID || undefined,
+            service_variation_id: getSquareConfig().serviceId || undefined,
             team_member_id_filter: teamMemberId ? {
               any: [teamMemberId],
             } : undefined,
@@ -463,7 +458,7 @@ export async function createBooking(
           appointment_segments: [{
             duration_minutes: duration,
             team_member_id: teamMemberId,
-            service_variation_id: import.meta.env.VITE_SQUARE_SERVICE_ID || undefined,
+            service_variation_id: getSquareConfig().serviceId || undefined,
           }],
           customer_note: `Name: ${customerInfo.name}\nGoals: ${customerInfo.goals || 'Not specified'}`,
         },

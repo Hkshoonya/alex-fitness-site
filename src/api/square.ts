@@ -2,12 +2,9 @@
 // This module handles all interactions with Square API for booking management
 
 import type { Booking, BookingRequest, BookingResponse } from '@/types/booking';
+import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE } from '@/api/squareConfig';
 
-// Configuration - In production, these should be environment variables
-const SQUARE_API_BASE = 'https://connect.squareup.com/v2';
-const SQUARE_ACCESS_TOKEN = import.meta.env.VITE_SQUARE_ACCESS_TOKEN || '';
-const SQUARE_LOCATION_ID = import.meta.env.VITE_SQUARE_LOCATION_ID || '';
-const SQUARE_SERVICE_ID = import.meta.env.VITE_SQUARE_SERVICE_ID || '';
+const { locationId: SQUARE_LOCATION_ID, serviceId: SQUARE_SERVICE_ID } = getSquareConfig();
 
 // Business hours configuration
 const BUSINESS_HOURS = {
@@ -27,17 +24,10 @@ const CONSULTATION_DURATION = 30;
  * Check if Square API is configured
  */
 export const isSquareConfigured = (): boolean => {
-  return !!(SQUARE_ACCESS_TOKEN && SQUARE_LOCATION_ID);
+  return getSquareConfig().isConfigured;
 };
 
-/**
- * Get authorization headers for Square API
- */
-const getHeaders = () => ({
-  'Content-Type': 'application/json',
-  'Authorization': `Bearer ${SQUARE_ACCESS_TOKEN}`,
-  'Square-Version': '2024-01-18',
-});
+const getHeaders = () => getSquareHeaders();
 
 /**
  * Create a new booking in Square

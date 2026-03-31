@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alex Davis Fitness — Technical Showcase | Built by DocZeus</title>
+<style>
+  /* ===== RESET & BASE ===== */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg-deep: #06080d;
+    --bg-card: #0d1117;
+    --bg-card-alt: #111820;
+    --bg-code: #0b0f15;
+    --border: #1c2333;
+    --border-glow: #1a3a5c;
+    --text: #c9d1d9;
+    --text-dim: #6e7681;
+    --text-bright: #e6edf3;
+    --accent: #58a6ff;
+    --accent-dim: #1f6feb;
+    --green: #3fb950;
+    --green-dim: #238636;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #79c0ff;
+    --pink: #f778ba;
+    --gradient-hero: linear-gradient(135deg, #0d1117 0%, #0a1628 40%, #111820 100%);
+    --gradient-accent: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%);
+    --gradient-green: linear-gradient(135deg, #238636 0%, #3fb950 100%);
+    --gradient-orange: linear-gradient(135deg, #9e6a03 0%, #d29922 100%);
+    --gradient-red: linear-gradient(135deg, #da3633 0%, #f85149 100%);
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', Consolas, monospace;
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 4px 24px rgba(0,0,0,.4);
+    --shadow-glow: 0 0 40px rgba(88,166,255,.08);
+  }
+
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--font-sans);
+    background: var(--bg-deep);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ===== TYPOGRAPHY ===== */
+  h1, h2, h3, h4 { color: var(--text-bright); font-weight: 700; letter-spacing: -0.02em; }
+  h1 { font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.1; }
+  h2 { font-size: clamp(1.5rem, 3vw, 2.2rem); margin-bottom: 1rem; }
+  h3 { font-size: 1.25rem; margin-bottom: 0.75rem; }
+  p { color: var(--text); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--font-mono); font-size: 0.875em; }
+  strong { color: var(--text-bright); }
+
+  /* ===== LAYOUT ===== */
+  .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 80px 0; }
+
+  /* ===== NAV ===== */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(6,8,13,.85);
+    backdrop-filter: blur(16px) saturate(180%);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner {
+    max-width: 1200px; margin: 0 auto; padding: 0 24px;
+    display: flex; align-items: center; justify-content: space-between; height: 60px;
+  }
+  .nav-brand { font-weight: 700; font-size: 1rem; color: var(--text-bright); display: flex; align-items: center; gap: 10px; }
+  .nav-brand svg { width: 24px; height: 24px; }
+  .nav-links { display: flex; gap: 28px; list-style: none; }
+  .nav-links a { color: var(--text-dim); font-size: 0.875rem; font-weight: 500; transition: color .2s; }
+  .nav-links a:hover { color: var(--text-bright); text-decoration: none; }
+
+  /* ===== HERO ===== */
+  .hero {
+    min-height: 100vh; display: flex; align-items: center;
+    background: var(--gradient-hero);
+    position: relative; overflow: hidden;
+    padding-top: 60px;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; top: -50%; right: -20%;
+    width: 800px; height: 800px;
+    background: radial-gradient(circle, rgba(31,111,235,.12) 0%, transparent 70%);
+    animation: float 20s ease-in-out infinite;
+  }
+  .hero::after {
+    content: '';
+    position: absolute; bottom: -30%; left: -10%;
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(56,189,248,.08) 0%, transparent 70%);
+    animation: float 25s ease-in-out infinite reverse;
+  }
+  @keyframes float {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    33% { transform: translate(40px, -60px) scale(1.05); }
+    66% { transform: translate(-30px, 40px) scale(0.95); }
+  }
+  .hero-content { position: relative; z-index: 1; }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: rgba(31,111,235,.12); border: 1px solid rgba(31,111,235,.25);
+    padding: 6px 16px; border-radius: 50px; font-size: 0.8rem;
+    color: var(--accent); margin-bottom: 24px; font-weight: 500;
+  }
+  .hero-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+  .hero h1 { margin-bottom: 20px; }
+  .hero h1 .gradient-text {
+    background: var(--gradient-accent);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero-sub { font-size: 1.15rem; color: var(--text-dim); max-width: 640px; line-height: 1.7; margin-bottom: 40px; }
+
+  /* ===== STATS ROW ===== */
+  .stats-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 16px; margin-top: 48px;
+  }
+  .stat-card {
+    background: rgba(13,17,23,.6); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 20px; text-align: center;
+    transition: border-color .3s, transform .3s;
+  }
+  .stat-card:hover { border-color: var(--border-glow); transform: translateY(-2px); }
+  .stat-number { font-size: 2rem; font-weight: 800; color: var(--accent); }
+  .stat-number.green { color: var(--green); }
+  .stat-number.orange { color: var(--orange); }
+  .stat-number.purple { color: var(--purple); }
+  .stat-label { font-size: 0.8rem; color: var(--text-dim); margin-top: 4px; text-transform: uppercase; letter-spacing: .05em; }
+
+  /* ===== SECTION HEADERS ===== */
+  .section-label {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--accent); font-weight: 600; margin-bottom: 12px;
+  }
+  .section-label::before { content: ''; width: 20px; height: 2px; background: var(--accent); }
+
+  /* ===== PROBLEM CARDS ===== */
+  .problems-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 24px; margin-top: 32px;
+  }
+  .problem-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 32px;
+    position: relative; overflow: hidden;
+    transition: border-color .3s, box-shadow .3s;
+  }
+  .problem-card:hover { border-color: var(--border-glow); box-shadow: var(--shadow-glow); }
+  .problem-card .cost-badge {
+    position: absolute; top: 16px; right: 16px;
+    background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.25);
+    padding: 4px 12px; border-radius: 50px;
+    font-size: 0.75rem; color: var(--red); font-weight: 600;
+  }
+  .problem-card .difficulty {
+    display: flex; gap: 3px; margin-bottom: 16px;
+  }
+  .problem-card .difficulty .bar {
+    width: 24px; height: 4px; border-radius: 2px;
+    background: var(--border);
+  }
+  .problem-card .difficulty .bar.filled { background: var(--orange); }
+  .problem-card .difficulty .bar.filled.high { background: var(--red); }
+  .problem-card h3 { display: flex; align-items: center; gap: 10px; }
+  .problem-card h3 .icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; flex-shrink: 0;
+  }
+  .problem-card .problem-desc { color: var(--text-dim); font-size: 0.9rem; margin: 12px 0 16px; }
+  .problem-card .solution { font-size: 0.85rem; line-height: 1.6; }
+  .problem-card .solution strong { color: var(--green); }
+
+  /* ===== ARCHITECTURE ===== */
+  .arch-diagram {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 40px;
+    margin-top: 32px; overflow-x: auto;
+  }
+  .flow-container {
+    display: flex; align-items: stretch; justify-content: center;
+    gap: 0; min-width: 900px; flex-wrap: nowrap;
+  }
+  .flow-node {
+    flex: 0 0 auto; padding: 20px 24px;
+    border-radius: var(--radius-sm); text-align: center;
+    min-width: 140px; position: relative;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px;
+  }
+  .flow-node .node-icon { font-size: 1.5rem; }
+  .flow-node .node-label { font-size: 0.8rem; font-weight: 600; color: var(--text-bright); }
+  .flow-node .node-sub { font-size: 0.7rem; color: var(--text-dim); }
+  .flow-node.user { background: rgba(31,111,235,.1); border: 1px solid rgba(31,111,235,.25); }
+  .flow-node.frontend { background: rgba(188,140,255,.1); border: 1px solid rgba(188,140,255,.25); }
+  .flow-node.worker { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.25); }
+  .flow-node.square { background: rgba(63,185,80,.1); border: 1px solid rgba(63,185,80,.25); }
+  .flow-node.trainerize { background: rgba(247,120,186,.1); border: 1px solid rgba(247,120,186,.25); }
+  .flow-node.google { background: rgba(121,192,255,.1); border: 1px solid rgba(121,192,255,.25); }
+  .flow-arrow {
+    flex: 0 0 60px; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-size: 0.65rem; position: relative;
+    flex-direction: column; gap: 2px;
+  }
+  .flow-arrow .arrow-line {
+    width: 40px; height: 2px; background: var(--border-glow); position: relative;
+  }
+  .flow-arrow .arrow-line::after {
+    content: ''; position: absolute; right: -4px; top: -4px;
+    border: solid var(--border-glow); border-width: 0 2px 2px 0;
+    display: inline-block; padding: 3px; transform: rotate(-45deg);
+  }
+  .flow-arrow .arrow-label { font-family: var(--font-mono); white-space: nowrap; }
+
+  /* ===== CODE BLOCKS ===== */
+  .code-block {
+    background: var(--bg-code); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); overflow: hidden; margin: 16px 0;
+  }
+  .code-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: rgba(13,17,23,.8);
+    border-bottom: 1px solid var(--border); font-size: 0.75rem; color: var(--text-dim);
+  }
+  .code-header .file { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); }
+  .code-header .lang { background: rgba(88,166,255,.1); color: var(--accent); padding: 2px 8px; border-radius: 4px; }
+  .code-body {
+    padding: 16px 20px; font-family: var(--font-mono); font-size: 0.8rem;
+    line-height: 1.65; overflow-x: auto; color: var(--text);
+  }
+  .code-body .comment { color: var(--text-dim); font-style: italic; }
+  .code-body .keyword { color: var(--pink); }
+  .code-body .string { color: var(--cyan); }
+  .code-body .func { color: var(--purple); }
+  .code-body .const-val { color: var(--orange); }
+  .code-body .line-num { color: #333d4b; user-select: none; margin-right: 16px; display: inline-block; min-width: 24px; text-align: right; }
+
+  /* ===== INTEGRATION CARDS ===== */
+  .integration-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px; margin-top: 32px;
+  }
+  .integration-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 28px; position: relative;
+    transition: border-color .3s, box-shadow .3s;
+  }
+  .integration-card:hover { border-color: var(--border-glow); box-shadow: var(--shadow-glow); }
+  .integration-card .api-count {
+    position: absolute; top: 16px; right: 16px;
+    font-size: 0.7rem; color: var(--text-dim); font-family: var(--font-mono);
+  }
+  .integration-card .integration-icon {
+    width: 48px; height: 48px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.4rem; margin-bottom: 16px;
+  }
+  .integration-card h3 { font-size: 1.1rem; }
+  .integration-card p { font-size: 0.85rem; color: var(--text-dim); margin-top: 8px; }
+  .integration-card .endpoints {
+    list-style: none; margin-top: 16px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .integration-card .endpoints li {
+    font-size: 0.78rem; font-family: var(--font-mono); color: var(--text-dim);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .integration-card .endpoints li .method {
+    font-size: 0.65rem; font-weight: 700; padding: 2px 6px; border-radius: 3px;
+    text-transform: uppercase;
+  }
+  .method-get { background: rgba(63,185,80,.15); color: var(--green); }
+  .method-post { background: rgba(88,166,255,.15); color: var(--accent); }
+  .method-delete { background: rgba(248,81,73,.15); color: var(--red); }
+  .method-webhook { background: rgba(210,153,34,.15); color: var(--orange); }
+
+  /* ===== COST SECTION ===== */
+  .cost-comparison {
+    display: grid; grid-template-columns: 1fr auto 1fr; gap: 32px;
+    align-items: center; margin-top: 40px;
+  }
+  .cost-box {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 36px; text-align: center;
+  }
+  .cost-box.agency { border-color: rgba(248,81,73,.2); }
+  .cost-box.us { border-color: rgba(63,185,80,.25); box-shadow: 0 0 40px rgba(63,185,80,.06); }
+  .cost-box .cost-title { font-size: 0.85rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 16px; }
+  .cost-box .cost-amount { font-size: 3rem; font-weight: 800; }
+  .cost-box.agency .cost-amount { color: var(--red); }
+  .cost-box.us .cost-amount { color: var(--green); }
+  .cost-box .cost-sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 8px; }
+  .cost-vs {
+    font-size: 1.5rem; font-weight: 800; color: var(--text-dim);
+    text-align: center; text-transform: uppercase;
+  }
+  .cost-items { list-style: none; margin-top: 20px; text-align: left; }
+  .cost-items li {
+    font-size: 0.82rem; color: var(--text-dim); padding: 6px 0;
+    border-bottom: 1px solid var(--border); display: flex; justify-content: space-between;
+  }
+  .cost-items li span:last-child { color: var(--text-bright); font-weight: 600; font-family: var(--font-mono); }
+
+  /* ===== SAVINGS CALLOUT ===== */
+  .savings-callout {
+    background: linear-gradient(135deg, rgba(63,185,80,.08), rgba(63,185,80,.02));
+    border: 1px solid rgba(63,185,80,.2);
+    border-radius: var(--radius); padding: 32px 40px;
+    text-align: center; margin-top: 32px;
+  }
+  .savings-callout .savings-amount {
+    font-size: 2.5rem; font-weight: 800; color: var(--green);
+  }
+  .savings-callout p { color: var(--text-dim); margin-top: 8px; }
+
+  /* ===== TIMELINE ===== */
+  .timeline { margin-top: 32px; position: relative; padding-left: 32px; }
+  .timeline::before {
+    content: ''; position: absolute; left: 11px; top: 0; bottom: 0;
+    width: 2px; background: var(--border);
+  }
+  .timeline-item { position: relative; padding-bottom: 32px; }
+  .timeline-item:last-child { padding-bottom: 0; }
+  .timeline-item::before {
+    content: ''; position: absolute; left: -25px; top: 6px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent); border: 2px solid var(--bg-deep);
+  }
+  .timeline-item.done::before { background: var(--green); }
+  .timeline-item .t-time { font-size: 0.75rem; color: var(--text-dim); font-family: var(--font-mono); }
+  .timeline-item .t-title { font-weight: 600; color: var(--text-bright); margin-top: 4px; }
+  .timeline-item .t-desc { font-size: 0.85rem; color: var(--text-dim); margin-top: 4px; }
+
+  /* ===== TECH STACK PILLS ===== */
+  .tech-stack { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+  .tech-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    padding: 8px 16px; border-radius: 50px; font-size: 0.82rem; font-weight: 500;
+    color: var(--text); transition: border-color .3s;
+  }
+  .tech-pill:hover { border-color: var(--border-glow); }
+  .tech-pill .tech-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  /* ===== FEATURE LIST ===== */
+  .feature-list { list-style: none; margin-top: 20px; }
+  .feature-list li {
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+    display: flex; align-items: flex-start; gap: 12px; font-size: 0.9rem;
+  }
+  .feature-list li .check {
+    flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(63,185,80,.12); color: var(--green);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem; margin-top: 2px;
+  }
+
+  /* ===== FOOTER ===== */
+  footer {
+    border-top: 1px solid var(--border); padding: 40px 0;
+    text-align: center; color: var(--text-dim); font-size: 0.85rem;
+  }
+  footer a { color: var(--accent); }
+
+  /* ===== SCROLL ANIMATIONS ===== */
+  .reveal {
+    opacity: 0; transform: translateY(30px);
+    transition: opacity .6s ease, transform .6s ease;
+  }
+  .reveal.visible { opacity: 1; transform: translateY(0); }
+
+  /* ===== RESPONSIVE ===== */
+  @media (max-width: 768px) {
+    .nav-links { display: none; }
+    .flow-container { min-width: 600px; flex-wrap: wrap; }
+    .cost-comparison { grid-template-columns: 1fr; }
+    .cost-vs { display: none; }
+    .problems-grid { grid-template-columns: 1fr; }
+    section { padding: 48px 0; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* ===== SCROLL PROGRESS ===== */
+  .scroll-progress {
+    position: fixed; top: 60px; left: 0; height: 2px; z-index: 101;
+    background: var(--gradient-accent); width: 0%;
+    transition: width .1s linear;
+  }
+
+  /* ===== WEBHOOK FLOW DIAGRAM ===== */
+  .webhook-flow {
+    display: grid; grid-template-columns: 1fr 40px 1fr 40px 1fr;
+    gap: 0; align-items: center; margin: 32px 0;
+  }
+  .webhook-step {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 20px; text-align: center;
+  }
+  .webhook-step .step-num {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: rgba(88,166,255,.12); color: var(--accent);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 0.75rem; font-weight: 700; margin-bottom: 10px;
+  }
+  .webhook-step h4 { font-size: 0.9rem; }
+  .webhook-step p { font-size: 0.78rem; color: var(--text-dim); margin-top: 6px; }
+  .webhook-connector { text-align: center; color: var(--text-dim); font-size: 1.2rem; }
+
+  /* ===== GLOW LINE ===== */
+  .glow-divider {
+    height: 1px; width: 100%; margin: 0 auto;
+    background: linear-gradient(90deg, transparent, var(--accent-dim), transparent);
+    opacity: 0.4;
+  }
+</style>
+</head>
+<body>
+
+<!-- Scroll Progress -->
+<div class="scroll-progress" id="scrollProgress"></div>
+
+<!-- Navigation -->
+<nav>
+  <div class="nav-inner">
+    <div class="nav-brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+      DocZeus Engineering
+    </div>
+    <ul class="nav-links">
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#problems">Problems Solved</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#integrations">API Integrations</a></li>
+      <li><a href="#code">Code Deep-Dive</a></li>
+      <li><a href="#cost">Cost Analysis</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ===== HERO ===== -->
+<section class="hero" id="overview">
+  <div class="container hero-content">
+    <div class="hero-badge"><span class="dot"></span> In Development &middot; Fully Automated &middot; Zero Manual Ops</div>
+    <h1>Alex Davis Fitness<br><span class="gradient-text">Technical Showcase</span></h1>
+    <p class="hero-sub">
+      A full-stack fitness coaching platform with <strong>4 API integrations</strong>, a <strong>Cloudflare Worker webhook pipeline</strong>,
+      and <strong>real-time cross-platform sync</strong> between Square Payments and Trainerize &mdash; built to eliminate
+      every manual task in a personal trainer's business.
+    </p>
+
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-number">4</div>
+        <div class="stat-label">API Integrations</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number green">15+</div>
+        <div class="stat-label">API Endpoints Used</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number orange">6</div>
+        <div class="stat-label">Webhook Events Handled</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number purple">100%</div>
+        <div class="stat-label">Automated Operations</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">0</div>
+        <div class="stat-label">Servers to Manage</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="glow-divider"></div>
+
+<!-- ===== PROBLEMS SOLVED ===== -->
+<section id="problems">
+  <div class="container">
+    <div class="section-label">Hard Problems Solved</div>
+    <h2>What Makes This Technically Impressive</h2>
+    <p style="max-width:700px; color: var(--text-dim);">
+      Each of these problems typically requires dedicated SaaS tools, custom middleware, or expensive developer time to solve.
+      We solved all of them in a single, unified codebase.
+    </p>
+
+    <div class="problems-grid">
+
+      <!-- Problem 1 -->
+      <div class="problem-card reveal">
+        <div class="cost-badge">Agency: $3-5K</div>
+        <div class="difficulty">
+          <div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div>
+        </div>
+        <h3>
+          <span class="icon" style="background:rgba(210,153,34,.12); color:var(--orange);">&#9889;</span>
+          Real-Time Payment &rarr; Trainerize Sync
+        </h3>
+        <p class="problem-desc">
+          Square processes recurring payments automatically, but Trainerize has <em>zero native integration</em> with Square. The trainer had no way to know which clients have paid, failed, or lapsed.
+        </p>
+        <div class="solution">
+          <strong>Solution:</strong> Cloudflare Worker catches 6 Square webhook events (subscription.updated, payment.completed, payment.failed, invoice.*), cross-references the customer via Square Customers API, then writes <strong>tags + notes + nudge notifications</strong> to Trainerize &mdash; all in under 200ms.
+        </div>
+      </div>
+
+      <!-- Problem 2 -->
+      <div class="problem-card reveal">
+        <div class="cost-badge">Agency: $2-3K</div>
+        <div class="difficulty">
+          <div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div><div class="bar"></div>
+        </div>
+        <h3>
+          <span class="icon" style="background:rgba(63,185,80,.12); color:var(--green);">&#128176;</span>
+          Zero-Config Plan Discovery
+        </h3>
+        <p class="problem-desc">
+          Hardcoding training plans means every price change, new plan, or removed plan requires a code deployment. For a trainer managing their own site, this is a non-starter.
+        </p>
+        <div class="solution">
+          <strong>Solution:</strong> Auto-discovers ALL plans from Square Catalog API. Parses plan names, durations, and pricing variations using intelligent pattern matching. <strong>Add a plan in Square Dashboard &rarr; website updates automatically.</strong> 24-hour cache with graceful fallback to local data.
+        </div>
+      </div>
+
+      <!-- Problem 3 -->
+      <div class="problem-card reveal">
+        <div class="cost-badge">Agency: $1.5-2.5K</div>
+        <div class="difficulty">
+          <div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled"></div><div class="bar"></div>
+        </div>
+        <h3>
+          <span class="icon" style="background:rgba(188,140,255,.12); color:var(--purple);">&#128276;</span>
+          Non-Persistent Push Notifications
+        </h3>
+        <p class="problem-desc">
+          Trainerize doesn't support transient payment notifications. Sending a message creates a permanent chat entry, cluttering the client's conversation history with billing noise.
+        </p>
+        <div class="solution">
+          <strong>Solution:</strong> Invented a <strong>"nudge tag" pattern</strong> &mdash; Worker adds a temporary tag (e.g. <code>nudge:payment-due</code>), which fires a Trainerize Automation push notification, then the tag is cleaned up on the next webhook. Client sees a phone notification, not a persistent message.
+        </div>
+      </div>
+
+      <!-- Problem 4 -->
+      <div class="problem-card reveal">
+        <div class="cost-badge">Agency: $2-3K</div>
+        <div class="difficulty">
+          <div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div><div class="bar filled high"></div><div class="bar"></div>
+        </div>
+        <h3>
+          <span class="icon" style="background:rgba(88,166,255,.12); color:var(--accent);">&#128101;</span>
+          Automatic Client Provisioning
+        </h3>
+        <p class="problem-desc">
+          When a client purchases a plan, the trainer would normally have to manually create them in Trainerize, assign a program, set credits, and email login details. This takes 10-15 minutes per client.
+        </p>
+        <div class="solution">
+          <strong>Solution:</strong> One payment triggers a <strong>4-step provisioning pipeline</strong>: create client (auto-sends invite email) &rarr; assign training program &rarr; log payment record &rarr; set session credits with expiry. <strong>Zero manual work.</strong>
+        </div>
+      </div>
+
+      <!-- Problem 5 -->
+      <div class="problem-card reveal">
+        <div class="cost-badge">Agency: $1-1.5K</div>
+        <div class="difficulty">
+          <div class="bar filled"></div><div class="bar filled"></div><div class="bar filled"></div><div class="bar"></div><div class="bar"></div>
+        </div>
+        <h3>
+          <span class="icon" style="background:rgba(121,192,255,.12); color:var(--cyan);">&#127942;</span>
+          Challenges Auto-Sync & Expire
+        </h3>
+        <p class="problem-desc">
+          Fitness challenges need to appear on the website, disappear when ended, and be manageable from multiple sources (admin panel, Zapier, Trainerize webhooks).
+        </p>
+        <div class="solution">
+          <strong>Solution:</strong> Cloudflare KV stores challenges with full CRUD API. Frontend <strong>auto-filters by date</strong> &mdash; ended challenges vanish automatically. Admin interface at <code>?admin=challenges</code>, plus webhook endpoint for Zapier/Trainerize automation.
+        </div>
+      </div>
+
+      <!-- Problem 6 -->
+      <div class="problem-card reveal">
+        <div class="cost-badge">Agency: $0.5-1K</div>
+        <div class="difficulty">
+          <div class="bar filled"></div><div class="bar filled"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+        </div>
+        <h3>
+          <span class="icon" style="background:rgba(247,120,186,.12); color:var(--pink);">&#128268;</span>
+          Sandbox/Production Auto-Switch
+        </h3>
+        <p class="problem-desc">
+          Square has completely separate sandbox and production environments with different API URLs, SDKs, and credentials. Most implementations hardcode one or the other.
+        </p>
+        <div class="solution">
+          <strong>Solution:</strong> <strong>Single line of logic</strong> detects the environment: <code>IS_SANDBOX = appId.startsWith('sandbox-')</code>. API base URLs, Web Payments SDK, and all config auto-switches. Change one env variable to toggle environments.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="glow-divider"></div>
+
+<!-- ===== ARCHITECTURE ===== -->
+<section id="architecture">
+  <div class="container">
+    <div class="section-label">System Architecture</div>
+    <h2>End-to-End Data Flow</h2>
+    <p style="max-width:700px; color: var(--text-dim);">How a single purchase flows through 4 platforms automatically, from the user's click to their first training session.</p>
+
+    <!-- Purchase Flow -->
+    <h3 style="margin-top:40px; color:var(--accent); font-size:0.9rem; text-transform:uppercase; letter-spacing:.08em;">Purchase & Provisioning Flow</h3>
+    <div class="arch-diagram reveal">
+      <div class="flow-container">
+        <div class="flow-node user">
+          <div class="node-icon">&#128100;</div>
+          <div class="node-label">Client</div>
+          <div class="node-sub">Selects plan & pays</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">Card / Apple Pay</div>
+        </div>
+        <div class="flow-node frontend">
+          <div class="node-icon">&#9881;&#65039;</div>
+          <div class="node-label">React Frontend</div>
+          <div class="node-sub">Web Payments SDK</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">POST /payments</div>
+        </div>
+        <div class="flow-node square">
+          <div class="node-icon">&#9632;</div>
+          <div class="node-label">Square API</div>
+          <div class="node-sub">Payments + Catalog</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">On success</div>
+        </div>
+        <div class="flow-node trainerize">
+          <div class="node-icon">&#128170;</div>
+          <div class="node-label">Trainerize API</div>
+          <div class="node-sub">Create + Assign + Credits</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">Auto-email</div>
+        </div>
+        <div class="flow-node google">
+          <div class="node-icon">&#128231;</div>
+          <div class="node-label">Client Inbox</div>
+          <div class="node-sub">Login credentials</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Webhook Flow -->
+    <h3 style="margin-top:40px; color:var(--orange); font-size:0.9rem; text-transform:uppercase; letter-spacing:.08em;">Recurring Payment Webhook Flow</h3>
+    <div class="arch-diagram reveal">
+      <div class="flow-container">
+        <div class="flow-node square">
+          <div class="node-icon">&#9632;</div>
+          <div class="node-label">Square</div>
+          <div class="node-sub">Auto-charges card</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">Webhook POST</div>
+        </div>
+        <div class="flow-node worker">
+          <div class="node-icon">&#9889;</div>
+          <div class="node-label">CF Worker</div>
+          <div class="node-sub">Verify + Route</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">Tags + Notes</div>
+        </div>
+        <div class="flow-node trainerize">
+          <div class="node-icon">&#128170;</div>
+          <div class="node-label">Trainerize</div>
+          <div class="node-sub">Update client profile</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">Nudge tag</div>
+        </div>
+        <div class="flow-node trainerize">
+          <div class="node-icon">&#128276;</div>
+          <div class="node-label">Automations</div>
+          <div class="node-sub">Push notification</div>
+        </div>
+        <div class="flow-arrow">
+          <div class="arrow-line"></div>
+          <div class="arrow-label">Transient</div>
+        </div>
+        <div class="flow-node user">
+          <div class="node-icon">&#128241;</div>
+          <div class="node-label">Client Phone</div>
+          <div class="node-sub">Payment alert</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tech Stack -->
+    <h3 style="margin-top:48px;">Tech Stack</h3>
+    <div class="tech-stack">
+      <div class="tech-pill"><span class="tech-dot" style="background:#61dafb;"></span> React 19</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#3178c6;"></span> TypeScript</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#646cff;"></span> Vite</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#38bdf8;"></span> Tailwind CSS</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#88ce02;"></span> GSAP</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#f48024;"></span> Cloudflare Workers</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#2cbb52;"></span> Square API</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#ff6b9d;"></span> Trainerize API</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#4285f4;"></span> Google Calendar API</div>
+      <div class="tech-pill"><span class="tech-dot" style="background:#6c5ce7;"></span> Radix UI</div>
+    </div>
+  </div>
+</section>
+
+<div class="glow-divider"></div>
+
+<!-- ===== API INTEGRATIONS ===== -->
+<section id="integrations">
+  <div class="container">
+    <div class="section-label">API Integrations</div>
+    <h2>Four Platforms, One Codebase</h2>
+
+    <div class="integration-grid">
+
+      <!-- Square -->
+      <div class="integration-card reveal">
+        <div class="api-count">7 files &middot; 9 endpoints</div>
+        <div class="integration-icon" style="background:rgba(63,185,80,.12); color:var(--green);">&#9632;</div>
+        <h3>Square</h3>
+        <p>Payments, subscriptions, catalog, bookings, customers, messages &mdash; the financial backbone.</p>
+        <ul class="endpoints">
+          <li><span class="method method-get">GET</span> /v2/catalog/list &mdash; auto-discover plans</li>
+          <li><span class="method method-post">POST</span> /v2/payments &mdash; one-time charges</li>
+          <li><span class="method method-post">POST</span> /v2/subscriptions &mdash; recurring billing</li>
+          <li><span class="method method-post">POST</span> /v2/cards &mdash; store card on file</li>
+          <li><span class="method method-get">GET</span> /v2/bookings/availability &mdash; time slots</li>
+          <li><span class="method method-get">GET</span> /v2/team-members &mdash; coaches</li>
+          <li><span class="method method-post">POST</span> /v2/customers &mdash; create/find</li>
+          <li><span class="method method-webhook">WH</span> subscription.updated</li>
+          <li><span class="method method-webhook">WH</span> payment.completed / failed</li>
+        </ul>
+      </div>
+
+      <!-- Trainerize -->
+      <div class="integration-card reveal">
+        <div class="api-count">2 files &middot; 8 endpoints</div>
+        <div class="integration-icon" style="background:rgba(247,120,186,.12); color:var(--pink);">&#128170;</div>
+        <h3>Trainerize</h3>
+        <p>Client management, program assignment, credit tracking, tags, notes, and nudge notifications.</p>
+        <ul class="endpoints">
+          <li><span class="method method-post">POST</span> /v2/clients &mdash; create + auto-invite</li>
+          <li><span class="method method-post">POST</span> /v2/clients/programs &mdash; assign plan</li>
+          <li><span class="method method-post">POST</span> /v2/clients/credits &mdash; set sessions</li>
+          <li><span class="method method-post">POST</span> /v2/payments &mdash; log payment</li>
+          <li><span class="method method-post">POST</span> /v2/clients/tags &mdash; payment status</li>
+          <li><span class="method method-post">POST</span> /v2/clients/tags/remove &mdash; cleanup</li>
+          <li><span class="method method-post">POST</span> /v2/messages &mdash; confirm payment</li>
+          <li><span class="method method-get">GET</span> /v2/clients &mdash; fetch profile + notes</li>
+        </ul>
+      </div>
+
+      <!-- Cloudflare -->
+      <div class="integration-card reveal">
+        <div class="api-count">1 worker &middot; 3 routes</div>
+        <div class="integration-icon" style="background:rgba(210,153,34,.12); color:var(--orange);">&#9889;</div>
+        <h3>Cloudflare Workers</h3>
+        <p>Serverless webhook receiver and challenges API. HMAC signature verification, KV storage.</p>
+        <ul class="endpoints">
+          <li><span class="method method-post">POST</span> / &mdash; Square webhook receiver</li>
+          <li><span class="method method-get">GET</span> /challenges &mdash; list active</li>
+          <li><span class="method method-post">POST</span> /challenges &mdash; add challenge</li>
+          <li><span class="method method-delete">DEL</span> /challenges/:id &mdash; remove</li>
+        </ul>
+      </div>
+
+      <!-- Google -->
+      <div class="integration-card reveal">
+        <div class="api-count">2 files &middot; 3 endpoints</div>
+        <div class="integration-icon" style="background:rgba(121,192,255,.12); color:var(--cyan);">&#127758;</div>
+        <h3>Google APIs</h3>
+        <p>Calendar events, Google Meet virtual session links, and Maps/Places for reviews.</p>
+        <ul class="endpoints">
+          <li><span class="method method-post">POST</span> Calendar &mdash; create event + Meet link</li>
+          <li><span class="method method-get">GET</span> Places &mdash; fetch 5-star reviews</li>
+          <li><span class="method method-get">GET</span> Maps &mdash; embed location</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="glow-divider"></div>
+
+<!-- ===== CODE DEEP DIVE ===== -->
+<section id="code">
+  <div class="container">
+    <div class="section-label">Code Deep-Dive</div>
+    <h2>The Engineering Behind the Magic</h2>
+
+    <!-- Code Block 1: Auto-detect -->
+    <h3 style="margin-top:32px;">Sandbox/Production Auto-Detection</h3>
+    <p style="color:var(--text-dim); font-size:0.9rem; margin-bottom:8px;">One line. No config files. No build flags. Just reads the App ID prefix.</p>
+    <div class="code-block reveal">
+      <div class="code-header">
+        <span class="file">&#128196; squareConfig.ts</span>
+        <span class="lang">TypeScript</span>
+      </div>
+      <div class="code-body">
+<span class="line-num"> 1</span><span class="keyword">const</span> SQUARE_APPLICATION_ID = <span class="keyword">import</span>.meta.env.VITE_SQUARE_APPLICATION_ID;
+<span class="line-num"> 2</span>
+<span class="line-num"> 3</span><span class="comment">// Auto-detect environment from Application ID prefix</span>
+<span class="line-num"> 4</span><span class="keyword">export const</span> <span class="const-val">IS_SANDBOX</span> = SQUARE_APPLICATION_ID.<span class="func">startsWith</span>(<span class="string">'sandbox-'</span>);
+<span class="line-num"> 5</span>
+<span class="line-num"> 6</span><span class="keyword">export const</span> <span class="const-val">SQUARE_API_BASE</span> = <span class="const-val">IS_SANDBOX</span>
+<span class="line-num"> 7</span>  ? <span class="string">'https://connect.squareupsandbox.com/v2'</span>
+<span class="line-num"> 8</span>  : <span class="string">'https://connect.squareup.com/v2'</span>;
+<span class="line-num"> 9</span>
+<span class="line-num">10</span><span class="keyword">export const</span> <span class="const-val">SQUARE_WEB_SDK_URL</span> = <span class="const-val">IS_SANDBOX</span>
+<span class="line-num">11</span>  ? <span class="string">'https://sandbox.web.squarecdn.com/v1/square.js'</span>
+<span class="line-num">12</span>  : <span class="string">'https://web.squarecdn.com/v1/square.js'</span>;
+      </div>
+    </div>
+
+    <!-- Code Block 2: Plan parsing -->
+    <h3 style="margin-top:40px;">Intelligent Plan Auto-Discovery</h3>
+    <p style="color:var(--text-dim); font-size:0.9rem; margin-bottom:8px;">Parses plan names with regex, maps variations to frequency options, and handles sale pricing &mdash; all dynamically from Square Catalog.</p>
+    <div class="code-block reveal">
+      <div class="code-header">
+        <span class="file">&#128196; squareCatalog.ts</span>
+        <span class="lang">TypeScript</span>
+      </div>
+      <div class="code-body">
+<span class="line-num"> 1</span><span class="comment">// Determine category from plan name — no hardcoded IDs</span>
+<span class="line-num"> 2</span><span class="keyword">const</span> nameLower = name.<span class="func">toLowerCase</span>();
+<span class="line-num"> 3</span><span class="keyword">let</span> category = <span class="string">'personal-4week'</span>;
+<span class="line-num"> 4</span>
+<span class="line-num"> 5</span><span class="keyword">if</span> (nameLower.<span class="func">includes</span>(<span class="string">'12 week'</span>) || nameLower.<span class="func">includes</span>(<span class="string">'3 month'</span>))
+<span class="line-num"> 6</span>  category = <span class="string">'personal-12week'</span>;
+<span class="line-num"> 7</span><span class="keyword">if</span> (nameLower.<span class="func">includes</span>(<span class="string">'online'</span>))  category = <span class="string">'online'</span>;
+<span class="line-num"> 8</span><span class="keyword">if</span> (nameLower.<span class="func">includes</span>(<span class="string">'app'</span>) && nameLower.<span class="func">includes</span>(<span class="string">'no coaching'</span>))
+<span class="line-num"> 9</span>  category = <span class="string">'app'</span>;
+<span class="line-num">10</span>
+<span class="line-num">11</span><span class="comment">// Multi-variation items become frequency options (1x-5x/week)</span>
+<span class="line-num">12</span>variations.<span class="func">forEach</span>((v, idx) => {
+<span class="line-num">13</span>  <span class="keyword">const</span> freqMatch = vName.<span class="func">match</span>(<span class="const-val">/(\d+)x/</span>);
+<span class="line-num">14</span>  <span class="keyword">const</span> perWeek = freqMatch ? <span class="func">parseInt</span>(freqMatch[<span class="const-val">1</span>]) : idx + <span class="const-val">1</span>;
+<span class="line-num">15</span>  <span class="keyword">const</span> totalSessions = perWeek * planWeeks;
+<span class="line-num">16</span>  frequency.<span class="func">push</span>({ perWeek, totalSessions, totalPrice });
+<span class="line-num">17</span>});
+      </div>
+    </div>
+
+    <!-- Code Block 3: Payment sync -->
+    <h3 style="margin-top:40px;">Payment Status Sync &mdash; Tags, Notes, Nudges</h3>
+    <p style="color:var(--text-dim); font-size:0.9rem; margin-bottom:8px;">The core of the webhook handler. One function handles 6 payment states, updates 3 different Trainerize features, and manages tag lifecycle.</p>
+    <div class="code-block reveal">
+      <div class="code-header">
+        <span class="file">&#128196; webhook-handler.js</span>
+        <span class="lang">JavaScript &middot; Cloudflare Worker</span>
+      </div>
+      <div class="code-body">
+<span class="line-num"> 1</span><span class="keyword">async function</span> <span class="func">syncPaymentStatusToTrainerize</span>(squareCustomerId, status, eventData, env) {
+<span class="line-num"> 2</span>  <span class="keyword">const</span> email = <span class="keyword">await</span> <span class="func">getCustomerEmail</span>(squareCustomerId, env);
+<span class="line-num"> 3</span>
+<span class="line-num"> 4</span>  <span class="comment">// 1. TAGS — Alex sees payment status at a glance in client list</span>
+<span class="line-num"> 5</span>  <span class="keyword">for</span> (<span class="keyword">const</span> tag <span class="keyword">of</span> allPaymentTags)  <span class="comment">// Remove all old tags</span>
+<span class="line-num"> 6</span>    <span class="keyword">await</span> <span class="func">fetch</span>(<span class="string">`/clients/tags/remove`</span>, { body: { tag } });
+<span class="line-num"> 7</span>  <span class="keyword">await</span> <span class="func">fetch</span>(<span class="string">`/clients/tags`</span>, { body: { tag: <span class="string">`payment-${status}`</span> } });
+<span class="line-num"> 8</span>
+<span class="line-num"> 9</span>  <span class="comment">// 2. NOTES — detailed payment history (keeps last 10 entries)</span>
+<span class="line-num">10</span>  <span class="keyword">const</span> noteHistory = existingNotes.<span class="func">split</span>(<span class="string">'\n---\n'</span>).<span class="func">slice</span>(<span class="const-val">-9</span>);
+<span class="line-num">11</span>  noteHistory.<span class="func">push</span>(<span class="string">`&#10003; Payment received $99.00 on 3/29. Next due: 4/26`</span>);
+<span class="line-num">12</span>
+<span class="line-num">13</span>  <span class="comment">// 3. NUDGE — non-persistent push notification via Trainerize Automations</span>
+<span class="line-num">14</span>  <span class="keyword">await</span> <span class="func">fetch</span>(<span class="string">`/clients/tags`</span>, { body: { tag: <span class="string">`nudge:payment-${status}`</span> } });
+<span class="line-num">15</span>  <span class="keyword">await</span> <span class="func">removeOldNudgeTags</span>(email, nudgeTag);  <span class="comment">// Cleanup for next fire</span>
+<span class="line-num">16</span>}
+      </div>
+    </div>
+
+    <!-- Code Block 4: HMAC verification -->
+    <h3 style="margin-top:40px;">Webhook Security &mdash; HMAC-SHA256 Verification</h3>
+    <p style="color:var(--text-dim); font-size:0.9rem; margin-bottom:8px;">Every webhook is cryptographically verified using Square's signature key. Uses Web Crypto API (available in Workers) for zero dependencies.</p>
+    <div class="code-block reveal">
+      <div class="code-header">
+        <span class="file">&#128196; webhook-handler.js</span>
+        <span class="lang">JavaScript &middot; Web Crypto</span>
+      </div>
+      <div class="code-body">
+<span class="line-num">1</span><span class="keyword">async function</span> <span class="func">verifySignature</span>(body, signature, key) {
+<span class="line-num">2</span>  <span class="keyword">const</span> cryptoKey = <span class="keyword">await</span> crypto.subtle.<span class="func">importKey</span>(
+<span class="line-num">3</span>    <span class="string">'raw'</span>, keyData, { name: <span class="string">'HMAC'</span>, hash: <span class="string">'SHA-256'</span> }, <span class="const-val">false</span>, [<span class="string">'sign'</span>]
+<span class="line-num">4</span>  );
+<span class="line-num">5</span>  <span class="keyword">const</span> sig = <span class="keyword">await</span> crypto.subtle.<span class="func">sign</span>(<span class="string">'HMAC'</span>, cryptoKey, msgData);
+<span class="line-num">6</span>  <span class="keyword">const</span> computed = <span class="func">btoa</span>(String.<span class="func">fromCharCode</span>(...<span class="keyword">new</span> Uint8Array(sig)));
+<span class="line-num">7</span>  <span class="keyword">return</span> computed === signature;
+<span class="line-num">8</span>}
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<div class="glow-divider"></div>
+
+<!-- ===== COST ANALYSIS ===== -->
+<section id="cost">
+  <div class="container">
+    <div class="section-label">Cost Analysis</div>
+    <h2>What This Would Cost at an Agency</h2>
+    <p style="max-width:700px; color: var(--text-dim);">
+      Based on market rates for custom fitness platform development with multi-API integrations, webhook pipelines, and payment processing.
+    </p>
+
+    <div class="cost-comparison reveal">
+      <div class="cost-box agency">
+        <div class="cost-title">Agency / Freelancer Market Rate</div>
+        <div class="cost-amount">$12-15K</div>
+        <div class="cost-sub">8-12 weeks estimated timeline</div>
+        <ul class="cost-items">
+          <li><span>Custom fitness website (React)</span> <span>$3-4K</span></li>
+          <li><span>Square payment integration</span> <span>$2-3K</span></li>
+          <li><span>Trainerize API integration</span> <span>$2-3K</span></li>
+          <li><span>Webhook pipeline (CF Workers)</span> <span>$1.5-2K</span></li>
+          <li><span>Auto-discovery catalog system</span> <span>$1-1.5K</span></li>
+          <li><span>Nudge notification system</span> <span>$0.5-1K</span></li>
+          <li><span>Challenges system + KV storage</span> <span>$0.5-1K</span></li>
+          <li><span>Google Calendar/Meet/Reviews</span> <span>$0.5-1K</span></li>
+          <li><span>Booking system + availability</span> <span>$1-1.5K</span></li>
+          <li><span>Testing + deployment + docs</span> <span>$0.5-1K</span></li>
+        </ul>
+      </div>
+
+      <div class="cost-vs">VS</div>
+
+      <div class="cost-box us">
+        <div class="cost-title">What We Built This For</div>
+        <div class="cost-amount">$0*</div>
+        <div class="cost-sub">Built in 8 weeks with AI-assisted development</div>
+        <ul class="cost-items">
+          <li><span>Full React + TypeScript frontend</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>4 complete API integrations</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>Cloudflare Worker webhook pipeline</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>Auto-discovery catalog system</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>Payment status sync (tags/notes)</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>Non-persistent nudge notifications</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>Challenges with auto-expire</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>Google Meet + Calendar + Reviews</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>Sandbox/prod auto-detection</span> <span style="color:var(--green);">&#10003;</span></li>
+          <li><span>100% serverless (zero hosting costs)</span> <span style="color:var(--green);">&#10003;</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="savings-callout reveal">
+      <div class="savings-amount">$12,000 - $15,000+ saved</div>
+      <p>Same features. Production-grade code. Zero recurring server costs. Built in weeks, not months.</p>
+      <p style="margin-top:12px; font-size:0.8rem; color:var(--text-dim);">
+        * Development cost excludes API subscription fees (Square: free, Trainerize: existing plan, Cloudflare Workers: free tier).
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="glow-divider"></div>
+
+<!-- ===== DELIVERY TIMELINE ===== -->
+<section id="timeline">
+  <div class="container">
+    <div class="section-label">Delivery Timeline</div>
+    <h2>From Zero to This Level in 8 Weeks</h2>
+    <p style="color:var(--text-dim); font-size:0.9rem; margin-bottom:8px;">Not yet production &mdash; final testing, environment setup, and go-live deployment still ahead.</p>
+
+    <div class="timeline reveal">
+      <div class="timeline-item done">
+        <div class="t-time">Weeks 1-2</div>
+        <div class="t-title">Full website build + booking + payments + integrations</div>
+        <div class="t-desc">React frontend with GSAP animations, Square payment processing, Google Reviews, transformation gallery, coach profiles.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="t-time">Week 3</div>
+        <div class="t-title">Branding + deployment setup + mobile responsiveness</div>
+        <div class="t-desc">Custom logo integration, asset path fixes, base URL configuration, mobile layout polish.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="t-time">Weeks 4-5</div>
+        <div class="t-title">Trainerize sync + Book Now flow + client provisioning</div>
+        <div class="t-desc">Full client provisioning pipeline: create client, assign program, set credits, auto-email invite.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="t-time">Week 5</div>
+        <div class="t-title">Square sandbox auto-detection + webhook worker</div>
+        <div class="t-desc">Single-line environment detection. Cloudflare Worker for recurring payment sync with HMAC verification.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="t-time">Week 6</div>
+        <div class="t-title">Auto-discover plans from Square Catalog</div>
+        <div class="t-desc">Dynamic plan fetching with intelligent name parsing, multi-variation support, 24h cache, graceful fallback.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="t-time">Weeks 7-8</div>
+        <div class="t-title">Challenges system + payment status sync + nudge notifications</div>
+        <div class="t-desc">KV-backed challenges with auto-expire. Full payment status pipeline: tags, notes, nudge tag pattern for transient push notifications.</div>
+      </div>
+      <div class="timeline-item">
+        <div class="t-time">Upcoming</div>
+        <div class="t-title">Production deployment + final testing + go-live</div>
+        <div class="t-desc">End-to-end testing with live Square/Trainerize credentials, DNS configuration, and production launch.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="glow-divider"></div>
+
+<!-- ===== WHAT'S AUTOMATED ===== -->
+<section>
+  <div class="container">
+    <div class="section-label">Business Impact</div>
+    <h2>What the Trainer Never Has to Do Again</h2>
+    <p style="max-width:700px; color: var(--text-dim);">
+      Every one of these tasks was previously manual. Each one saves 5-15 minutes per client, per event. With 20+ clients, that's hours every week.
+    </p>
+
+    <ul class="feature-list reveal">
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Create clients in Trainerize after purchase</strong> &mdash; auto-created with login credentials emailed instantly</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Assign training programs to new clients</strong> &mdash; correct plan auto-assigned based on purchase</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Track who has paid and who hasn't</strong> &mdash; color-coded tags visible in Trainerize client list</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Chase late payments</strong> &mdash; automatic push notifications when payments are due, failed, or overdue</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Update session credits after renewal</strong> &mdash; webhook auto-adds sessions when subscription renews</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Update pricing on the website</strong> &mdash; change price in Square Dashboard, website auto-syncs within 24h</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Remove expired challenges from website</strong> &mdash; auto-filtered by end date, no cleanup needed</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Create Google Meet links for virtual sessions</strong> &mdash; auto-generated during booking flow</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Manage separate sandbox/production configs</strong> &mdash; auto-detected from a single env variable</div>
+      </li>
+      <li>
+        <span class="check">&#10003;</span>
+        <div><strong>Maintain servers or databases</strong> &mdash; fully serverless on Cloudflare Workers free tier</div>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<footer>
+  <div class="container">
+    <p style="margin-bottom:8px;">
+      <strong style="color:var(--text-bright);">Built by DocZeus</strong> &mdash; Full-Stack Engineering & AI-Assisted Development
+    </p>
+    <p>
+      Alex Davis Fitness &middot; React + TypeScript + Cloudflare Workers + Square + Trainerize + Google APIs
+    </p>
+    <p style="margin-top:12px; font-size:0.75rem; color:var(--text-dim);">
+      This showcase demonstrates the technical depth and automation capabilities delivered. Final production deployment pending.
+    </p>
+  </div>
+</footer>
+
+<!-- ===== SCROLL ANIMATIONS ===== -->
+<script>
+  // Scroll progress bar
+  window.addEventListener('scroll', () => {
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const scrolled = (window.scrollY / docHeight) * 100;
+    document.getElementById('scrollProgress').style.width = scrolled + '%';
+  });
+
+  // Reveal on scroll
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.1, rootMargin: '0px 0px -50px 0px' });
+
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+  // Smooth nav highlight
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('.nav-links a');
+
+  window.addEventListener('scroll', () => {
+    let current = '';
+    sections.forEach(section => {
+      const top = section.offsetTop - 100;
+      if (window.scrollY >= top) current = section.getAttribute('id');
+    });
+    navLinks.forEach(link => {
+      link.style.color = link.getAttribute('href') === '#' + current
+        ? '#e6edf3' : '';
+    });
+  });
+</script>
+</body>
+</html>

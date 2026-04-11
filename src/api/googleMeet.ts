@@ -59,18 +59,17 @@ export async function createMeetEvent(params: {
 /**
  * Mock meeting for demo mode
  */
-async function createMockMeeting(params: {
+async function createMockMeeting(_params: {
   startAt: string;
   attendeeEmail: string;
   attendeeName: string;
 }): Promise<{ success: boolean; meeting?: MeetingDetails; error?: string }> {
-  await new Promise(r => setTimeout(r, 500));
-
-  const mockId = Math.random().toString(36).slice(2, 12);
+  // Return a placeholder — Coach Alex will send the real meeting link via Trainerize message
+  console.warn('Google Meet not available — using placeholder. Coach will send link manually.');
   const meeting: MeetingDetails = {
-    meetLink: `https://meet.google.com/${mockId.slice(0, 3)}-${mockId.slice(3, 7)}-${mockId.slice(7)}`,
-    eventId: `mock_event_${Date.now()}`,
-    calendarLink: `https://calendar.google.com/calendar/event?eid=mock_${Date.now()}`,
+    meetLink: '',
+    eventId: `pending_${Date.now()}`,
+    calendarLink: '',
   };
 
   storeMeeting(params.startAt, meeting);

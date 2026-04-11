@@ -72,7 +72,7 @@ export function getSquareHeaders() {
 
   return {
     'Authorization': `Bearer ${SQUARE_ACCESS_TOKEN}`,
-    'Square-Version': '2024-01-18',
+    'Square-Version': '2025-01-23',
     'Content-Type': 'application/json',
   };
 }

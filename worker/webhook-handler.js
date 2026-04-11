@@ -797,15 +797,15 @@ function creditTagName(count) {
  * Remove all session credit tags from a user.
  */
 async function clearCreditTags(userId, env) {
-  // Clear both old format (credits:X) and new visual format
+  // Fire all delete calls in parallel instead of sequential (50→~5 seconds instead of ~25)
+  const deletes = [];
   for (let i = 0; i <= 24; i++) {
-    try {
-      await trainerizePost('/user/deleteTag', { userID: userId, userTag: `credits:${i}` }, env);
-    } catch { /* ignore */ }
-    try {
-      await trainerizePost('/user/deleteTag', { userID: userId, userTag: creditTagName(i) }, env);
-    } catch { /* ignore */ }
+    deletes.push(
+      trainerizePost('/user/deleteTag', { userID: userId, userTag: `credits:${i}` }, env).catch(() => {}),
+      trainerizePost('/user/deleteTag', { userID: userId, userTag: creditTagName(i) }, env).catch(() => {}),
+    );
   }
+  await Promise.all(deletes);
 }
 
 /**
@@ -1004,23 +1004,25 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
 
   // Determine if client is ACTIVE (has credits or active subscription) vs INACTIVE
   const creditRaw = await env.CHALLENGES_KV.get(`credits:${userId}`);
-  const hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0;
+  let hasCredits = false;
+  try { hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0; } catch { /* corrupted JSON */ }
   const isActiveClient = hasCredits || status === 'paid';
   const isLeavingClient = status === 'canceled' || status === 'paused';
 
   // Tag definitions — both old plain tags and new visual tags
   const allStatusTags = [
     'payment-paid', 'payment-due', 'payment-unpaid', 'payment-overdue', 'payment-canceled', 'payment-paused',
-    '✅ Paid', '⚠️ Payment Due', '🔴 Payment Overdue', '❌ Payment Failed', '⏸️ Paused',
-    '🟢 Active Client', '💤 Inactive',
+    '✅ Paid', '⚠️ Payment Due', '🔴 Payment Overdue', '❌ Payment Failed',
+    '⏸️ Paused', '💤 Cancelled', '💤 Inactive',
+    '🟢 Active Client',
   ];
   const visualTags = {
     paid: '✅ Paid',
     due: '⚠️ Payment Due',
     unpaid: '❌ Payment Failed',
     overdue: '🔴 Payment Overdue',
-    canceled: '💤 Inactive',
-    paused: '💤 Inactive',
+    canceled: '💤 Cancelled',
+    paused: '⏸️ Paused',
   };
   const newTag = visualTags[status] || `payment-${status}`;
 
@@ -1189,6 +1191,9 @@ async function syncBookingToTrainerize(booking, env) {
     userId = await createTrainerizeClient(customer, env);
     if (userId) {
       console.log(`Created Trainerize client: ${email} (userID: ${userId})`);
+    } else {
+      // Client creation failed — log it so the appointment notes explain who it's for
+      await logEvent('error', `Failed to create Trainerize client for ${email}`, { email, customerId }, env);
     }
   } else {
     // Client exists — update profile with latest Square details
@@ -1213,7 +1218,7 @@ async function syncBookingToTrainerize(booking, env) {
         startDate: tzStart,
         endDate: tzEnd,
         appointmentTypeID: TZ_SYNC_APPOINTMENT_TYPE,
-        notes: `${duration}min ${isVirtual ? 'virtual' : 'in-person'} session (Square #${booking.id.slice(0, 8)})${isVirtual ? '' : ' | ' + STUDIO_ADDRESS}`,
+        notes: `${duration}min ${isVirtual ? 'virtual' : 'in-person'} session (Square #${booking.id.slice(0, 8)})${!userId ? ` | Client: ${customer.given_name || ''} ${customer.family_name || ''} <${email}>` : ''}${isVirtual ? '' : ' | ' + STUDIO_ADDRESS}`,
         attendents: userId ? [{ userID: userId }] : [],
       }, env);
 
@@ -1344,14 +1349,27 @@ async function getCoachAvailability(date, duration, env) {
   const dateObj = new Date(`${date}T12:00:00Z`);
   const jan = new Date(dateObj.getFullYear(), 0, 1).getTimezoneOffset();
   const jul = new Date(dateObj.getFullYear(), 6, 1).getTimezoneOffset();
-  // Cloudflare Workers run in UTC, so we calculate DST manually for US Eastern:
-  // DST starts 2nd Sunday of March, ends 1st Sunday of November
+  // Cloudflare Workers run in UTC, so we calculate DST manually for US Eastern.
+  // DST starts 2nd Sunday of March at 2AM EST (7AM UTC), ends 1st Sunday of November at 2AM EDT (6AM UTC).
   const month = dateObj.getUTCMonth(); // 0-indexed
   const day = dateObj.getUTCDate();
   const dow = dateObj.getUTCDay(); // 0=Sun
-  const isDST = (month > 2 && month < 10) || // Apr-Oct always DST
-    (month === 2 && (day - dow) >= 8) ||       // March: after 2nd Sunday
-    (month === 10 && (day - dow) < 1);         // November: before 1st Sunday
+  const hour = dateObj.getUTCHours();
+
+  let isDST;
+  if (month > 2 && month < 10) {
+    isDST = true; // Apr-Oct always DST
+  } else if (month === 2) {
+    // March: DST starts 2nd Sunday at 7AM UTC (2AM EST)
+    const secondSunday = 14 - new Date(dateObj.getUTCFullYear(), 2, 1).getUTCDay();
+    isDST = day > secondSunday || (day === secondSunday && hour >= 7);
+  } else if (month === 10) {
+    // November: DST ends 1st Sunday at 6AM UTC (2AM EDT)
+    const firstSunday = 7 - new Date(dateObj.getUTCFullYear(), 10, 1).getUTCDay();
+    isDST = day < firstSunday || (day === firstSunday && hour < 6);
+  } else {
+    isDST = false; // Nov-Feb always EST
+  }
   const TZ_OFFSET_HOURS = isDST ? -4 : -5;
   const TZ_OFFSET_MS = TZ_OFFSET_HOURS * 3600000;
 
@@ -1607,7 +1625,7 @@ function getSquareApiBase(env) {
 function getSquareHeaders(env) {
   return {
     'Authorization': `Bearer ${env.SQUARE_ACCESS_TOKEN}`,
-    'Square-Version': '2024-01-18',
+    'Square-Version': '2025-01-23',
     'Content-Type': 'application/json',
   };
 }
@@ -1888,7 +1906,8 @@ async function syncTrainerizeAppointmentsToSquare(env) {
     for (const apt of appointments) {
       // Skip appointments that came FROM Square (avoid loop)
       // Catches all note patterns: "Square #abc", "synced from Square", "Square sync"
-      if ((apt.notes || '').toLowerCase().includes('square')) continue;
+      // Skip appointments synced FROM Square (check for Square booking ID pattern)
+      if ((apt.notes || '').includes('Square #') || (apt.notes || '').includes('synced from Square') || (apt.notes || '').includes('Square sync')) continue;
 
       // Skip if already synced to Square
       const syncKey = `tz-sq-sync:${apt.id}`;
@@ -2014,10 +2033,10 @@ async function deductCreditsForCompletedSessions(env) {
   if (!isTrainerizeConfigured(env)) return;
 
   const now = new Date();
-  // Check appointments from the past 24 hours (catch any we missed)
-  const dayAgo = new Date(now.getTime() - 24 * 3600000);
+  // Check appointments from the past 48 hours (covers downtime/deploy gaps)
+  const lookback = new Date(now.getTime() - 48 * 3600000);
 
-  const tzStart = dayAgo.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+  const tzStart = lookback.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
   const tzEnd = now.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
 
   try {
@@ -2043,61 +2062,61 @@ async function deductCreditsForCompletedSessions(env) {
       const countedKey = `session-counted:${apt.id}`;
       if (await env.CHALLENGES_KV.get(countedKey)) continue;
 
-      // Find the client attendee
-      const attendee = apt.attendents?.[0];
-      if (!attendee?.userID) continue;
+      // Process ALL attendees (handles group sessions, not just first)
+      const attendees = apt.attendents || [];
+      if (attendees.length === 0) continue;
 
-      // Check if client has credits
-      const creditRaw = await env.CHALLENGES_KV.get(`credits:${attendee.userID}`);
-      const hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0;
-
-      if (!hasCredits) {
-        // No credits → auto-invoice this session (pay-per-session client)
-        const sessionDate = (apt.startDateTime || apt.startDate || '').split(' ')[0];
-        const startMs = new Date((apt.startDate || apt.startDateTime).replace(' ', 'T') + 'Z').getTime();
-        const endMs = new Date((apt.endDate || apt.endDateTime).replace(' ', 'T') + 'Z').getTime();
-        const durationMin = Math.round((endMs - startMs) / 60000) || 60;
-        const attName = `${attendee.firstName || ''} ${attendee.lastName || ''}`.trim();
-
-        await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env);
-
-        // Mark as counted so we don't invoice again
-        await env.CHALLENGES_KV.put(countedKey, 'invoiced', { expirationTtl: 90 * 24 * 3600 });
-        continue;
-      }
-
-      // Check if this slot was already handled by a late-cancel deduction
+      const sessionDate = (apt.startDateTime || apt.startDate || '').split(' ')[0];
+      const startMs = new Date((apt.startDate || apt.startDateTime).replace(' ', 'T') + 'Z').getTime();
+      const durationMin = Math.round((endMs - startMs) / 60000) || 60;
       const startStr = apt.startDate || apt.startDateTime;
-      if (startStr) {
-        const startAtIso = startStr.replace(' ', 'T') + 'Z';
-        const cancelKey = `credit-handled:${attendee.userID}:${startAtIso}`;
-        if (await env.CHALLENGES_KV.get(cancelKey)) {
-          // Already deducted via late cancel — just mark as counted and skip
-          await env.CHALLENGES_KV.put(countedKey, 'cancel-deducted', {
-            expirationTtl: 90 * 24 * 3600,
-          });
+
+      for (const attendee of attendees) {
+        if (!attendee?.userID) continue;
+
+        // Per-attendee dedup key
+        const attCountedKey = `session-counted:${apt.id}:${attendee.userID}`;
+        if (await env.CHALLENGES_KV.get(attCountedKey)) continue;
+
+        // Check if client has credits
+        let creditRaw;
+        try { creditRaw = await env.CHALLENGES_KV.get(`credits:${attendee.userID}`); } catch { /* KV error */ }
+        const hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0;
+
+        if (!hasCredits) {
+          // No credits → auto-invoice this session
+          const attName = `${attendee.firstName || ''} ${attendee.lastName || ''}`.trim();
+          await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env);
+          await env.CHALLENGES_KV.put(attCountedKey, 'invoiced', { expirationTtl: 90 * 24 * 3600 });
           continue;
+        }
+
+        // Check if already handled by late-cancel
+        if (startStr) {
+          const startAtIso = startStr.replace(' ', 'T') + 'Z';
+          const cancelKey = `credit-handled:${attendee.userID}:${startAtIso}`;
+          if (await env.CHALLENGES_KV.get(cancelKey)) {
+            await env.CHALLENGES_KV.put(attCountedKey, 'cancel-deducted', { expirationTtl: 90 * 24 * 3600 });
+            continue;
+          }
+        }
+
+        // Deduct credit
+        await deductSessionCredit(attendee.userID, `Session completed (${sessionDate})`, env);
+        await env.CHALLENGES_KV.put(attCountedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 });
+
+        if (startStr) {
+          const startAtIso = startStr.replace(' ', 'T') + 'Z';
+          await env.CHALLENGES_KV.put(
+            `credit-handled:${attendee.userID}:${startAtIso}`,
+            'session-completed',
+            { expirationTtl: 90 * 24 * 3600 }
+          );
         }
       }
 
-      // Deduct credit for completed session
-      const dateStr = (apt.startDateTime || apt.startDate || '').split(' ')[0];
-      await deductSessionCredit(attendee.userID, `Session completed (${dateStr})`, env);
-
-      // Mark as counted (90-day TTL)
-      await env.CHALLENGES_KV.put(countedKey, new Date().toISOString(), {
-        expirationTtl: 90 * 24 * 3600,
-      });
-
-      // Also mark by user+time to prevent any future double-counting
-      if (startStr) {
-        const startAtIso = startStr.replace(' ', 'T') + 'Z';
-        await env.CHALLENGES_KV.put(
-          `credit-handled:${attendee.userID}:${startAtIso}`,
-          'session-completed',
-          { expirationTtl: 90 * 24 * 3600 }
-        );
-      }
+      // Mark appointment-level as counted
+      await env.CHALLENGES_KV.put(countedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 });
     }
   } catch (e) {
     console.error('Session credit deduction cron failed:', e);

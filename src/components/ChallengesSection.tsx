@@ -55,7 +55,7 @@ export default function ChallengesSection({ onBooking }: ChallengesSectionProps)
               challenge={challenge}
               onJoin={onBooking}
               showAdmin={showAdmin}
-              onDelete={() => { removeChallenge(challenge.id); loadChallenges(); }}
+              onDelete={async () => { await removeChallenge(challenge.id); loadChallenges(); }}
             />
           ))}
         </div>
@@ -160,10 +160,10 @@ function AdminAddChallenge({ onAdded }: { onAdded: () => void }) {
   });
   const [saved, setSaved] = useState(false);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.title || !form.startDate || !form.endDate) return;
 
-    addChallenge({
+    await addChallenge({
       title: form.title,
       description: form.description,
       startDate: form.startDate,

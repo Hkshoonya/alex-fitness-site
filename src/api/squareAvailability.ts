@@ -593,8 +593,12 @@ export async function createBooking(
     localStorage.setItem('bookings', JSON.stringify(existing));
     localStorage.removeItem(AVAILABILITY_CACHE_KEY);
 
-    // Sync to Trainerize (fire-and-forget)
-    syncToTrainerize(customerInfo, startAt, duration, teamMemberId);
+    // Sync to Trainerize — only when worker is NOT configured.
+    // When worker is active, the Square booking.created webhook handles the sync,
+    // so we skip here to avoid creating duplicate Trainerize appointments.
+    if (!WORKER_URL) {
+      syncToTrainerize(customerInfo, startAt, duration, teamMemberId);
+    }
 
     return { success: true, bookingId: data.booking.id };
   } catch (error) {
@@ -637,10 +641,29 @@ function syncToTrainerize(
     time: formatTime(startDate.getHours(), startDate.getMinutes()),
     duration,
     type: isVirtual ? 'virtual' : 'in-studio',
-    coachName: teamMemberId === 'alex-davis' ? 'Alex Davis' : teamMemberId,
+    coachName: resolveCoachName(teamMemberId),
     service: `${duration} Min ${isVirtual ? 'Virtual' : 'In-Studio'} Session`,
     meetLink: meetMatch?.[1],
   });
+}
+
+/**
+ * Resolve team member ID to a human-readable coach name.
+ * Checks cached team members first, falls back to known names.
+ */
+function resolveCoachName(teamMemberId: string): string {
+  // Check cached team members
+  const raw = localStorage.getItem(TEAM_CACHE_KEY);
+  if (raw) {
+    try {
+      const cache: TeamCache = JSON.parse(raw);
+      const match = cache.members.find(m => m.id === teamMemberId);
+      if (match) return match.name;
+    } catch { /* ignore */ }
+  }
+  // Known fallbacks
+  if (teamMemberId === 'alex-davis' || teamMemberId === DEFAULT_COACH) return 'Alex Davis';
+  return 'Coach';
 }
 
 /**

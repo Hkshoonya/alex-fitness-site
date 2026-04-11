@@ -17,6 +17,8 @@ id = "128fbaa0a7244943b73ac25f22bf203c"
 # Square Webhook Events to subscribe to:
 # (configure these in Square Dashboard > Developer > Webhooks > Add endpoint)
 #
+# booking.created         → new booking → syncs to Trainerize calendar
+# booking.updated         → booking changed/cancelled → updates Trainerize
 # subscription.updated    → renewal success, canceled, paused
 # payment.completed       → payment went through
 # payment.failed          → card declined

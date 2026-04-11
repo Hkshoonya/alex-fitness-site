@@ -107,6 +107,11 @@ function apiHeaders() {
 
 // ===== API HELPERS =====
 
+/** Convert ISO date to Trainerize format: "2026-04-11T14:00:00Z" → "2026-04-11 14:00:00" */
+function toTzDate(iso: string): string {
+  return iso.replace('T', ' ').replace('Z', '').replace(/\.\d+$/, '');
+}
+
 /** All Trainerize v03 endpoints use POST with JSON body */
 async function apiPost(path: string, body: Record<string, unknown> = {}): Promise<Response> {
   return fetch(`${TRAINERIZE_API_BASE}${path}`, {
@@ -273,10 +278,11 @@ async function apiCreateBooking(booking: TrainerizeBooking): Promise<{ success: 
     // Look up client userID by email
     const clientUserId = await findUserIdByEmail(booking.clientEmail);
 
-    // Build start/end datetime in UTC
-    const startDate = `${booking.date}T${booking.time}:00Z`;
-    const endMs = new Date(startDate).getTime() + booking.duration * 60000;
-    const endDate = new Date(endMs).toISOString();
+    // Build start/end datetime — Trainerize needs space-separated format
+    const startIso = `${booking.date}T${booking.time}:00Z`;
+    const endMs = new Date(startIso).getTime() + booking.duration * 60000;
+    const startDate = toTzDate(startIso);
+    const endDate = toTzDate(new Date(endMs).toISOString());
 
     const response = await apiPost('/appointment/add', {
       userID: TRAINERIZE_TRAINER_GROUP_ID ? parseInt(TRAINERIZE_TRAINER_GROUP_ID) : undefined,
@@ -336,7 +342,7 @@ async function apiLogPayment(payment: TrainerizePayment): Promise<{ success: boo
     // Add payment note
     await apiPost('/trainerNote/add', {
       userID: userId,
-      content: `Payment received: $${(payment.amount / 100).toFixed(2)} ${payment.currency} for ${payment.planName} (${payment.paymentId}) on ${payment.date}`,
+      content: `Payment received: $${payment.amount.toFixed(2)} ${payment.currency} for ${payment.planName} (${payment.paymentId}) on ${payment.date}`,
       type: 'general',
     });
 

@@ -11,8 +11,12 @@ id = "128fbaa0a7244943b73ac25f22bf203c"
 
 # All secrets set via Cloudflare Dashboard or: wrangler secret put <NAME>
 # SQUARE_APPLICATION_ID, SQUARE_ACCESS_TOKEN, SQUARE_WEBHOOK_SIGNATURE_KEY
-# TRAINERIZE_TRAINER_GROUP_ID, TRAINERIZE_API_KEY
+# TRAINERIZE_TRAINER_GROUP_ID, TRAINERIZE_API_KEY, TRAINERIZE_COACH_USER_ID
 [vars]
+
+# Cron trigger: sync Trainerize appointments → Square every 15 minutes
+[triggers]
+crons = ["*/15 * * * *"]
 
 # Square Webhook Events to subscribe to:
 # (configure these in Square Dashboard > Developer > Webhooks > Add endpoint)

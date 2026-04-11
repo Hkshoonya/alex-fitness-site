@@ -18,6 +18,7 @@ const TRAINERIZE_API_TOKEN = import.meta.env.VITE_TRAINERIZE_API_KEY || '';
 const TRAINERIZE_API_DIRECT = import.meta.env.VITE_TRAINERIZE_API_URL || 'https://api.trainerize.com/v03';
 const TRAINERIZE_WEBHOOK_URL = import.meta.env.VITE_TRAINERIZE_WEBHOOK_URL || '';
 const TRAINERIZE_TRAINER_GROUP_ID = import.meta.env.VITE_TRAINERIZE_TRAINER_GROUP_ID || '';
+const TRAINERIZE_COACH_USER_ID = import.meta.env.VITE_TRAINERIZE_COACH_USER_ID || '10860818';
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
 // When worker proxy is configured, route REST calls through it (avoids CORS)
@@ -189,7 +190,7 @@ async function apiCreateClient(client: TrainerizeClient): Promise<{ success: boo
         fullName: `${client.firstName} ${client.lastName}`,
         email: client.email,
         type: 'client',
-        trainerID: TRAINERIZE_TRAINER_GROUP_ID ? parseInt(TRAINERIZE_TRAINER_GROUP_ID) : undefined,
+        trainerID: parseInt(TRAINERIZE_COACH_USER_ID),
         phone: client.phone,
       },
       userTag: client.tags?.[0],
@@ -285,7 +286,7 @@ async function apiCreateBooking(booking: TrainerizeBooking): Promise<{ success: 
     const endDate = toTzDate(new Date(endMs).toISOString());
 
     const response = await apiPost('/appointment/add', {
-      userID: TRAINERIZE_TRAINER_GROUP_ID ? parseInt(TRAINERIZE_TRAINER_GROUP_ID) : undefined,
+      userID: parseInt(TRAINERIZE_COACH_USER_ID),
       startDate,
       endDate,
       notes: booking.meetLink

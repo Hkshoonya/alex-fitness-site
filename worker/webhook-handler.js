@@ -76,7 +76,8 @@ function getTrainerizeHeaders(env) {
 }
 
 function getTrainerizeTrainerId(env) {
-  return parseInt(getTrainerizeGroupId(env) || '0');
+  // Coach Alex's user ID in Trainerize (10860818), NOT the group ID (359489) used for auth
+  return parseInt(env.TRAINERIZE_COACH_USER_ID || '10860818');
 }
 
 function isTrainerizeConfigured(env) {
@@ -324,7 +325,11 @@ export default {
       if (eventType === 'booking.created' || eventType === 'booking.updated') {
         const booking = event.data?.object?.booking;
         if (booking) {
-          await syncBookingToTrainerize(booking, env);
+          // Skip bookings that were synced FROM Trainerize (prevent loop)
+          const isFromTrainerize = (booking.customer_note || '').includes('Synced from Trainerize');
+          if (!isFromTrainerize) {
+            await syncBookingToTrainerize(booking, env);
+          }
         }
       }
 
@@ -394,6 +399,12 @@ export default {
       console.error('Webhook error:', error);
       return new Response('Error', { status: 500 });
     }
+  },
+
+  // ===== CRON: Trainerize → Square reverse sync =====
+  // Runs every 15 minutes — syncs Trainerize-only appointments to Square
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(syncTrainerizeAppointmentsToSquare(env));
   },
 };
 
@@ -775,8 +786,20 @@ async function syncBookingToTrainerize(booking, env) {
  *   - Coach changes hours in Square → website auto-updates
  */
 async function getCoachAvailability(date, duration, env) {
-  // EST = UTC-5
-  const TZ_OFFSET_HOURS = -5;
+  // Dynamic Eastern Time offset (EST = UTC-5, EDT = UTC-4)
+  // Use the requested date to determine if DST is in effect
+  const dateObj = new Date(`${date}T12:00:00Z`);
+  const jan = new Date(dateObj.getFullYear(), 0, 1).getTimezoneOffset();
+  const jul = new Date(dateObj.getFullYear(), 6, 1).getTimezoneOffset();
+  // Cloudflare Workers run in UTC, so we calculate DST manually for US Eastern:
+  // DST starts 2nd Sunday of March, ends 1st Sunday of November
+  const month = dateObj.getUTCMonth(); // 0-indexed
+  const day = dateObj.getUTCDate();
+  const dow = dateObj.getUTCDay(); // 0=Sun
+  const isDST = (month > 2 && month < 10) || // Apr-Oct always DST
+    (month === 2 && (day - dow) >= 8) ||       // March: after 2nd Sunday
+    (month === 10 && (day - dow) < 1);         // November: before 1st Sunday
+  const TZ_OFFSET_HOURS = isDST ? -4 : -5;
   const TZ_OFFSET_MS = TZ_OFFSET_HOURS * 3600000;
 
   // Map duration to Square service variation ID
@@ -837,8 +860,8 @@ async function getCoachAvailability(date, duration, env) {
   const tzBlockedUtc = new Set();
   if (isTrainerizeConfigured(env)) {
     try {
-      const tzStart = new Date(dayStartUtc - 2 * 3600000).toISOString().replace('T', ' ').replace('Z', '');
-      const tzEnd = new Date(dayEndUtc + 2 * 3600000).toISOString().replace('T', ' ').replace('Z', '');
+      const tzStart = new Date(dayStartUtc - 2 * 3600000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+      const tzEnd = new Date(dayEndUtc + 2 * 3600000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
 
       const resp = await trainerizePost('/appointment/getList', {
         userID: getTrainerizeTrainerId(env),
@@ -1020,6 +1043,169 @@ function getSquareHeaders(env) {
     'Square-Version': '2024-01-18',
     'Content-Type': 'application/json',
   };
+}
+
+// ===== TRAINERIZE → SQUARE REVERSE SYNC =====
+
+/**
+ * Sync Trainerize-only appointments to Square.
+ * Called by the cron trigger every 15 minutes.
+ *
+ * Logic:
+ *   1. Fetch Trainerize appointments for the next 7 days
+ *   2. Skip ones that originated from Square (notes contain "Square #")
+ *   3. Skip ones already synced to Square (tracked in KV)
+ *   4. Create a Square booking for each new Trainerize appointment
+ *   5. Track the sync in KV to prevent duplicates
+ */
+async function syncTrainerizeAppointmentsToSquare(env) {
+  if (!isTrainerizeConfigured(env)) return;
+
+  const SERVICE_IDS = {
+    30: 'AP6SY2YY6DHCTMOCGORX4WFS',
+    45: 'GXOISXWZ6NREZ3J5VHZNSUIT',
+    60: 'KBRH7JNDZMU2K5JQUTERXBU4',
+    90: 'B56W2433G6HFLVMWQGLUREUN',
+  };
+  const LOCATION_ID = 'LD0SGZXT6ZSSD';
+  const TEAM_MEMBER_ID = 'TMr0PTR22KYH_0QK';
+
+  const now = new Date();
+  const weekLater = new Date(now.getTime() + 7 * 24 * 3600000);
+
+  const tzStart = now.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+  const tzEnd = weekLater.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+
+  try {
+    const resp = await trainerizePost('/appointment/getList', {
+      userID: getTrainerizeTrainerId(env),
+      startDate: tzStart,
+      endDate: tzEnd,
+      start: 0,
+      count: 100,
+    }, env);
+
+    if (!resp.ok) {
+      console.error('Trainerize→Square sync: failed to fetch appointments');
+      return;
+    }
+
+    const data = await resp.json();
+    const appointments = data.appointments || [];
+    let synced = 0;
+
+    for (const apt of appointments) {
+      // Skip appointments that came FROM Square (avoid loop)
+      // Catches all note patterns: "Square #abc", "synced from Square", "Square sync"
+      if ((apt.notes || '').toLowerCase().includes('square')) continue;
+
+      // Skip if already synced to Square
+      const syncKey = `tz-sq-sync:${apt.id}`;
+      const existing = await env.CHALLENGES_KV.get(syncKey);
+      if (existing) continue;
+
+      // Parse times — startDate is UTC in Trainerize response
+      const startStr = apt.startDate || apt.startDateTime;
+      const endStr = apt.endDate || apt.endDateTime;
+      if (!startStr || !endStr) continue;
+
+      const startAt = startStr.replace(' ', 'T') + 'Z';
+      const endAt = endStr.replace(' ', 'T') + 'Z';
+      const startMs = new Date(startAt).getTime();
+      const endMs = new Date(endAt).getTime();
+
+      // Skip past appointments
+      if (startMs < now.getTime()) continue;
+
+      const durationMin = Math.round((endMs - startMs) / 60000);
+      const serviceId = SERVICE_IDS[durationMin] || SERVICE_IDS[60];
+
+      // Find client's Square customer ID if possible
+      let squareCustomerId = null;
+      const attendee = apt.attendents?.[0];
+      if (attendee) {
+        // Look up by name in Square (attendee has firstName/lastName but not email)
+        squareCustomerId = await findSquareCustomerByName(
+          attendee.firstName, attendee.lastName, env
+        );
+      }
+
+      // Create Square booking to block the time
+      try {
+        const bookingResp = await fetch(`${getSquareApiBase(env)}/bookings`, {
+          method: 'POST',
+          headers: getSquareHeaders(env),
+          body: JSON.stringify({
+            idempotency_key: `tz-sync-${apt.id}`,
+            booking: {
+              start_at: startAt,
+              location_id: LOCATION_ID,
+              customer_id: squareCustomerId || undefined,
+              customer_note: `Synced from Trainerize (apt #${apt.id})`,
+              appointment_segments: [{
+                team_member_id: TEAM_MEMBER_ID,
+                service_variation_id: serviceId,
+                duration_minutes: durationMin || 60,
+              }],
+            },
+          }),
+        });
+
+        if (bookingResp.ok) {
+          const bookingData = await bookingResp.json();
+          const squareBookingId = bookingData.booking?.id || 'unknown';
+
+          // Track in KV (30-day TTL)
+          await env.CHALLENGES_KV.put(syncKey, JSON.stringify({
+            trainerizeId: apt.id,
+            squareBookingId,
+            syncedAt: new Date().toISOString(),
+          }), { expirationTtl: 30 * 24 * 3600 });
+
+          synced++;
+          console.log(`Trainerize→Square: synced apt #${apt.id} → booking ${squareBookingId}`);
+        } else {
+          const err = await bookingResp.text();
+          console.error(`Trainerize→Square: failed to create booking for apt #${apt.id}: ${err}`);
+        }
+      } catch (e) {
+        console.error(`Trainerize→Square: error syncing apt #${apt.id}:`, e);
+      }
+    }
+
+    if (synced > 0) {
+      console.log(`Trainerize→Square sync complete: ${synced} new bookings created`);
+    }
+  } catch (e) {
+    console.error('Trainerize→Square sync error:', e);
+  }
+}
+
+/**
+ * Find a Square customer by first + last name.
+ * Returns customer ID or null.
+ */
+async function findSquareCustomerByName(firstName, lastName, env) {
+  if (!firstName || !lastName) return null;
+  try {
+    const resp = await fetch(`${getSquareApiBase(env)}/customers/search`, {
+      method: 'POST',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({
+        query: {
+          filter: {
+            fuzzy: { display_name: `${firstName} ${lastName}` },
+          },
+        },
+        limit: 1,
+      }),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.customers?.[0]?.id || null;
+  } catch {
+    return null;
+  }
 }
 
 /**

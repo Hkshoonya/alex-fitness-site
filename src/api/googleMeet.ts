@@ -1,10 +1,7 @@
 // Google Meet Integration for Virtual Consultations
-// Creates Google Meet links via Google Calendar API, syncs to Square
+// Routes through the worker to keep OAuth secrets server-side
 
-const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
-const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY || '';
-const GOOGLE_CALENDAR_ID = import.meta.env.VITE_GOOGLE_CALENDAR_ID || 'primary';
-const GOOGLE_CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
 export interface MeetingDetails {
   meetLink: string;
@@ -13,14 +10,15 @@ export interface MeetingDetails {
 }
 
 /**
- * Check if Google Calendar API is configured
+ * Check if Google Meet is available (worker must be configured)
  */
 export function isGoogleMeetConfigured(): boolean {
-  return !!(GOOGLE_CLIENT_ID && GOOGLE_API_KEY);
+  return !!WORKER_URL;
 }
 
 /**
- * Create a Google Calendar event with Google Meet link
+ * Create a Google Calendar event with Google Meet link.
+ * Calls the worker endpoint — OAuth secrets never touch the browser.
  */
 export async function createMeetEvent(params: {
   title: string;
@@ -31,121 +29,31 @@ export async function createMeetEvent(params: {
   description?: string;
 }): Promise<{ success: boolean; meeting?: MeetingDetails; error?: string }> {
 
-  if (!isGoogleMeetConfigured()) {
+  if (!WORKER_URL) {
     return createMockMeeting(params);
   }
 
   try {
-    const startTime = new Date(params.startAt);
-    const endTime = new Date(startTime.getTime() + params.durationMinutes * 60 * 1000);
-
-    const event = {
-      summary: params.title,
-      description: params.description || `Virtual consultation with ${params.attendeeName}`,
-      start: {
-        dateTime: startTime.toISOString(),
-        timeZone: 'America/New_York',
-      },
-      end: {
-        dateTime: endTime.toISOString(),
-        timeZone: 'America/New_York',
-      },
-      attendees: [
-        { email: params.attendeeEmail, displayName: params.attendeeName },
-        { email: 'alexdavisfit@gmail.com', displayName: 'Alex Davis' },
-      ],
-      conferenceData: {
-        createRequest: {
-          requestId: `meet_${Date.now()}`,
-          conferenceSolutionKey: { type: 'hangoutsMeet' },
-        },
-      },
-      reminders: {
-        useDefault: false,
-        overrides: [
-          { method: 'email', minutes: 60 },
-          { method: 'popup', minutes: 15 },
-        ],
-      },
-      sendUpdates: 'all',
-    };
-
-    const response = await fetch(
-      `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(GOOGLE_CALENDAR_ID)}/events?conferenceDataVersion=1&sendUpdates=all&key=${GOOGLE_API_KEY}`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${await getAccessToken()}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(event),
-      }
-    );
-
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error?.message || 'Failed to create calendar event');
-    }
+    const response = await fetch(`${WORKER_URL}/api/google/meet`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
 
     const data = await response.json();
 
-    const meetLink = data.conferenceData?.entryPoints?.find(
-      (ep: any) => ep.entryPointType === 'video'
-    )?.uri || data.hangoutLink || '';
+    if (data.success && data.meeting) {
+      storeMeeting(params.startAt, data.meeting);
+      return { success: true, meeting: data.meeting };
+    }
 
-    const meeting: MeetingDetails = {
-      meetLink,
-      eventId: data.id,
-      calendarLink: data.htmlLink,
-    };
-
-    // Store locally
-    storeMeeting(params.startAt, meeting);
-
-    return { success: true, meeting };
+    // Worker returned error — fall back to mock
+    console.warn('Google Meet via worker failed:', data.error);
+    return createMockMeeting(params);
   } catch (error) {
     console.error('Google Meet creation failed:', error);
-    // Fall back to mock
     return createMockMeeting(params);
   }
-}
-
-/**
- * Get OAuth2 access token
- * In production this would use a refresh token flow or service account
- */
-async function getAccessToken(): Promise<string> {
-  const token = localStorage.getItem('google_access_token');
-  const expiry = localStorage.getItem('google_token_expiry');
-
-  if (token && expiry && Date.now() < parseInt(expiry)) {
-    return token;
-  }
-
-  // Token needs refresh — in production, use refresh_token grant
-  const refreshToken = import.meta.env.VITE_GOOGLE_REFRESH_TOKEN || '';
-  if (!refreshToken) {
-    throw new Error('No valid Google access token');
-  }
-
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: import.meta.env.VITE_GOOGLE_CLIENT_SECRET || '',
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token',
-    }),
-  });
-
-  if (!response.ok) throw new Error('Token refresh failed');
-
-  const data = await response.json();
-  localStorage.setItem('google_access_token', data.access_token);
-  localStorage.setItem('google_token_expiry', String(Date.now() + data.expires_in * 1000));
-
-  return data.access_token;
 }
 
 /**

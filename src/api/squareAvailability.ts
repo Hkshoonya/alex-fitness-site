@@ -359,51 +359,11 @@ async function fetchAvailabilityFromSquare(
  * Generate fallback availability (mock) for when Square isn't configured
  */
 function generateFallbackAvailability(date: string, teamMemberId: string, duration: number = 60): DayAvailability {
-  const d = new Date(date);
-  const dayOfWeek = d.getDay();
-  const hours = BUSINESS_HOURS[dayOfWeek];
-
-  if (!hours) return { date, teamMemberId, slots: [] };
-
-  const [openH, openM] = hours.open.split(':').map(Number);
-  const [closeH, closeM] = hours.close.split(':').map(Number);
-
-  const slots: TimeSlot[] = [];
-  let h = openH;
-  let m = openM;
-
-  while (h < closeH || (h === closeH && m + duration <= closeM * 60)) {
-    // Randomly mark some slots as unavailable for realism
-    const isAvailable = Math.random() > 0.25;
-
-    const startAt = new Date(date);
-    startAt.setHours(h, m, 0, 0);
-
-    slots.push({
-      time: formatTime(h, m),
-      startAt: startAt.toISOString(),
-      available: isAvailable,
-      teamMemberId,
-      duration,
-    });
-
-    m += DEFAULT_SLOT_INTERVAL;
-    if (m >= 60) {
-      h += Math.floor(m / 60);
-      m = m % 60;
-    }
-  }
-
-  // Load existing bookings from localStorage to mark as unavailable
-  const bookings = JSON.parse(localStorage.getItem('bookings') || '[]');
-  for (const slot of slots) {
-    const isBooked = bookings.some((b: any) =>
-      b.date === date && b.time === slot.time && b.trainerId === teamMemberId && b.status !== 'cancelled'
-    );
-    if (isBooked) slot.available = false;
-  }
-
-  return { date, teamMemberId, slots: applyBookingBuffer(slots) };
+  // Fallback when both worker and Square API are unavailable.
+  // Returns empty slots — never show fake/random availability in production.
+  // The UI will display "No availability — try another date" for empty slots.
+  console.warn('Using fallback availability — Square API unavailable');
+  return { date, teamMemberId, slots: [] };
 }
 
 /**
@@ -547,10 +507,14 @@ export async function createBooking(
   }
 
   try {
+    // Idempotency key prevents duplicate bookings from double-clicks or retries
+    const idempotencyKey = `booking-${startAt}-${customerInfo.email}-${duration}`;
+
     const response = await fetch(`${SQUARE_API_BASE}/bookings`, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({
+        idempotency_key: idempotencyKey,
         booking: {
           location_id: SQUARE_LOCATION_ID,
           start_at: startAt,
@@ -559,7 +523,7 @@ export async function createBooking(
             team_member_id: teamMemberId,
             service_variation_id: getServiceId(duration) || undefined,
           }],
-          customer_note: `Name: ${customerInfo.name}\nGoals: ${customerInfo.goals || 'Not specified'}`,
+          customer_note: `Name: ${customerInfo.name}\nEmail: ${customerInfo.email}\nPhone: ${customerInfo.phone}\nGoals: ${customerInfo.goals || 'Not specified'}`,
         },
       }),
     });

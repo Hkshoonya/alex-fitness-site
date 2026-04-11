@@ -180,8 +180,20 @@ async function findTrainerizeUserByEmail(email, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const origin = request.headers.get('Origin') || '';
+    const referer = request.headers.get('Referer') || '';
+
+    // Allowed origins for API proxy access
+    const ALLOWED_ORIGINS = [
+      'https://hkshoonya.github.io',
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:3000',
+    ];
+    const isAllowedOrigin = ALLOWED_ORIGINS.some(o => origin.startsWith(o) || referer.startsWith(o));
+
     const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': isAllowedOrigin ? origin : ALLOWED_ORIGINS[0],
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, Square-Version',
     };
@@ -189,6 +201,33 @@ export default {
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
+    }
+
+    // ===== API PROXY ORIGIN CHECK =====
+    // Block proxy requests from unknown origins (public endpoints like /health, /availability, webhooks are exempt)
+    const isProxyRoute = url.pathname.startsWith('/api/square/') || url.pathname.startsWith('/api/trainerize/');
+    if (isProxyRoute && !isAllowedOrigin) {
+      return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+        status: 403, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // ===== GOOGLE MEET API (server-side — secrets never exposed to frontend) =====
+    if (url.pathname === '/api/google/meet' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 403, headers: corsHeaders });
+      }
+      try {
+        const params = await request.json();
+        const meeting = await createGoogleMeetEvent(params, env);
+        return new Response(JSON.stringify(meeting), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ success: false, error: e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // ===== SQUARE API PROXY =====
@@ -420,10 +459,11 @@ export default {
     try {
       const body = await request.text();
 
-      // Verify Square webhook signature
+      // Verify Square webhook signature (HMAC-SHA256 of URL + body)
       if (env.SQUARE_WEBHOOK_SIGNATURE_KEY) {
         const signature = request.headers.get('x-square-hmacsha256-signature');
-        const isValid = await verifySignature(body, signature, env.SQUARE_WEBHOOK_SIGNATURE_KEY);
+        const webhookUrl = request.url;
+        const isValid = await verifySignature(webhookUrl, body, signature, env.SQUARE_WEBHOOK_SIGNATURE_KEY);
         if (!isValid) {
           return new Response('Invalid signature', { status: 401 });
         }
@@ -689,24 +729,36 @@ async function updateTrainerizeCredits(email, planName, credits, env) {
  * Updates KV balance + Trainerize tag.
  */
 async function deductSessionCredit(userId, reason, env) {
+  const lockKey = `lock:credits:${userId}`;
   try {
-    const raw = await env.CHALLENGES_KV.get(`credits:${userId}`);
-    if (!raw) return;
+    // Simple KV lock to prevent concurrent read-modify-write race
+    const locked = await env.CHALLENGES_KV.get(lockKey);
+    if (locked) {
+      console.log(`Credit deduction skipped (locked) for user ${userId} — will retry next cron`);
+      return;
+    }
+    await env.CHALLENGES_KV.put(lockKey, Date.now().toString(), { expirationTtl: 15 });
 
-    const creditData = JSON.parse(raw);
+    const raw = await env.CHALLENGES_KV.get(`credits:${userId}`);
+    if (!raw) { await env.CHALLENGES_KV.delete(lockKey); return; }
+
+    let creditData;
+    try { creditData = JSON.parse(raw); } catch { await env.CHALLENGES_KV.delete(lockKey); return; }
+
     if (creditData.remaining <= 0) {
       console.log(`No credits remaining for user ${userId}`);
+      await env.CHALLENGES_KV.delete(lockKey);
       return;
     }
 
     // Deduct
     creditData.remaining -= 1;
-    creditData.deductions.push({
-      date: new Date().toISOString(),
-      reason,
-    });
+    creditData.deductions.push({ date: new Date().toISOString(), reason });
     creditData.updatedAt = new Date().toISOString();
     await env.CHALLENGES_KV.put(`credits:${userId}`, JSON.stringify(creditData));
+
+    // Release lock before slow tag operations
+    await env.CHALLENGES_KV.delete(lockKey);
 
     // Update Trainerize tag
     await clearCreditTags(userId, env);
@@ -722,9 +774,10 @@ async function deductSessionCredit(userId, reason, env) {
       type: 'general',
     }, env);
 
-    console.log(`Credit deducted for user ${userId}: ${creditData.remaining}/${creditData.total} remaining (${reason})`);
+    await logEvent('credit', `Deducted: ${userId} ${creditData.remaining}/${creditData.total} (${reason})`, { userId, remaining: creditData.remaining }, env);
   } catch (e) {
     console.error('Credit deduction failed:', e);
+    try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* cleanup */ }
   }
 }
 
@@ -1088,12 +1141,12 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
  */
 async function removeOldNudgeTags(userId, keepTag, env) {
   const allNudgeTags = [
-    'nudge:payment-paid',
-    'nudge:payment-due',
-    'nudge:payment-unpaid',
-    'nudge:payment-overdue',
-    'nudge:payment-canceled',
-    'nudge:payment-paused',
+    // Old format
+    'nudge:payment-paid', 'nudge:payment-due', 'nudge:payment-unpaid',
+    'nudge:payment-overdue', 'nudge:payment-canceled', 'nudge:payment-paused',
+    // New emoji format
+    'nudge:✅ Paid', 'nudge:⚠️ Payment Due', 'nudge:❌ Payment Failed',
+    'nudge:🔴 Payment Overdue', 'nudge:💤 Inactive', 'nudge:⏸️ Paused',
   ];
 
   for (const tag of allNudgeTags) {
@@ -2009,12 +2062,13 @@ async function deductCreditsForCompletedSessions(env) {
 /**
  * Verify Square webhook signature
  */
-async function verifySignature(body, signature, key) {
+async function verifySignature(url, body, signature, key) {
   if (!signature) return false;
 
+  // Square requires HMAC-SHA256 of the FULL webhook URL + request body
   const encoder = new TextEncoder();
   const keyData = encoder.encode(key);
-  const msgData = encoder.encode(body);
+  const msgData = encoder.encode(url + body);
 
   const cryptoKey = await crypto.subtle.importKey(
     'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
@@ -2024,6 +2078,81 @@ async function verifySignature(body, signature, key) {
   const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
 
   return computed === signature;
+}
+
+// ===== GOOGLE MEET (server-side) =====
+
+/**
+ * Create a Google Calendar event with Meet link.
+ * Secrets (client_secret, refresh_token) stay on the server.
+ */
+async function createGoogleMeetEvent(params, env) {
+  const clientId = env.GOOGLE_CLIENT_ID;
+  const clientSecret = env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = env.GOOGLE_REFRESH_TOKEN;
+  const calendarId = env.GOOGLE_CALENDAR_ID || 'primary';
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return { success: false, error: 'Google Calendar not configured' };
+  }
+
+  // Refresh the access token
+  const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!tokenResp.ok) return { success: false, error: 'Token refresh failed' };
+  const tokenData = await tokenResp.json();
+  const accessToken = tokenData.access_token;
+
+  // Create calendar event with Meet
+  const startTime = new Date(params.startAt);
+  const endTime = new Date(startTime.getTime() + (params.durationMinutes || 60) * 60000);
+
+  const eventResp = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?conferenceDataVersion=1`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        summary: params.title || 'Training Session',
+        description: params.description || '',
+        start: { dateTime: startTime.toISOString(), timeZone: TIMEZONE },
+        end: { dateTime: endTime.toISOString(), timeZone: TIMEZONE },
+        attendees: params.attendeeEmail ? [{ email: params.attendeeEmail }] : [],
+        conferenceData: {
+          createRequest: { requestId: `meet-${Date.now()}`, conferenceSolutionKey: { type: 'hangoutsMeet' } },
+        },
+        reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 30 }] },
+      }),
+    }
+  );
+
+  if (!eventResp.ok) {
+    const err = await eventResp.text();
+    return { success: false, error: `Calendar API error: ${err.slice(0, 200)}` };
+  }
+
+  const event = await eventResp.json();
+  const meetLink = event.conferenceData?.entryPoints?.find(e => e.entryPointType === 'video')?.uri || '';
+
+  return {
+    success: true,
+    meeting: {
+      meetLink,
+      eventId: event.id,
+      calendarLink: event.htmlLink,
+    },
+  };
 }
 
 // ===== CHALLENGES KV STORAGE =====

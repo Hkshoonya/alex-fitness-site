@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { X, ChevronLeft, ChevronRight, Clock, Calendar, Check, Phone, Mail, User, MapPin, Video, Dumbbell, Users } from 'lucide-react';
 import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date-fns';
-import { getAvailability, getTeamMembers, createBooking, type TimeSlot, type TeamMember } from '@/api/squareAvailability';
+import { getAvailability, getTeamMembers, createBooking, CANCEL_NOTICE_HOURS, type TimeSlot, type TeamMember } from '@/api/squareAvailability';
 import { createMeetEvent, type MeetingDetails } from '@/api/googleMeet';
 // Trainerize sync handled automatically inside createBooking
 
@@ -39,6 +39,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
   const [isLoadingSlots, setIsLoadingSlots] = useState(false);
   const [meetDetails, setMeetDetails] = useState<MeetingDetails | null>(null);
   const [bookingData, setBookingData] = useState({ name: '', email: '', phone: '', goals: '' });
+  const [needsConfirmation, setNeedsConfirmation] = useState(false);
 
   const weekStart = addWeeks(startOfWeek(new Date(), { weekStartsOn: 1 }), currentWeekOffset);
   const weekDates = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
@@ -130,6 +131,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     if (!slot.available) return;
     setSelectedTime(slot.time);
     setSelectedStartAt(slot.startAt);
+    setNeedsConfirmation(!!slot.requiresConfirmation);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -401,18 +403,30 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
                   ) : timeSlots.filter(s => s.available).length === 0 ? (
                     <p className="text-white/40 text-sm py-4 text-center">No availability — try another date</p>
                   ) : (
-                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                      {timeSlots.map(slot => (
-                        <button key={slot.time} onClick={() => handleTimeSelect(slot)} disabled={!slot.available}
-                          className={`py-3 px-4 rounded-lg text-sm font-medium transition-all ${
-                            selectedTime === slot.time ? 'bg-[#FF4D2E] text-white'
-                              : slot.available ? 'bg-white/10 text-white hover:bg-white/20'
-                              : 'bg-white/5 text-white/30 cursor-not-allowed line-through'
-                          }`}>
-                          {slot.time}
-                        </button>
-                      ))}
-                    </div>
+                    <>
+                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                        {timeSlots.map(slot => (
+                          <button key={slot.time} onClick={() => handleTimeSelect(slot)} disabled={!slot.available}
+                            className={`py-3 px-4 rounded-lg text-sm font-medium transition-all relative ${
+                              selectedTime === slot.time ? 'bg-[#FF4D2E] text-white'
+                                : slot.requiresConfirmation && slot.available ? 'bg-amber-500/10 text-amber-300 border border-amber-500/30 hover:bg-amber-500/20'
+                                : slot.available ? 'bg-white/10 text-white hover:bg-white/20'
+                                : 'bg-white/5 text-white/30 cursor-not-allowed line-through'
+                            }`}>
+                            {slot.time}
+                            {slot.requiresConfirmation && slot.available && (
+                              <span className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-amber-500 rounded-full" title="Requires coach confirmation" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                      {timeSlots.some(s => s.requiresConfirmation && s.available) && (
+                        <p className="text-amber-400/70 text-xs mt-3 flex items-center gap-1.5">
+                          <span className="w-2 h-2 bg-amber-500 rounded-full inline-block" />
+                          Slots within 90 minutes require coach confirmation
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -478,6 +492,25 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
                 <textarea name="goals" value={bookingData.goals} onChange={handleInputChange} rows={3} placeholder="Tell us about your fitness goals..."
                   className="w-full bg-white/5 border border-white/10 rounded-lg py-3 px-4 text-white placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] transition-colors resize-none" />
               </div>
+
+              {/* 90-min buffer warning */}
+              {needsConfirmation && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
+                  <p className="text-amber-300 text-sm font-medium mb-1">Coach Confirmation Required</p>
+                  <p className="text-amber-300/70 text-xs">This session starts within 90 minutes. Your booking will be submitted as pending and requires Coach Alex's approval.</p>
+                </div>
+              )}
+
+              {/* Cancellation policy */}
+              <div className="bg-white/5 border border-white/10 rounded-lg p-4">
+                <p className="text-white/60 text-xs">
+                  <strong className="text-white/80">Cancellation Policy:</strong>{' '}
+                  {mode === 'consultation'
+                    ? `Please provide at least ${CANCEL_NOTICE_HOURS} hours notice if you need to reschedule or cancel your consultation. This allows other clients to book the slot.`
+                    : `${CANCEL_NOTICE_HOURS}-hour notice is required to cancel without penalty. Cancellations made less than ${CANCEL_NOTICE_HOURS} hours before a session will result in a session credit being deducted.`
+                  }
+                </p>
+              </div>
             </form>
           )}
 
@@ -521,7 +554,14 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
               {sessionType === 'in-studio' && (
                 <p className="text-white/50 text-sm mb-2">13305 Sanctuary Cove Dr, Temple Terrace, FL</p>
               )}
-              <p className="text-white/60 text-sm mb-6">Confirmation sent to {bookingData.email}</p>
+              <p className="text-white/60 text-sm mb-4">Confirmation sent to {bookingData.email}</p>
+
+              <p className="text-white/40 text-xs mb-6">
+                {mode === 'consultation'
+                  ? `Please provide ${CANCEL_NOTICE_HOURS}hrs notice if you need to reschedule.`
+                  : `Cancellation policy: ${CANCEL_NOTICE_HOURS}-hour notice required. Late cancellations may result in a session credit deduction.`
+                }
+              </p>
 
               <button
                 onClick={() => { onClose(); resetState(); }}
@@ -552,7 +592,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
                 className="flex-1 btn-primary disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                 {isSubmitting ? (
                   <><div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Booking...</>
-                ) : 'Confirm Booking'}
+                ) : needsConfirmation ? 'Request Booking (Pending Approval)' : 'Confirm Booking'}
               </button>
             )}
           </div>

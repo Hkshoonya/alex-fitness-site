@@ -55,21 +55,37 @@ function parseSquareItem(item: any): TrainingPlan | null {
   const description = data.description_plaintext || data.description || '';
   const variations = data.variations || [];
 
-  // Determine category from name/product_type
+  // Determine category from name
   const nameLower = name.toLowerCase();
   let category: TrainingPlan['category'] = 'personal-4week';
   let planWeeks = 4;
   let duration = 60;
 
-  if (nameLower.includes('12 week') || nameLower.includes('12-week') || nameLower.includes('3 month')) {
-    category = 'personal-12week';
-    planWeeks = 12;
-  }
+  // Check online/app FIRST (before week/month matching, since "3 Months" would match 12-week)
   if (nameLower.includes('online') || nameLower.includes('custom online')) {
     category = 'online';
-  }
-  if (nameLower.includes('app') && nameLower.includes('no coaching')) {
+    if (nameLower.includes('3 month')) planWeeks = 12;
+  } else if (nameLower.includes('app') && nameLower.includes('no coaching')) {
     category = 'app';
+  // Structured multi-week training plans
+  } else if (nameLower.includes('12 week') || nameLower.includes('12-week')) {
+    category = 'personal-12week';
+    planWeeks = 12;
+  } else if (nameLower.includes('4 week') || nameLower.includes('4-week')) {
+    category = 'personal-4week';
+    planWeeks = 4;
+  // Class patterns (drop-in group or specialty sessions)
+  } else if (['jiu jitsu', 'bjj', 'box & burn', 'boxing', 'cross training', 'yoga', 'pilates', 'hiit', 'strength & conditioning', 'power yoga', 'kickbox'].some(p => nameLower.includes(p))) {
+    category = 'class';
+    planWeeks = 0;
+  // Single session / misc patterns
+  } else if (['single session', 'guest', 'pass', 'credit', 'outside business', 'after hours', 'drop-in', 'drop in'].some(p => nameLower.includes(p))) {
+    category = 'single-session';
+    planWeeks = 0;
+  // Anything that doesn't match a structured plan pattern → class
+  } else if (!nameLower.includes('week') && !nameLower.includes('month') && !nameLower.includes('plan')) {
+    category = 'class';
+    planWeeks = 0;
   }
 
   // Parse duration from name
@@ -162,8 +178,19 @@ function parseSquareItem(item: any): TrainingPlan | null {
 }
 
 /**
- * Fetch ALL catalog items from Square and convert to TrainingPlans
- * No hardcoded IDs — discovers everything in the catalog
+ * Check if a catalog item should be excluded entirely.
+ * Only excludes internal/booking items — keeps everything else.
+ */
+function isExcludedItem(name: string): boolean {
+  const excludePatterns = [
+    'member booking', 'current member',
+  ];
+  return excludePatterns.some(p => name.includes(p));
+}
+
+/**
+ * Fetch catalog items from Square and convert to TrainingPlans
+ * Filters to only include actual training plans (not classes, bookings, passes, etc.)
  */
 async function fetchFromSquare(): Promise<TrainingPlan[]> {
   if (!isSquareCatalogConfigured()) return [];
@@ -186,21 +213,28 @@ async function fetchFromSquare(): Promise<TrainingPlan[]> {
     } while (cursor);
 
     // Parse each item into a TrainingPlan
+    // Only include actual training plans — skip classes, bookings, passes, credits, etc.
     const plans: TrainingPlan[] = [];
     for (const item of allItems) {
-      // Skip non-sellable items
       if (item.is_deleted) continue;
+
+      const name = (item.item_data?.name || '').toLowerCase();
+
+      // Skip items that are NOT training plans
+      if (isExcludedItem(name)) continue;
 
       const plan = parseSquareItem(item);
       if (plan) plans.push(plan);
     }
 
-    // Sort: personal plans first (by weeks then duration), then online, then app
+    // Sort: training plans first, then classes, then single sessions
     const categoryOrder: Record<string, number> = {
       'personal-4week': 1,
       'personal-12week': 2,
       'online': 3,
       'app': 4,
+      'class': 5,
+      'single-session': 6,
     };
 
     plans.sort((a, b) => {

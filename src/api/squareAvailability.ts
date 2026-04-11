@@ -5,6 +5,7 @@ import { asset } from '@/lib/assets';
 import { getSquareConfig, getSquareHeaders, getServiceId, SQUARE_API_BASE } from '@/api/squareConfig';
 
 const { locationId: SQUARE_LOCATION_ID } = getSquareConfig();
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
 const TEAM_CACHE_KEY = 'alex_fitness_team';
 const AVAILABILITY_CACHE_KEY = 'alex_fitness_availability';
@@ -27,9 +28,14 @@ export interface TimeSlot {
   time: string; // "9:00 AM"
   startAt: string; // ISO string
   available: boolean;
+  requiresConfirmation?: boolean; // true if within 90-min buffer
   teamMemberId: string;
   duration: number; // minutes
 }
+
+// Booking policy constants (must match worker)
+const BOOKING_BUFFER_MINUTES = 90;
+export const CANCEL_NOTICE_HOURS = 24;
 
 export interface DayAvailability {
   date: string; // "2026-03-28"
@@ -91,6 +97,28 @@ const DEFAULT_SLOT_INTERVAL = 30; // generate slots every 30 min
 
 // Trainerize sync — imported lazily to avoid circular deps
 import { syncNewClient, syncBooking } from '@/api/trainerize';
+
+// ===== BOOKING BUFFER =====
+
+/**
+ * Apply 90-minute booking buffer: slots within 90 min of now require coach confirmation.
+ * Past slots are marked unavailable.
+ */
+function applyBookingBuffer(slots: TimeSlot[]): TimeSlot[] {
+  const now = Date.now();
+  const bufferMs = BOOKING_BUFFER_MINUTES * 60 * 1000;
+
+  return slots.map(slot => {
+    const slotMs = new Date(slot.startAt).getTime();
+    if (slotMs < now) {
+      return { ...slot, available: false };
+    }
+    if (slotMs - now < bufferMs) {
+      return { ...slot, requiresConfirmation: true };
+    }
+    return slot;
+  });
+}
 
 // ===== API HELPERS =====
 
@@ -318,7 +346,7 @@ async function fetchAvailabilityFromSquare(
     return Object.entries(byDate).map(([date, slots]) => ({
       date,
       teamMemberId: teamMemberId || '',
-      slots: slots.sort((a, b) => a.startAt.localeCompare(b.startAt)),
+      slots: applyBookingBuffer(slots.sort((a, b) => a.startAt.localeCompare(b.startAt))),
     }));
   } catch (error) {
     console.error('Availability fetch failed:', error);
@@ -374,12 +402,46 @@ function generateFallbackAvailability(date: string, teamMemberId: string, durati
     if (isBooked) slot.available = false;
   }
 
-  return { date, teamMemberId, slots };
+  return { date, teamMemberId, slots: applyBookingBuffer(slots) };
 }
 
 /**
- * Main entry: Get availability for a date and team member
- * Caches for 15 minutes, syncs from Square when configured
+ * Fetch availability from the worker endpoint.
+ * The worker merges Square bookings + Trainerize appointments for true availability,
+ * applies the 90-min buffer, and returns slots with requiresConfirmation flags.
+ */
+async function fetchAvailabilityFromWorker(
+  date: string,
+  teamMemberId: string,
+  duration: number
+): Promise<DayAvailability | null> {
+  if (!WORKER_URL) return null;
+
+  try {
+    const response = await fetch(`${WORKER_URL}/availability?date=${date}&duration=${duration}`);
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const slots: TimeSlot[] = (data.slots || []).map((s: any) => ({
+      time: s.time,
+      startAt: s.startAt,
+      available: s.available,
+      requiresConfirmation: s.requiresConfirmation || false,
+      teamMemberId,
+      duration: s.duration || duration,
+    }));
+
+    return { date, teamMemberId, slots };
+  } catch (error) {
+    console.error('Worker availability fetch failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Main entry: Get availability for a date and team member.
+ * Priority: Worker endpoint (real data) → Square API → Fallback (generated).
+ * Always shows the calendar with available slots — never hides it.
  */
 export async function getAvailability(
   date: string,
@@ -394,7 +456,16 @@ export async function getAvailability(
     if (cached && cached.length > 0) return cached[0];
   }
 
-  // Try Square
+  // Priority 1: Worker endpoint (merges Square + Trainerize calendars)
+  if (WORKER_URL) {
+    const workerData = await fetchAvailabilityFromWorker(date, teamMemberId, duration);
+    if (workerData && workerData.slots.length > 0) {
+      cacheAvailability(cacheKey, [workerData]);
+      return workerData;
+    }
+  }
+
+  // Priority 2: Square Bookings Availability API
   if (isConfigured()) {
     const squareData = await fetchAvailabilityFromSquare(date, date, teamMemberId, duration);
     if (squareData.length > 0) {
@@ -403,7 +474,7 @@ export async function getAvailability(
     }
   }
 
-  // Fallback
+  // Priority 3: Fallback (generated from business hours)
   const fallback = generateFallbackAvailability(date, teamMemberId, duration);
   cacheAvailability(cacheKey, [fallback]);
   return fallback;

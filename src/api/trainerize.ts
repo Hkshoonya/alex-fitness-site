@@ -1,4 +1,4 @@
-// Trainerize Integration
+// Trainerize Integration — v03 API
 // Full sync: clients, bookings, session credits, payments, auto-provisioning
 //
 // When a new client buys a plan:
@@ -8,14 +8,23 @@
 // 4. Purchased plan assigned as program
 // 5. Booking synced to Trainerize calendar
 //
-// API docs: https://help.trainerize.com/hc/en-us/articles/37082084919060
+// API docs: https://developers.trainerize.com (password: tzAPI)
+// Auth: Basic base64(groupID:APIToken)
+// All endpoints: POST with JSON body (RPC-style, not REST)
 // Requires: Studio or Enterprise plan for direct API
 // Fallback: Zapier webhook (any plan)
 
-const TRAINERIZE_API_KEY = import.meta.env.VITE_TRAINERIZE_API_KEY || '';
-const TRAINERIZE_API_BASE = import.meta.env.VITE_TRAINERIZE_API_URL || 'https://api.trainerize.com/v2';
+const TRAINERIZE_API_TOKEN = import.meta.env.VITE_TRAINERIZE_API_KEY || '';
+const TRAINERIZE_API_DIRECT = import.meta.env.VITE_TRAINERIZE_API_URL || 'https://api.trainerize.com/v03';
 const TRAINERIZE_WEBHOOK_URL = import.meta.env.VITE_TRAINERIZE_WEBHOOK_URL || '';
-const TRAINERIZE_TRAINER_ID = import.meta.env.VITE_TRAINERIZE_TRAINER_ID || '';
+const TRAINERIZE_TRAINER_GROUP_ID = import.meta.env.VITE_TRAINERIZE_TRAINER_GROUP_ID || '';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
+
+// When worker proxy is configured, route REST calls through it (avoids CORS)
+// Worker maps /api/trainerize/... → api.trainerize.com/v03/...
+const TRAINERIZE_API_BASE = WORKER_URL
+  ? `${WORKER_URL}/api/trainerize`
+  : TRAINERIZE_API_DIRECT;
 
 // ===== TYPES =====
 
@@ -75,18 +84,62 @@ type TrainerizeEvent =
 // ===== CONFIG =====
 
 export function isTrainerizeConfigured(): boolean {
-  return !!(TRAINERIZE_API_KEY || TRAINERIZE_WEBHOOK_URL);
+  return !!((TRAINERIZE_TRAINER_GROUP_ID && TRAINERIZE_API_TOKEN) || WORKER_URL || TRAINERIZE_WEBHOOK_URL);
 }
 
 function isDirectApiConfigured(): boolean {
-  return !!TRAINERIZE_API_KEY;
+  return !!(WORKER_URL || (TRAINERIZE_TRAINER_GROUP_ID && TRAINERIZE_API_TOKEN));
 }
 
 function apiHeaders() {
+  // When using the worker proxy, don't send Authorization — the worker adds it server-side.
+  if (WORKER_URL) {
+    return { 'Content-Type': 'application/json' };
+  }
+
+  // Direct mode: Basic Auth — base64(groupID:APIToken)
+  const token = btoa(`${TRAINERIZE_TRAINER_GROUP_ID}:${TRAINERIZE_API_TOKEN}`);
   return {
-    'Authorization': `Bearer ${TRAINERIZE_API_KEY}`,
+    'Authorization': `Basic ${token}`,
     'Content-Type': 'application/json',
   };
+}
+
+// ===== API HELPERS =====
+
+/** All Trainerize v03 endpoints use POST with JSON body */
+async function apiPost(path: string, body: Record<string, unknown> = {}): Promise<Response> {
+  return fetch(`${TRAINERIZE_API_BASE}${path}`, {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify(body),
+  });
+}
+
+/** Look up a Trainerize userID (integer) by email. Required for tags, messages, etc. */
+async function findUserIdByEmail(email: string): Promise<number | null> {
+  try {
+    const response = await apiPost('/user/find', {
+      searchTerm: email,
+      view: 'allClient',
+      start: 0,
+      count: 10,
+      verbose: false,
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const users = data.users || data.result || [];
+    if (!Array.isArray(users)) return null;
+
+    const match = users.find((u: any) =>
+      (u.email || '').toLowerCase() === email.toLowerCase()
+    );
+    return match ? (match.userID ?? match.id ?? null) : null;
+  } catch {
+    return null;
+  }
 }
 
 // ===== DIRECT API METHODS =====
@@ -94,63 +147,76 @@ function apiHeaders() {
 /**
  * Create client in Trainerize with auto-provisioning
  * - Creates account under your trainer ID
- * - send_invite: true → Trainerize emails the client their login credentials
+ * - sendMail: true → Trainerize emails the client their login credentials
  * - Client gets a unique ID and temporary password to activate the app
  */
 async function apiCreateClient(client: TrainerizeClient): Promise<{ success: boolean; clientId?: string }> {
   try {
     // Check if client already exists
-    const searchResponse = await fetch(`${TRAINERIZE_API_BASE}/clients?email=${encodeURIComponent(client.email)}`, {
-      headers: apiHeaders(),
-    });
+    const existingId = await findUserIdByEmail(client.email);
 
-    if (searchResponse.ok) {
-      const searchData = await searchResponse.json();
-      const existing = searchData.clients?.find((c: any) => c.email === client.email);
-      if (existing) {
-        // Client exists — update their info
-        await fetch(`${TRAINERIZE_API_BASE}/clients/${existing.id}`, {
-          method: 'PUT',
-          headers: apiHeaders(),
-          body: JSON.stringify({
-            first_name: client.firstName,
-            last_name: client.lastName,
-            phone: client.phone,
-            tags: client.tags,
-            notes: client.notes,
-          }),
-        });
-        return { success: true, clientId: existing.id };
+    if (existingId) {
+      // Client exists — update their profile
+      await apiPost('/user/setProfile', {
+        user: {
+          userID: existingId,
+          firstName: client.firstName,
+          lastName: client.lastName,
+          phone: client.phone,
+        },
+      });
+
+      // Update tags
+      if (client.tags?.length) {
+        for (const tag of client.tags) {
+          await apiPost('/user/addTag', { userID: existingId, userTag: tag });
+        }
       }
+
+      return { success: true, clientId: String(existingId) };
     }
 
     // Create new client
-    const response = await fetch(`${TRAINERIZE_API_BASE}/clients`, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
+    const response = await apiPost('/user/add', {
+      user: {
+        firstName: client.firstName,
+        lastName: client.lastName,
+        fullName: `${client.firstName} ${client.lastName}`,
         email: client.email,
-        first_name: client.firstName,
-        last_name: client.lastName,
+        type: 'client',
+        trainerID: TRAINERIZE_TRAINER_GROUP_ID ? parseInt(TRAINERIZE_TRAINER_GROUP_ID) : undefined,
         phone: client.phone,
-        tags: client.tags,
-        notes: client.notes,
-        trainer_id: TRAINERIZE_TRAINER_ID || undefined,
-        // This triggers Trainerize to:
-        // 1. Generate a unique client ID
-        // 2. Create temporary password
-        // 3. Send activation email with login credentials
-        send_invite: true,
-      }),
+      },
+      userTag: client.tags?.[0],
+      sendMail: true,
+      isSetup: false,
     });
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      throw new Error(err.message || `API error ${response.status}`);
+      throw new Error(err.message || err.statusMsg || `API error ${response.status}`);
     }
 
     const data = await response.json();
-    return { success: true, clientId: data.id || data.client_id };
+    const newId = data.userID ?? data.id ?? data.result?.userID;
+
+    // Add additional tags beyond the first one (already set via userTag param)
+    if (newId && client.tags && client.tags.length > 1) {
+      for (const tag of client.tags.slice(1)) {
+        await apiPost('/user/addTag', { userID: newId, userTag: tag });
+      }
+    }
+
+    // Add notes via trainerNote if provided
+    if (newId && client.notes) {
+      await apiPost('/trainerNote/add', {
+        userID: newId,
+        content: client.notes,
+        type: 'general',
+      });
+    }
+
+    return { success: true, clientId: String(newId) };
   } catch (error) {
     console.error('Trainerize create client failed:', error);
     return { success: false };
@@ -163,19 +229,20 @@ async function apiCreateClient(client: TrainerizeClient): Promise<{ success: boo
  */
 async function apiAssignProgram(clientId: string, planName: string): Promise<{ success: boolean }> {
   try {
-    // First, find matching master program by name
-    const programsResponse = await fetch(`${TRAINERIZE_API_BASE}/programs?search=${encodeURIComponent(planName)}`, {
-      headers: apiHeaders(),
-    });
+    // List master programs
+    const programsResponse = await apiPost('/program/getList', {});
 
-    let programId: string | null = null;
+    let programId: number | null = null;
 
     if (programsResponse.ok) {
       const programsData = await programsResponse.json();
-      const match = programsData.programs?.find((p: any) =>
-        p.name.toLowerCase().includes(planName.toLowerCase().split(' - ')[0])
-      );
-      if (match) programId = match.id;
+      const programs = programsData.programs || programsData.result || [];
+      if (Array.isArray(programs)) {
+        const match = programs.find((p: any) =>
+          (p.name || '').toLowerCase().includes(planName.toLowerCase().split(' - ')[0])
+        );
+        if (match) programId = match.id ?? match.programID;
+      }
     }
 
     if (!programId) {
@@ -184,13 +251,11 @@ async function apiAssignProgram(clientId: string, planName: string): Promise<{ s
     }
 
     // Copy master program to client
-    const response = await fetch(`${TRAINERIZE_API_BASE}/clients/${clientId}/programs`, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        program_id: programId,
-        start_date: new Date().toISOString().split('T')[0],
-      }),
+    const response = await apiPost('/program/copyToUser', {
+      id: programId,
+      userID: parseInt(clientId),
+      startDate: new Date().toISOString().split('T')[0],
+      forceMerge: false,
     });
 
     return { success: response.ok };
@@ -205,19 +270,22 @@ async function apiAssignProgram(clientId: string, planName: string): Promise<{ s
  */
 async function apiCreateBooking(booking: TrainerizeBooking): Promise<{ success: boolean }> {
   try {
-    const response = await fetch(`${TRAINERIZE_API_BASE}/appointments`, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        client_email: booking.clientEmail,
-        date: booking.date,
-        time: booking.time,
-        duration_minutes: booking.duration,
-        type: booking.type,
-        trainer_id: TRAINERIZE_TRAINER_ID || undefined,
-        service_name: booking.service,
-        notes: booking.meetLink ? `Virtual session — Meet: ${booking.meetLink}` : 'In-studio session',
-      }),
+    // Look up client userID by email
+    const clientUserId = await findUserIdByEmail(booking.clientEmail);
+
+    // Build start/end datetime in UTC
+    const startDate = `${booking.date}T${booking.time}:00Z`;
+    const endMs = new Date(startDate).getTime() + booking.duration * 60000;
+    const endDate = new Date(endMs).toISOString();
+
+    const response = await apiPost('/appointment/add', {
+      userID: TRAINERIZE_TRAINER_GROUP_ID ? parseInt(TRAINERIZE_TRAINER_GROUP_ID) : undefined,
+      startDate,
+      endDate,
+      notes: booking.meetLink
+        ? `Virtual session — Meet: ${booking.meetLink}`
+        : `In-studio ${booking.service} session`,
+      attendents: clientUserId ? [{ userID: clientUserId }] : [],
     });
 
     return { success: response.ok };
@@ -229,23 +297,27 @@ async function apiCreateBooking(booking: TrainerizeBooking): Promise<{ success: 
 
 /**
  * Update session credits for a client
+ * No direct credits endpoint in v03 — logs via trainer note + tag
  */
 async function apiUpdateSessionCredits(credit: TrainerizeSessionCredit): Promise<{ success: boolean }> {
   try {
-    const response = await fetch(`${TRAINERIZE_API_BASE}/clients/credits`, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        client_email: credit.clientEmail,
-        plan_name: credit.planName,
-        total_sessions: credit.totalSessions,
-        sessions_used: credit.sessionsUsed,
-        sessions_remaining: credit.sessionsRemaining,
-        valid_until: credit.validUntil,
-      }),
+    const userId = await findUserIdByEmail(credit.clientEmail);
+    if (!userId) return { success: false };
+
+    // Add a trainer note with credit details
+    await apiPost('/trainerNote/add', {
+      userID: userId,
+      content: `Session credits: ${credit.sessionsRemaining}/${credit.totalSessions} remaining (${credit.planName}). Valid until ${credit.validUntil}`,
+      type: 'general',
     });
 
-    return { success: response.ok };
+    // Tag with credit count for quick reference
+    await apiPost('/user/addTag', {
+      userID: userId,
+      userTag: `credits:${credit.sessionsRemaining}`,
+    });
+
+    return { success: true };
   } catch (error) {
     console.error('Trainerize update credits failed:', error);
     return { success: false };
@@ -254,23 +326,24 @@ async function apiUpdateSessionCredits(credit: TrainerizeSessionCredit): Promise
 
 /**
  * Log a payment in Trainerize
+ * No direct payment endpoint in v03 — logs via trainer note + tag
  */
 async function apiLogPayment(payment: TrainerizePayment): Promise<{ success: boolean }> {
   try {
-    const response = await fetch(`${TRAINERIZE_API_BASE}/payments`, {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        client_email: payment.clientEmail,
-        amount: payment.amount,
-        currency: payment.currency,
-        plan_name: payment.planName,
-        payment_id: payment.paymentId,
-        date: payment.date,
-      }),
+    const userId = await findUserIdByEmail(payment.clientEmail);
+    if (!userId) return { success: false };
+
+    // Add payment note
+    await apiPost('/trainerNote/add', {
+      userID: userId,
+      content: `Payment received: $${(payment.amount / 100).toFixed(2)} ${payment.currency} for ${payment.planName} (${payment.paymentId}) on ${payment.date}`,
+      type: 'general',
     });
 
-    return { success: response.ok };
+    // Tag payment status
+    await apiPost('/user/addTag', { userID: userId, userTag: 'payment-paid' });
+
+    return { success: true };
   } catch (error) {
     console.error('Trainerize log payment failed:', error);
     return { success: false };
@@ -322,7 +395,7 @@ export async function syncNewClient(client: TrainerizeClient): Promise<{ success
  * Full client provisioning after a plan purchase:
  * 1. Create client in Trainerize (or update if exists)
  * 2. Trainerize auto-generates ID + temp password
- * 3. Activation email sent to client (send_invite: true)
+ * 3. Activation email sent to client (sendMail: true)
  * 4. Purchased plan assigned as training program
  * 5. Payment logged
  * 6. Session credits set

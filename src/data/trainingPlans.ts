@@ -9,7 +9,7 @@ export interface TrainingPlan {
   pricePerSession: number;
   price: number; // base price (1x/week)
   frequency: { perWeek: number; totalSessions: number; totalPrice: number }[];
-  category: 'personal-4week' | 'personal-12week' | 'online' | 'app';
+  category: 'personal-4week' | 'personal-12week' | 'online' | 'app' | 'class' | 'single-session';
   features: string[];
   popular?: boolean;
   salePrice?: number;

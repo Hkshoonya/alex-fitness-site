@@ -18,7 +18,7 @@ interface TrainingPlansShopProps {
   onPurchaseComplete?: (plan: TrainingPlan, trainer: Trainer) => void;
 }
 
-type CategoryFilter = 'all' | 'personal-4week' | 'personal-12week' | 'online' | 'app';
+type CategoryFilter = 'all' | 'personal-4week' | 'personal-12week' | 'online' | 'app' | 'class' | 'single-session';
 
 export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete }: TrainingPlansShopProps) {
   const [plans, setPlans] = useState<TrainingPlan[]>([]);
@@ -40,13 +40,19 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     if (isOpen) {
       document.body.style.overflow = 'hidden';
       loadPlans();
-      initializeSquareSdk();
     } else {
       document.body.style.overflow = 'unset';
       resetState();
     }
     return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
+
+  // Initialize Square payment SDK when entering payment step (card-container must be in DOM)
+  useEffect(() => {
+    if (step === 'payment' && !cardElement) {
+      initializeSquareSdk();
+    }
+  }, [step]);
 
   const loadPlans = async () => {
     setIsLoadingPlans(true);
@@ -102,6 +108,22 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   const filteredPlans = selectedCategory === 'all'
     ? plans
     : plans.filter(plan => plan.category === selectedCategory);
+
+  // Group plans by category for structured "All Plans" view
+  const categoryLabels: Record<string, string> = {
+    'personal-4week': '4-Week Training Plans',
+    'personal-12week': '12-Week Training Plans',
+    'online': 'Online Coaching',
+    'app': 'App & Self-Guided',
+    'class': 'Classes & Specialty Sessions',
+    'single-session': 'Drop-In & Extras',
+  };
+  const categoryOrder: TrainingPlan['category'][] = ['personal-4week', 'personal-12week', 'online', 'app', 'class', 'single-session'];
+  const groupedPlans = selectedCategory === 'all'
+    ? categoryOrder
+        .map(cat => ({ category: cat, label: categoryLabels[cat], plans: plans.filter(p => p.category === cat) }))
+        .filter(g => g.plans.length > 0)
+    : null;
 
   const handlePlanSelect = (plan: TrainingPlan) => {
     setSelectedPlan(plan);
@@ -257,6 +279,8 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                     { id: 'personal-12week' as CategoryFilter, label: '12-Week' },
                     { id: 'online' as CategoryFilter, label: 'Online' },
                     { id: 'app' as CategoryFilter, label: 'App' },
+                    { id: 'class' as CategoryFilter, label: 'Classes' },
+                    { id: 'single-session' as CategoryFilter, label: 'Drop-In' },
                   ].map((cat) => (
                     <button
                       key={cat.id}
@@ -302,80 +326,29 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                 <div className="flex items-center justify-center py-16">
                   <div className="w-8 h-8 border-2 border-white/20 border-t-[#FF4D2E] rounded-full animate-spin" />
                 </div>
+              ) : groupedPlans ? (
+                /* Grouped view (All Plans) — sections with headers */
+                <div className="space-y-8">
+                  {groupedPlans.map(({ category, label, plans: sectionPlans }) => (
+                    <div key={category}>
+                      <div className="flex items-center gap-3 mb-4">
+                        <h3 className="text-white font-semibold text-lg">{label}</h3>
+                        <div className="flex-1 h-px bg-white/10" />
+                        <span className="text-white/30 text-xs">{sectionPlans.length} {sectionPlans.length === 1 ? 'plan' : 'plans'}</span>
+                      </div>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        {sectionPlans.map((plan) => (
+                          <PlanCard key={plan.id} plan={plan} onSelect={handlePlanSelect} />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               ) : (
-                /* Plans Grid */
+                /* Filtered view (specific category) — flat grid */
                 <div className="grid md:grid-cols-2 gap-4">
                   {filteredPlans.map((plan) => (
-                    <div
-                      key={plan.id}
-                      onClick={() => handlePlanSelect(plan)}
-                      className={`bg-white/5 border rounded-xl p-5 cursor-pointer hover:bg-white/[0.07] transition-all group relative ${
-                        plan.popular ? 'border-[#FF4D2E]/40' : 'border-white/10 hover:border-[#FF4D2E]/30'
-                      }`}
-                    >
-                      {plan.popular && (
-                        <div className="absolute -top-3 left-4 bg-[#FF4D2E] text-white text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1">
-                          <Star size={12} /> Most Popular
-                        </div>
-                      )}
-
-                      {plan.salePrice && plan.originalPrice && (
-                        <div className="absolute -top-3 right-4 bg-green-500 text-white text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1">
-                          <Tag size={12} /> Sale
-                        </div>
-                      )}
-
-                      <div className="flex justify-between items-start mb-3">
-                        <div className="flex-1 pr-4">
-                          <h3 className="text-white font-semibold group-hover:text-[#FF4D2E] transition-colors">
-                            {plan.name}
-                          </h3>
-                          <p className="text-white/50 text-sm mt-1">{plan.description}</p>
-                        </div>
-                        <div className="text-right flex-shrink-0">
-                          {plan.salePrice && plan.originalPrice ? (
-                            <>
-                              <p className="text-white/40 text-sm line-through">{formatPrice(plan.originalPrice)}</p>
-                              <p className="text-2xl font-bold text-[#FF4D2E]">{formatPrice(plan.salePrice)}</p>
-                            </>
-                          ) : (
-                            <>
-                              <p className="text-xl font-bold text-white">{getPriceRange(plan)}</p>
-                              {plan.pricePerSession > 0 && (
-                                <p className="text-white/50 text-xs">${plan.pricePerSession}/session</p>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-4 text-white/50 text-sm mb-4">
-                        {plan.duration > 0 && (
-                          <span className="flex items-center gap-1">
-                            <Clock size={14} /> {plan.duration} min
-                          </span>
-                        )}
-                        <span className="flex items-center gap-1">
-                          <Calendar size={14} /> {plan.planWeeks} weeks
-                        </span>
-                        {plan.frequency.length > 0 && (
-                          <span>1-5x/week</span>
-                        )}
-                      </div>
-
-                      <ul className="space-y-1 mb-4">
-                        {plan.features.slice(0, 3).map((feature, i) => (
-                          <li key={i} className="text-white/60 text-sm flex items-center gap-2">
-                            <Check size={14} className="text-[#FF4D2E] flex-shrink-0" />
-                            {feature}
-                          </li>
-                        ))}
-                      </ul>
-
-                      <button className="w-full py-2.5 bg-white/10 hover:bg-[#FF4D2E] text-white rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2">
-                        Select Plan <ChevronRight size={16} />
-                      </button>
-                    </div>
+                    <PlanCard key={plan.id} plan={plan} onSelect={handlePlanSelect} />
                   ))}
                 </div>
               )}
@@ -612,6 +585,91 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function PlanCard({ plan, onSelect }: { plan: TrainingPlan; onSelect: (plan: TrainingPlan) => void }) {
+  const isClass = plan.category === 'class' || plan.category === 'single-session';
+
+  return (
+    <div
+      onClick={() => onSelect(plan)}
+      className={`bg-white/5 border rounded-xl p-5 cursor-pointer hover:bg-white/[0.07] transition-all group relative ${
+        plan.popular ? 'border-[#FF4D2E]/40' : 'border-white/10 hover:border-[#FF4D2E]/30'
+      }`}
+    >
+      {plan.popular && (
+        <div className="absolute -top-3 left-4 bg-[#FF4D2E] text-white text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1">
+          <Star size={12} /> Most Popular
+        </div>
+      )}
+
+      {plan.salePrice && plan.originalPrice && (
+        <div className="absolute -top-3 right-4 bg-green-500 text-white text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1">
+          <Tag size={12} /> Sale
+        </div>
+      )}
+
+      <div className="flex justify-between items-start mb-3">
+        <div className="flex-1 pr-4">
+          <h3 className="text-white font-semibold group-hover:text-[#FF4D2E] transition-colors">
+            {plan.name}
+          </h3>
+          {plan.description && (
+            <p className="text-white/50 text-sm mt-1 line-clamp-2">{plan.description}</p>
+          )}
+        </div>
+        <div className="text-right flex-shrink-0">
+          {plan.salePrice && plan.originalPrice ? (
+            <>
+              <p className="text-white/40 text-sm line-through">{formatPrice(plan.originalPrice)}</p>
+              <p className="text-2xl font-bold text-[#FF4D2E]">{formatPrice(plan.salePrice)}</p>
+            </>
+          ) : (
+            <>
+              <p className={`font-bold text-white ${isClass ? 'text-lg' : 'text-xl'}`}>{getPriceRange(plan)}</p>
+              {plan.pricePerSession > 0 && (
+                <p className="text-white/50 text-xs">${plan.pricePerSession}/session</p>
+              )}
+              {isClass && <p className="text-white/40 text-xs">per session</p>}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Meta row — only show relevant info */}
+      <div className="flex items-center gap-4 text-white/50 text-sm mb-4">
+        {plan.duration > 0 && (
+          <span className="flex items-center gap-1">
+            <Clock size={14} /> {plan.duration} min
+          </span>
+        )}
+        {plan.planWeeks > 0 && (
+          <span className="flex items-center gap-1">
+            <Calendar size={14} /> {plan.planWeeks} weeks
+          </span>
+        )}
+        {plan.frequency.length > 0 && (
+          <span>1-{plan.frequency[plan.frequency.length - 1].perWeek}x/week</span>
+        )}
+      </div>
+
+      {/* Features — only for structured plans */}
+      {!isClass && plan.features.length > 0 && (
+        <ul className="space-y-1 mb-4">
+          {plan.features.slice(0, 3).map((feature, i) => (
+            <li key={i} className="text-white/60 text-sm flex items-center gap-2">
+              <Check size={14} className="text-[#FF4D2E] flex-shrink-0" />
+              {feature}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <button className="w-full py-2.5 bg-white/10 hover:bg-[#FF4D2E] text-white rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2">
+        {isClass ? 'Book Session' : 'Select Plan'} <ChevronRight size={16} />
+      </button>
     </div>
   );
 }

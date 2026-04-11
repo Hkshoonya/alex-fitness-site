@@ -764,82 +764,92 @@ async function syncBookingToTrainerize(booking, env) {
 
 /**
  * Get coach's real-time availability for a date.
- * Merges Square bookings + Trainerize appointments into ONE unified calendar.
- * All times are Eastern (America/New_York). Enforces 90-minute booking buffer.
+ * Uses Square's availability search as the SOURCE OF TRUTH — it reflects the
+ * coach's actual schedule (custom hours, personal blocks, breaks, time off).
+ * Then ALSO checks Trainerize appointments to block any additional conflicts.
  *
- * Both Square and Trainerize are checked — a booking in EITHER system blocks the slot.
- * This means:
- *   - Client books on Square → blocked on website + Trainerize
- *   - Coach blocks time in Trainerize → blocked on website + Square availability
+ * This means all three systems show the same thing:
+ *   - Coach blocks time in Square → blocked on website
+ *   - Coach books in Trainerize → blocked on website
  *   - Client books on website → creates in Square → webhook syncs to Trainerize
+ *   - Coach changes hours in Square → website auto-updates
  */
 async function getCoachAvailability(date, duration, env) {
-  // Business hours: 6:00 AM – 8:30 PM Eastern, every day
-  const OPEN_H = 6, OPEN_M = 0;
-  const CLOSE_H = 20, CLOSE_M = 30;
-
-  // EST = UTC-5 (Florida, no daylight saving adjustment)
+  // EST = UTC-5
   const TZ_OFFSET_HOURS = -5;
   const TZ_OFFSET_MS = TZ_OFFSET_HOURS * 3600000;
 
-  // Helper: create a UTC timestamp for a given Eastern time on this date
-  function easternToUtcMs(h, m) {
-    // Eastern time → UTC: subtract the offset (add because offset is negative)
-    return new Date(`${date}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00Z`).getTime() - TZ_OFFSET_MS;
+  // Map duration to Square service variation ID
+  const SERVICE_IDS = {
+    30: 'AP6SY2YY6DHCTMOCGORX4WFS',  // 30 Min Training
+    45: 'GXOISXWZ6NREZ3J5VHZNSUIT',  // 45 Minute Training
+    60: 'KBRH7JNDZMU2K5JQUTERXBU4',  // 60 Min Training
+    90: 'B56W2433G6HFLVMWQGLUREUN',  // 90 Min Training
+  };
+  const serviceId = SERVICE_IDS[duration] || SERVICE_IDS[60];
+  const locationId = 'LD0SGZXT6ZSSD';
+
+  // Helper: UTC ms → Eastern hours/minutes for display
+  function utcToEastern(utcMs) {
+    const estMs = utcMs + TZ_OFFSET_MS;
+    const d = new Date(estMs);
+    return { h: d.getUTCHours(), m: d.getUTCMinutes() };
   }
 
-  // Helper: convert UTC ms to a slot key for comparison (rounded to 30-min blocks)
-  function toSlotKey(utcMs) {
-    return new Date(utcMs).toISOString().slice(0, 16);
-  }
+  // ===== STEP 1: Get Square's ACTUAL availability (coach's real schedule) =====
+  // This is the source of truth — includes custom hours, blocks, breaks, existing bookings
+  const squareAvailableUtc = new Set(); // UTC ISO strings of available slot starts
+  const dayStartUtc = new Date(`${date}T00:00:00Z`).getTime() + (-TZ_OFFSET_MS); // 6 AM EST in UTC = 11 AM UTC
+  const dayEndUtc = dayStartUtc + 18 * 3600000; // ~18 hours window
 
-  // Collect ALL blocked UTC time ranges from both systems
-  const bookedSlotKeys = new Set();
-
-  // ===== SQUARE BOOKINGS =====
-  // Square times are always UTC
-  const dayStartUtc = easternToUtcMs(OPEN_H, OPEN_M);
-  const dayEndUtc = easternToUtcMs(CLOSE_H, CLOSE_M);
   try {
-    const resp = await fetch(
-      `${getSquareApiBase(env)}/bookings?start_at_min=${new Date(dayStartUtc).toISOString()}&start_at_max=${new Date(dayEndUtc).toISOString()}&limit=100`,
-      { headers: getSquareHeaders(env) }
-    );
+    const resp = await fetch(`${getSquareApiBase(env)}/bookings/availability/search`, {
+      method: 'POST',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({
+        query: {
+          filter: {
+            start_at_range: {
+              start_at: new Date(dayStartUtc - 2 * 3600000).toISOString(),
+              end_at: new Date(dayEndUtc + 2 * 3600000).toISOString(),
+            },
+            location_id: locationId,
+            segment_filters: [{
+              service_variation_id: serviceId,
+              team_member_id_filter: { any: ['TMr0PTR22KYH_0QK'] },
+            }],
+          },
+        },
+      }),
+    });
+
     if (resp.ok) {
       const data = await resp.json();
-      for (const b of (data.bookings || [])) {
-        if (b.status === 'ACCEPTED' || b.status === 'PENDING') {
-          const startMs = new Date(b.start_at).getTime();
-          const dur = b.appointment_segments?.[0]?.duration_minutes || 60;
-          for (let t = startMs; t < startMs + dur * 60000; t += 30 * 60000) {
-            bookedSlotKeys.add(toSlotKey(t));
-          }
-        }
+      for (const avail of (data.availabilities || [])) {
+        squareAvailableUtc.add(avail.start_at);
       }
     }
   } catch (e) {
-    console.error('Square bookings fetch failed:', e);
+    console.error('Square availability search failed:', e);
   }
 
-  // ===== TRAINERIZE APPOINTMENTS =====
-  // Trainerize returns startDate in UTC (space-separated format)
+  // ===== STEP 2: Get Trainerize appointments (additional blocks) =====
+  const tzBlockedUtc = new Set();
   if (isTrainerizeConfigured(env)) {
     try {
-      // Fetch wider range to catch timezone edge cases
-      const tzDayStart = new Date(dayStartUtc).toISOString().replace('T', ' ').replace('Z', '');
-      const tzDayEnd = new Date(dayEndUtc).toISOString().replace('T', ' ').replace('Z', '');
+      const tzStart = new Date(dayStartUtc - 2 * 3600000).toISOString().replace('T', ' ').replace('Z', '');
+      const tzEnd = new Date(dayEndUtc + 2 * 3600000).toISOString().replace('T', ' ').replace('Z', '');
 
       const resp = await trainerizePost('/appointment/getList', {
         userID: getTrainerizeTrainerId(env),
-        startDate: tzDayStart,
-        endDate: tzDayEnd,
+        startDate: tzStart,
+        endDate: tzEnd,
         start: 0,
         count: 50,
       }, env);
       if (resp.ok) {
         const data = await resp.json();
         for (const apt of (data.appointments || [])) {
-          // startDate is UTC in Trainerize response
           const startStr = apt.startDate || apt.startDateTime;
           if (!startStr) continue;
           const startMs = new Date(startStr.replace(' ', 'T') + 'Z').getTime();
@@ -847,8 +857,9 @@ async function getCoachAvailability(date, duration, env) {
           const endMs = endStr
             ? new Date(endStr.replace(' ', 'T') + 'Z').getTime()
             : startMs + (apt.duration || 60) * 60000;
-          for (let t = startMs; t < endMs; t += 30 * 60000) {
-            bookedSlotKeys.add(toSlotKey(t));
+          // Block in 15-min increments to match Square's granularity
+          for (let t = startMs; t < endMs; t += 15 * 60000) {
+            tzBlockedUtc.add(new Date(t).toISOString().replace('.000', ''));
           }
         }
       }
@@ -857,51 +868,56 @@ async function getCoachAvailability(date, duration, env) {
     }
   }
 
-  // ===== GENERATE SLOTS (in Eastern time, stored as UTC) =====
+  // ===== STEP 3: Build unified slots =====
+  // Only show slots that Square says are available AND Trainerize doesn't block
   const now = Date.now();
   const bufferMs = BOOKING_BUFFER_MINUTES * 60000;
   const slots = [];
-  let h = OPEN_H;
-  let m = OPEN_M;
+  const seenTimes = new Set();
 
-  while (h < CLOSE_H || (h === CLOSE_H && m + duration <= CLOSE_M)) {
-    const slotUtcMs = easternToUtcMs(h, m);
+  // Convert Square available slots to our 30-min grid
+  for (const isoStr of squareAvailableUtc) {
+    const utcMs = new Date(isoStr).getTime();
+    const { h, m } = utcToEastern(utcMs);
 
-    // Check all 30-min sub-blocks for this duration
-    let blocked = false;
-    for (let t = slotUtcMs; t < slotUtcMs + duration * 60000; t += 30 * 60000) {
-      if (bookedSlotKeys.has(toSlotKey(t))) {
-        blocked = true;
-        break;
-      }
-    }
+    // Round to 30-min slots for display
+    const roundedM = m < 15 ? 0 : m < 45 ? 30 : 0;
+    const roundedH = m >= 45 ? h + 1 : h;
+    const slotKey = `${roundedH}:${String(roundedM).padStart(2, '0')}`;
+    if (seenTimes.has(slotKey)) continue;
+    seenTimes.add(slotKey);
 
-    const isPast = slotUtcMs < now;
-    const withinBuffer = !isPast && (slotUtcMs - now) < bufferMs;
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    const displayH = h % 12 || 12;
-    const displayM = String(m).padStart(2, '0');
+    // Check if Trainerize blocks this slot
+    const blockedByTz = tzBlockedUtc.has(isoStr) ||
+      tzBlockedUtc.has(new Date(utcMs).toISOString().replace('.000', ''));
+
+    const isPast = utcMs < now;
+    const withinBuffer = !isPast && (utcMs - now) < bufferMs;
+    const ampm = roundedH >= 12 ? 'PM' : 'AM';
+    const displayH = roundedH % 12 || 12;
+    const displayM = String(roundedM).padStart(2, '0');
 
     slots.push({
       time: `${displayH}:${displayM} ${ampm}`,
-      startAt: new Date(slotUtcMs).toISOString(),
-      available: !blocked && !isPast,
-      requiresConfirmation: withinBuffer && !blocked && !isPast,
-      blocked,
+      startAt: isoStr,
+      available: !blockedByTz && !isPast,
+      requiresConfirmation: withinBuffer && !blockedByTz && !isPast,
+      blocked: blockedByTz,
       duration,
     });
-
-    m += 30;
-    if (m >= 60) { h++; m = 0; }
   }
+
+  // Sort by time
+  slots.sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime());
 
   return {
     date,
     timezone: TIMEZONE,
-    businessHours: { open: `${String(OPEN_H).padStart(2,'0')}:${String(OPEN_M).padStart(2,'0')}`, close: `${String(CLOSE_H).padStart(2,'0')}:${String(CLOSE_M).padStart(2,'0')}` },
+    businessHours: { open: '06:00', close: '20:30' },
     bufferMinutes: BOOKING_BUFFER_MINUTES,
     cancelNoticeHours: CANCEL_NOTICE_HOURS,
     slots,
+    source: squareAvailableUtc.size > 0 ? 'square' : 'fallback',
   };
 }
 

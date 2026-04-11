@@ -132,10 +132,19 @@ function headers() {
 }
 
 function formatTime(hours: number, minutes: number): string {
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  const h = hours % 12 || 12;
+  const h24 = ((hours % 24) + 24) % 24; // handle negative hours
+  const ampm = h24 >= 12 ? 'PM' : 'AM';
+  const h = h24 % 12 || 12;
   const m = minutes.toString().padStart(2, '0');
   return `${h}:${m} ${ampm}`;
+}
+
+/** Convert UTC Date to Eastern time string (handles EST/EDT). Fallback path only — worker handles this in production. */
+function formatTimeFromUTC(utcDate: Date): string {
+  const month = utcDate.getUTCMonth();
+  const isDST = month >= 3 && month <= 9; // Approximate: Apr-Oct = EDT
+  const offset = isDST ? -4 : -5;
+  return formatTime(utcDate.getUTCHours() + offset, utcDate.getUTCMinutes());
 }
 
 // ===== TEAM MEMBERS =====
@@ -336,7 +345,7 @@ async function fetchAvailabilityFromSquare(
       if (!byDate[dateKey]) byDate[dateKey] = [];
 
       byDate[dateKey].push({
-        time: formatTime(startAt.getHours(), startAt.getMinutes()),
+        time: formatTimeFromUTC(startAt), // Convert UTC to Eastern (fallback path only)
         startAt: avail.start_at,
         available: true,
         teamMemberId: avail.appointment_segments?.[0]?.team_member_id || teamMemberId || '',

@@ -481,12 +481,26 @@ export default {
 
       const event = JSON.parse(body);
       const eventType = event.type;
+      const eventId = event.event_id || '';
 
-      console.log(`Webhook received: ${eventType}`);
+      console.log(`Webhook received: ${eventType} (${eventId})`);
 
       // Return 200 immediately so Square doesn't retry, then process in background
       const processingPromise = (async () => {
         try {
+          // Event-level idempotency: skip if this exact event was already processed
+          // Prevents double-processing when Square retries, or when subscription.updated
+          // and payment.completed fire for the same renewal.
+          if (eventId) {
+            const processedKey = `webhook-event:${eventId}`;
+            const alreadyProcessed = await kvGet(processedKey, env);
+            if (alreadyProcessed) {
+              console.log(`Skipping duplicate event: ${eventId}`);
+              return;
+            }
+            await kvPut(processedKey, eventType, { expirationTtl: 7 * 24 * 3600 }, env);
+          }
+
           // ---- BOOKING EVENTS → Trainerize calendar sync ----
           if (eventType === 'booking.created' || eventType === 'booking.updated') {
             const booking = event.data?.object?.booking;
@@ -617,7 +631,21 @@ export default {
 async function handleSubscriptionRenewal(subscription, env) {
   const customerId = subscription.customer_id;
   const subscriptionId = subscription.id;
-  const planName = subscription.plan_variation_data?.name || '';
+  // Square subscription has plan_variation_id, not plan_variation_data.
+  // Fetch the plan name from the catalog using the ID.
+  let planName = '';
+  if (subscription.plan_variation_id) {
+    try {
+      const catResp = await fetch(
+        `${getSquareApiBase(env)}/catalog/object/${subscription.plan_variation_id}`,
+        { headers: getSquareHeaders(env) }
+      );
+      if (catResp.ok) {
+        const catData = await catResp.json();
+        planName = catData.object?.subscription_plan_variation_data?.name || '';
+      }
+    } catch { /* catalog fetch failed */ }
+  }
 
   // Idempotency: skip if this exact subscription event was already processed
   const idempotencyKey = `sub-renewal:${subscriptionId}:${subscription.version || subscription.updated_at || ''}`;

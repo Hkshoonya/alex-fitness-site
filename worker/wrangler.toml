@@ -26,6 +26,7 @@ crons = ["*/15 * * * *"]
 # subscription.updated    → renewal success, canceled, paused
 # payment.completed       → payment went through
 # payment.failed          → card declined
-# invoice.payment_made    → invoice paid
+# order.updated           → order completed → assigns session credits
+# invoice.payment_made    → invoice paid (including auto-invoices)
 # invoice.payment_failed  → invoice payment failed
 # invoice.updated         → invoice status changed (overdue, etc.)

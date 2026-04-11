@@ -380,11 +380,25 @@ export default {
         }
       }
 
+      // ---- ORDER COMPLETED → credit assignment for session credit purchases ----
+      if (eventType === 'order.fulfilled' || eventType === 'order.updated') {
+        const order = event.data?.object?.order;
+        if (order?.state === 'COMPLETED' && order?.customer_id) {
+          await handleCreditPurchaseOrder(order, env);
+        }
+      }
+
       // ---- INVOICE EVENTS ----
       if (eventType === 'invoice.payment_made') {
         const invoice = event.data?.object?.invoice;
         if (invoice?.primary_recipient?.customer_id) {
           await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'paid', invoice, env);
+
+          // If this is a session invoice we auto-created, update Trainerize note
+          const invoiceNote = invoice.description || '';
+          if (invoiceNote.includes('Auto-invoice for session')) {
+            await handleSessionInvoicePaid(invoice, env);
+          }
         }
       }
 
@@ -1237,6 +1251,223 @@ function getSquareHeaders(env) {
   };
 }
 
+// ===== ORDER-BASED CREDIT PURCHASES =====
+
+/**
+ * Handle a completed Square order that contains session credits.
+ * Called when order.fulfilled or order.updated fires with state=COMPLETED.
+ */
+async function handleCreditPurchaseOrder(order, env) {
+  if (!isTrainerizeConfigured(env)) return;
+
+  // Idempotency: skip if already processed
+  const orderKey = `order-processed:${order.id}`;
+  if (await env.CHALLENGES_KV.get(orderKey)) return;
+
+  let totalCredits = 0;
+  let duration = 60;
+
+  for (const li of (order.line_items || [])) {
+    const name = li.name || '';
+    const qty = parseInt(li.quantity || '1');
+    const varName = li.variation_name || '';
+
+    if (name.includes('Training Session Credits') || name.includes('Single Session')) {
+      totalCredits += qty;
+      if (varName.includes('30') || name.includes('30')) duration = 30;
+      else if (varName.includes('90') || name.includes('90')) duration = 90;
+    } else if (name.includes('Training Plan') || name.includes('Training plan')) {
+      if (name.includes('12 Week') || name.includes('13 Week')) totalCredits += 12;
+      else if (varName.includes('2x/week')) totalCredits += qty * 4;
+      else if (varName.includes('1x/week')) totalCredits += qty * 2;
+      else totalCredits += qty * 4;
+      if (name.includes('90')) duration = 90;
+    }
+  }
+
+  if (totalCredits === 0) return;
+
+  // Get customer email
+  const email = await getCustomerEmail(order.customer_id, env);
+  if (!email) return;
+
+  const userId = await findTrainerizeUserByEmail(email, env);
+  if (!userId) {
+    console.log(`Order credit sync: Trainerize user not found for ${email}`);
+    return;
+  }
+
+  // Add credits (stack on top of existing)
+  const existing = await env.CHALLENGES_KV.get(`credits:${userId}`);
+  let creditData;
+  if (existing) {
+    creditData = JSON.parse(existing);
+    creditData.remaining += totalCredits;
+    creditData.total += totalCredits;
+  } else {
+    creditData = {
+      userId, email, total: totalCredits, remaining: totalCredits,
+      duration, planName: 'Square order',
+      validUntil: new Date(Date.now() + 90 * 24 * 3600000).toISOString(),
+      updatedAt: new Date().toISOString(), deductions: [],
+    };
+  }
+  creditData.updatedAt = new Date().toISOString();
+  await env.CHALLENGES_KV.put(`credits:${userId}`, JSON.stringify(creditData));
+
+  // Update Trainerize tag
+  await clearCreditTags(userId, env);
+  const tagCredits = Math.min(creditData.remaining, 24);
+  await trainerizePost('/user/addTag', { userID: userId, userTag: `credits:${tagCredits}` }, env);
+
+  // Add note
+  const totalPaid = (order.total_money?.amount || 0) / 100;
+  await trainerizePost('/trainerNote/add', {
+    userID: userId,
+    content: `${totalCredits} session credits added (Square order $${totalPaid.toFixed(0)}). Balance: ${creditData.remaining}/${creditData.total}.`,
+    type: 'general',
+  }, env);
+
+  // Mark order as processed
+  await env.CHALLENGES_KV.put(orderKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 });
+  console.log(`Order credit sync: ${email} +${totalCredits} credits (order ${order.id.slice(0, 8)})`);
+}
+
+// ===== PAY-PER-SESSION AUTO-INVOICE =====
+
+// Square catalog variation IDs for single sessions
+const SESSION_CATALOG = {
+  30: { variationId: '66QDZG33XW3F62H', price: 5000, name: 'PT - 30 Minute Session' },
+  60: { variationId: 'DFDGPQ56NTEWU4T', price: 8000, name: 'PT - 60 Minute Session' },
+  90: { variationId: 'EFAXK3SOJJPNK2G', price: 11000, name: 'PT - 90 Minute' },
+};
+
+/**
+ * Create and send a Square invoice for a completed session.
+ * Called by the cron when a past session has no credit balance.
+ */
+async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, durationMin, env) {
+  const catalog = SESSION_CATALOG[durationMin] || SESSION_CATALOG[60];
+  const locationId = 'LD0SGZXT6ZSSD';
+
+  // Find Square customer by name
+  const firstName = attendeeName.split(' ')[0];
+  const lastName = attendeeName.split(' ').slice(1).join(' ');
+  const squareCustomerId = await findSquareCustomerByName(firstName, lastName, env);
+
+  if (!squareCustomerId) {
+    console.log(`Auto-invoice: Square customer not found for ${attendeeName}`);
+    return;
+  }
+
+  try {
+    // 1. Create Square order
+    const orderResp = await fetch(`${getSquareApiBase(env)}/orders`, {
+      method: 'POST',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({
+        idempotency_key: `auto-invoice-${attendeeUserId}-${sessionDate}`,
+        order: {
+          location_id: locationId,
+          customer_id: squareCustomerId,
+          line_items: [{
+            catalog_object_id: catalog.variationId,
+            quantity: '1',
+          }],
+        },
+      }),
+    });
+    if (!orderResp.ok) {
+      console.error('Auto-invoice: order creation failed:', await orderResp.text());
+      return;
+    }
+    const orderData = await orderResp.json();
+    const orderId = orderData.order?.id;
+    if (!orderId) return;
+
+    // 2. Create invoice from order
+    const dueDate = new Date(Date.now() + 7 * 24 * 3600000).toISOString().split('T')[0];
+    const invoiceResp = await fetch(`${getSquareApiBase(env)}/invoices`, {
+      method: 'POST',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({
+        idempotency_key: `inv-${attendeeUserId}-${sessionDate}`,
+        invoice: {
+          location_id: locationId,
+          order_id: orderId,
+          primary_recipient: { customer_id: squareCustomerId },
+          payment_requests: [{
+            request_type: 'BALANCE',
+            due_date: dueDate,
+            automatic_payment_source: 'CARD_ON_FILE',
+          }],
+          delivery_method: 'EMAIL',
+          title: `Training Session - ${sessionDate}`,
+          description: `Auto-invoice for session on ${sessionDate} (${durationMin} min)`,
+          accepted_payment_methods: { card: true, square_gift_card: false, bank_account: false },
+        },
+      }),
+    });
+    if (!invoiceResp.ok) {
+      console.error('Auto-invoice: invoice creation failed:', await invoiceResp.text());
+      return;
+    }
+    const invoiceData = await invoiceResp.json();
+    const invoiceId = invoiceData.invoice?.id;
+    const invoiceVersion = invoiceData.invoice?.version;
+    if (!invoiceId) return;
+
+    // 3. Publish (send) the invoice
+    const publishResp = await fetch(`${getSquareApiBase(env)}/invoices/${invoiceId}/publish`, {
+      method: 'POST',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({
+        idempotency_key: `pub-${invoiceId}`,
+        version: invoiceVersion,
+      }),
+    });
+    if (!publishResp.ok) {
+      console.error('Auto-invoice: publish failed:', await publishResp.text());
+      return;
+    }
+
+    // 4. Add note in Trainerize
+    await trainerizePost('/trainerNote/add', {
+      userID: attendeeUserId,
+      content: `Invoice sent for ${durationMin}min session on ${sessionDate} — $${(catalog.price / 100).toFixed(0)} (due ${dueDate}). Invoice #${invoiceId.slice(0, 8)}`,
+      type: 'general',
+    }, env);
+
+    console.log(`Auto-invoice sent: ${attendeeName} → $${catalog.price / 100} for ${sessionDate}`);
+  } catch (e) {
+    console.error('Auto-invoice error:', e);
+  }
+}
+
+/**
+ * Handle payment of a session invoice we auto-created.
+ * Updates Trainerize with payment confirmation.
+ */
+async function handleSessionInvoicePaid(invoice, env) {
+  const customerId = invoice.primary_recipient?.customer_id;
+  if (!customerId) return;
+
+  const email = await getCustomerEmail(customerId, env);
+  if (!email) return;
+
+  const userId = await findTrainerizeUserByEmail(email, env);
+  if (!userId) return;
+
+  const amount = (invoice.payment_requests?.[0]?.computed_amount_money?.amount || 0) / 100;
+  await trainerizePost('/trainerNote/add', {
+    userID: userId,
+    content: `Session payment received: $${amount.toFixed(0)} (Invoice #${(invoice.id || '').slice(0, 8)})`,
+    type: 'general',
+  }, env);
+
+  await trainerizePost('/user/addTag', { userID: userId, userTag: 'payment-paid' }, env);
+}
+
 // ===== TRAINERIZE → SQUARE REVERSE SYNC =====
 
 /**
@@ -1443,9 +1674,24 @@ async function deductCreditsForCompletedSessions(env) {
       const attendee = apt.attendents?.[0];
       if (!attendee?.userID) continue;
 
-      // Only deduct if the client actually has credits in KV (from a real subscription)
+      // Check if client has credits
       const creditRaw = await env.CHALLENGES_KV.get(`credits:${attendee.userID}`);
-      if (!creditRaw) continue;
+      const hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0;
+
+      if (!hasCredits) {
+        // No credits → auto-invoice this session (pay-per-session client)
+        const sessionDate = (apt.startDateTime || apt.startDate || '').split(' ')[0];
+        const startMs = new Date((apt.startDate || apt.startDateTime).replace(' ', 'T') + 'Z').getTime();
+        const endMs = new Date((apt.endDate || apt.endDateTime).replace(' ', 'T') + 'Z').getTime();
+        const durationMin = Math.round((endMs - startMs) / 60000) || 60;
+        const attName = `${attendee.firstName || ''} ${attendee.lastName || ''}`.trim();
+
+        await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env);
+
+        // Mark as counted so we don't invoice again
+        await env.CHALLENGES_KV.put(countedKey, 'invoiced', { expirationTtl: 90 * 24 * 3600 });
+        continue;
+      }
 
       // Check if this slot was already handled by a late-cancel deduction
       const startStr = apt.startDate || apt.startDateTime;

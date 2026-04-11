@@ -756,46 +756,60 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
     nextDueDate = eventData.next_payment_date;
   }
 
+  // Determine if client is ACTIVE (has credits or active subscription) vs INACTIVE
+  const creditRaw = await env.CHALLENGES_KV.get(`credits:${userId}`);
+  const hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0;
+  const isActiveClient = hasCredits || status === 'paid';
+  const isLeavingClient = status === 'canceled' || status === 'paused';
+
   // Tag definitions — both old plain tags and new visual tags
-  const allPaymentTags = [
+  const allStatusTags = [
     'payment-paid', 'payment-due', 'payment-unpaid', 'payment-overdue', 'payment-canceled', 'payment-paused',
     '✅ Paid', '⚠️ Payment Due', '🔴 Payment Overdue', '❌ Payment Failed', '⏸️ Paused',
+    '🟢 Active Client', '💤 Inactive',
   ];
   const visualTags = {
     paid: '✅ Paid',
     due: '⚠️ Payment Due',
     unpaid: '❌ Payment Failed',
     overdue: '🔴 Payment Overdue',
-    canceled: '❌ Payment Failed',
-    paused: '⏸️ Paused',
+    canceled: '💤 Inactive',
+    paused: '💤 Inactive',
   };
   const newTag = visualTags[status] || `payment-${status}`;
 
-  // 1. Remove old payment tags, add new one
+  // 1. Remove old tags, set new ones
   try {
-    for (const tag of allPaymentTags) {
+    for (const tag of allStatusTags) {
       await trainerizePost('/user/deleteTag', { userID: userId, userTag: tag }, env);
     }
 
-    // Add visual status tag
+    // Add status tag
     await trainerizePost('/user/addTag', { userID: userId, userTag: newTag }, env);
 
-    // Add next-due-date tag if available
-    if (nextDueDate) {
+    // Add active/inactive tag
+    if (isActiveClient) {
+      await trainerizePost('/user/addTag', { userID: userId, userTag: '🟢 Active Client' }, env);
+    } else if (isLeavingClient) {
+      await trainerizePost('/user/addTag', { userID: userId, userTag: '💤 Inactive' }, env);
+    }
+
+    // Add next-due-date tag if available and client is active
+    if (nextDueDate && isActiveClient) {
       await trainerizePost('/user/addTag', { userID: userId, userTag: `next-due:${nextDueDate}` }, env);
     }
   } catch (e) {
     console.error('Trainerize tag update failed:', e);
   }
 
-  // 2. Add payment history as trainer note
+  // 2. Add trainer note (internal, always logged)
   const noteLines = {
     paid: `Payment received ${amount} on ${now}${nextDueDate ? `. Next due: ${nextDueDate}` : ''}`,
     due: `Payment due ${amount}${nextDueDate ? ` on ${nextDueDate}` : ''}`,
     unpaid: `Payment failed ${amount} on ${now}. Card on file was declined.`,
     overdue: `Payment overdue ${amount} as of ${now}. Please update payment method.`,
-    canceled: `Subscription canceled on ${now}.`,
-    paused: `Subscription paused on ${now}.`,
+    canceled: `Subscription canceled on ${now}. Client marked inactive.`,
+    paused: `Subscription paused on ${now}. Client marked inactive.`,
   };
 
   try {
@@ -808,15 +822,34 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
     console.error('Trainerize note update failed:', e);
   }
 
-  // 3. Send client-facing message for payment issues (shows in their app inbox)
-  if (status === 'due' || status === 'unpaid' || status === 'overdue') {
-    const clientMessages = {
-      due: `Hi! Just a reminder that your training session payment ${amount ? `of ${amount} ` : ''}is coming up${nextDueDate ? ` on ${nextDueDate}` : ''}. Please make sure your payment method is up to date. Thanks!`,
-      unpaid: `Hi! We noticed your recent payment ${amount ? `of ${amount} ` : ''}didn't go through. Please update your payment method to continue your training sessions. Let me know if you have any questions!`,
-      overdue: `Hi! Your payment ${amount ? `of ${amount} ` : ''}is currently overdue. Please update your payment method as soon as possible to avoid any interruption to your training. Thank you!`,
-    };
+  // 3. Client-facing messages — different for active vs inactive clients
+  try {
+    if (isLeavingClient) {
+      // ---- INACTIVE: Send warm "we miss you" re-engagement message ----
+      const reEngageMessages = [
+        `Hey! Just wanted to check in and see how you're doing. We miss seeing you at the studio! Remember, every workout counts — even a short one. Whenever you're ready to jump back in, we're here for you. No pressure, just support! 💪`,
+        `Hi there! It's been a minute since your last session and I just wanted to say — your progress was awesome and I'd love to help you keep that momentum going. Feel free to reach out whenever you're ready to get back at it!`,
+        `Hey! Hope you're doing well! Just a friendly note — your spot is always open here. Whether it's a fresh start or picking up where you left off, I'm ready when you are. Let's crush some goals together! 🔥`,
+      ];
+      const msg = reEngageMessages[Math.floor(Math.random() * reEngageMessages.length)];
 
-    try {
+      await trainerizePost('/message/send', {
+        userID: getTrainerizeTrainerId(env),
+        recipients: [userId],
+        subject: 'We Miss You!',
+        body: msg,
+        threadType: 'mainThread',
+        conversationType: 'single',
+        type: 'text',
+      }, env);
+    } else if (isActiveClient && (status === 'due' || status === 'unpaid' || status === 'overdue')) {
+      // ---- ACTIVE: Send payment reminder only to active clients ----
+      const clientMessages = {
+        due: `Hi! Just a reminder that your training session payment ${amount ? `of ${amount} ` : ''}is coming up${nextDueDate ? ` on ${nextDueDate}` : ''}. Please make sure your payment method is up to date. Thanks!`,
+        unpaid: `Hi! We noticed your recent payment ${amount ? `of ${amount} ` : ''}didn't go through. Please update your payment method to continue your training sessions. Let me know if you have any questions!`,
+        overdue: `Hi! Your payment ${amount ? `of ${amount} ` : ''}is currently overdue. Please update your payment method as soon as possible to avoid any interruption to your training. Thank you!`,
+      };
+
       await trainerizePost('/message/send', {
         userID: getTrainerizeTrainerId(env),
         recipients: [userId],
@@ -826,12 +859,14 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
         conversationType: 'single',
         type: 'text',
       }, env);
-    } catch (e) {
-      console.error('Payment notification message failed:', e);
     }
+    // Note: inactive clients with due/overdue do NOT get payment nag messages
+  } catch (e) {
+    console.error('Client message failed:', e);
   }
 
   // 4. Nudge tags — triggers Trainerize push notification, non-persistent
+  //    Only for ACTIVE clients — don't push-notify inactive clients about payments
   //
   // How this works:
   // - We add a "nudge:payment-paid" tag → Trainerize fires a push notification
@@ -843,19 +878,17 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
   //   Trigger: Tag "nudge:payment-due" added
   //   Action: Send push notification "Your payment is coming up!"
 
-  const nudgeTag = `nudge:${newTag}`;
-
-  try {
-    // Remove old nudge tags first so the new one fires fresh
-    await removeOldNudgeTags(userId, nudgeTag, env);
-
-    // Add nudge tag → triggers push notification via Trainerize Automation
-    await trainerizePost('/user/addTag', { userID: userId, userTag: nudgeTag }, env);
-  } catch (e) {
-    console.error('Trainerize nudge failed:', e);
+  if (isActiveClient) {
+    const nudgeTag = `nudge:${newTag}`;
+    try {
+      await removeOldNudgeTags(userId, nudgeTag, env);
+      await trainerizePost('/user/addTag', { userID: userId, userTag: nudgeTag }, env);
+    } catch (e) {
+      console.error('Trainerize nudge failed:', e);
+    }
   }
 
-  console.log(`Payment status synced to Trainerize: ${email} → ${status} ${amount}`);
+  console.log(`Payment status synced: ${email} → ${status} (${isActiveClient ? 'active' : 'inactive'})`);
 }
 
 /**

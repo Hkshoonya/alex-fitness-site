@@ -424,7 +424,15 @@ export default {
  */
 async function handleSubscriptionRenewal(subscription, env) {
   const customerId = subscription.customer_id;
+  const subscriptionId = subscription.id;
   const planName = subscription.plan_variation_data?.name || '';
+
+  // Idempotency: skip if this exact subscription event was already processed
+  const idempotencyKey = `sub-renewal:${subscriptionId}:${subscription.version || subscription.updated_at || ''}`;
+  if (await env.CHALLENGES_KV.get(idempotencyKey)) {
+    console.log(`Subscription renewal already processed: ${subscriptionId}`);
+    return;
+  }
 
   // Find matching plan credits
   const credits = findPlanCredits(planName);
@@ -442,6 +450,11 @@ async function handleSubscriptionRenewal(subscription, env) {
 
   // Update credits in Trainerize
   await updateTrainerizeCredits(customerEmail, planName, credits, env);
+
+  // Mark as processed (60-day TTL)
+  await env.CHALLENGES_KV.put(idempotencyKey, new Date().toISOString(), {
+    expirationTtl: 60 * 24 * 3600,
+  });
 
   console.log(`Credits added: ${customerEmail} → ${credits.sessions} sessions (${planName})`);
 }
@@ -901,6 +914,12 @@ async function syncBookingToTrainerize(booking, env) {
 
       if (isLateCancel) {
         await deductSessionCredit(userId, `Late cancellation (${dateStr}, <24hrs notice)`, env);
+        // Mark this time slot as credit-handled so the cron doesn't deduct again
+        await env.CHALLENGES_KV.put(
+          `credit-handled:${userId}:${startAt}`,
+          'late-cancel',
+          { expirationTtl: 90 * 24 * 3600 }
+        );
       }
 
       const creditWarning = isLateCancel
@@ -1416,7 +1435,7 @@ async function deductCreditsForCompletedSessions(env) {
       const endMs = new Date(endStr.replace(' ', 'T') + 'Z').getTime();
       if (endMs > now.getTime()) continue;
 
-      // Check if already counted
+      // Check if already counted by a previous cron run
       const countedKey = `session-counted:${apt.id}`;
       if (await env.CHALLENGES_KV.get(countedKey)) continue;
 
@@ -1424,7 +1443,25 @@ async function deductCreditsForCompletedSessions(env) {
       const attendee = apt.attendents?.[0];
       if (!attendee?.userID) continue;
 
-      // Deduct credit
+      // Only deduct if the client actually has credits in KV (from a real subscription)
+      const creditRaw = await env.CHALLENGES_KV.get(`credits:${attendee.userID}`);
+      if (!creditRaw) continue;
+
+      // Check if this slot was already handled by a late-cancel deduction
+      const startStr = apt.startDate || apt.startDateTime;
+      if (startStr) {
+        const startAtIso = startStr.replace(' ', 'T') + 'Z';
+        const cancelKey = `credit-handled:${attendee.userID}:${startAtIso}`;
+        if (await env.CHALLENGES_KV.get(cancelKey)) {
+          // Already deducted via late cancel — just mark as counted and skip
+          await env.CHALLENGES_KV.put(countedKey, 'cancel-deducted', {
+            expirationTtl: 90 * 24 * 3600,
+          });
+          continue;
+        }
+      }
+
+      // Deduct credit for completed session
       const dateStr = (apt.startDateTime || apt.startDate || '').split(' ')[0];
       await deductSessionCredit(attendee.userID, `Session completed (${dateStr})`, env);
 
@@ -1432,6 +1469,16 @@ async function deductCreditsForCompletedSessions(env) {
       await env.CHALLENGES_KV.put(countedKey, new Date().toISOString(), {
         expirationTtl: 90 * 24 * 3600,
       });
+
+      // Also mark by user+time to prevent any future double-counting
+      if (startStr) {
+        const startAtIso = startStr.replace(' ', 'T') + 'Z';
+        await env.CHALLENGES_KV.put(
+          `credit-handled:${attendee.userID}:${startAtIso}`,
+          'session-completed',
+          { expirationTtl: 90 * 24 * 3600 }
+        );
+      }
     }
   } catch (e) {
     console.error('Session credit deduction cron failed:', e);

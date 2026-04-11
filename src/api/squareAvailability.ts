@@ -83,14 +83,15 @@ const FALLBACK_TEAM: TeamMember[] = [
 ];
 
 // Business hours for fallback
+// Business hours: 6:00 AM – 8:30 PM EST, every day (fallback only — worker is primary)
 const BUSINESS_HOURS: Record<number, { open: string; close: string } | null> = {
-  0: { open: '09:00', close: '18:00' }, // Sunday
-  1: { open: '07:30', close: '20:00' },
-  2: { open: '07:30', close: '20:00' },
-  3: { open: '07:30', close: '20:00' },
-  4: { open: '07:30', close: '20:00' },
-  5: { open: '07:30', close: '20:00' },
-  6: { open: '09:00', close: '18:00' }, // Saturday
+  0: { open: '06:00', close: '20:30' }, // Sunday
+  1: { open: '06:00', close: '20:30' },
+  2: { open: '06:00', close: '20:30' },
+  3: { open: '06:00', close: '20:30' },
+  4: { open: '06:00', close: '20:30' },
+  5: { open: '06:00', close: '20:30' },
+  6: { open: '06:00', close: '20:30' }, // Saturday
 };
 
 const DEFAULT_SLOT_INTERVAL = 30; // generate slots every 30 min

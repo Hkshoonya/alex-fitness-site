@@ -764,44 +764,55 @@ async function syncBookingToTrainerize(booking, env) {
 
 /**
  * Get coach's real-time availability for a date.
- * Merges Square bookings + Trainerize appointments to show true availability.
- * Enforces 90-minute booking buffer.
+ * Merges Square bookings + Trainerize appointments into ONE unified calendar.
+ * All times are Eastern (America/New_York). Enforces 90-minute booking buffer.
+ *
+ * Both Square and Trainerize are checked — a booking in EITHER system blocks the slot.
+ * This means:
+ *   - Client books on Square → blocked on website + Trainerize
+ *   - Coach blocks time in Trainerize → blocked on website + Square availability
+ *   - Client books on website → creates in Square → webhook syncs to Trainerize
  */
 async function getCoachAvailability(date, duration, env) {
-  const BUSINESS_HOURS = {
-    0: { open: '09:00', close: '18:00' }, // Sunday
-    1: { open: '07:30', close: '20:00' },
-    2: { open: '07:30', close: '20:00' },
-    3: { open: '07:30', close: '20:00' },
-    4: { open: '07:30', close: '20:00' },
-    5: { open: '07:30', close: '20:00' },
-    6: { open: '09:00', close: '18:00' }, // Saturday
-  };
+  // Business hours: 6:00 AM – 8:30 PM Eastern, every day
+  const OPEN_H = 6, OPEN_M = 0;
+  const CLOSE_H = 20, CLOSE_M = 30;
 
-  const d = new Date(date + 'T12:00:00');
-  const dayOfWeek = d.getDay();
-  const hours = BUSINESS_HOURS[dayOfWeek];
-  if (!hours) return { date, slots: [], message: 'Closed' };
+  // EST = UTC-5 (Florida, no daylight saving adjustment)
+  const TZ_OFFSET_HOURS = -5;
+  const TZ_OFFSET_MS = TZ_OFFSET_HOURS * 3600000;
 
-  const [openH, openM] = hours.open.split(':').map(Number);
-  const [closeH, closeM] = hours.close.split(':').map(Number);
+  // Helper: create a UTC timestamp for a given Eastern time on this date
+  function easternToUtcMs(h, m) {
+    // Eastern time → UTC: subtract the offset (add because offset is negative)
+    return new Date(`${date}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00Z`).getTime() - TZ_OFFSET_MS;
+  }
 
-  // Get booked slots from Square
-  const squareBooked = new Set();
+  // Helper: convert UTC ms to a slot key for comparison (rounded to 30-min blocks)
+  function toSlotKey(utcMs) {
+    return new Date(utcMs).toISOString().slice(0, 16);
+  }
+
+  // Collect ALL blocked UTC time ranges from both systems
+  const bookedSlotKeys = new Set();
+
+  // ===== SQUARE BOOKINGS =====
+  // Square times are always UTC
+  const dayStartUtc = easternToUtcMs(OPEN_H, OPEN_M);
+  const dayEndUtc = easternToUtcMs(CLOSE_H, CLOSE_M);
   try {
     const resp = await fetch(
-      `${getSquareApiBase(env)}/bookings?start_at_min=${date}T00:00:00Z&start_at_max=${date}T23:59:59Z&limit=100`,
+      `${getSquareApiBase(env)}/bookings?start_at_min=${new Date(dayStartUtc).toISOString()}&start_at_max=${new Date(dayEndUtc).toISOString()}&limit=100`,
       { headers: getSquareHeaders(env) }
     );
     if (resp.ok) {
       const data = await resp.json();
       for (const b of (data.bookings || [])) {
         if (b.status === 'ACCEPTED' || b.status === 'PENDING') {
-          const start = new Date(b.start_at);
+          const startMs = new Date(b.start_at).getTime();
           const dur = b.appointment_segments?.[0]?.duration_minutes || 60;
-          // Block all 30-min slots covered by this booking
-          for (let t = start.getTime(); t < start.getTime() + dur * 60000; t += 30 * 60000) {
-            squareBooked.add(new Date(t).toISOString().slice(0, 16));
+          for (let t = startMs; t < startMs + dur * 60000; t += 30 * 60000) {
+            bookedSlotKeys.add(toSlotKey(t));
           }
         }
       }
@@ -810,24 +821,34 @@ async function getCoachAvailability(date, duration, env) {
     console.error('Square bookings fetch failed:', e);
   }
 
-  // Get booked slots from Trainerize (coach's appointments)
-  const tzBooked = new Set();
+  // ===== TRAINERIZE APPOINTMENTS =====
+  // Trainerize returns startDate in UTC (space-separated format)
   if (isTrainerizeConfigured(env)) {
     try {
+      // Fetch wider range to catch timezone edge cases
+      const tzDayStart = new Date(dayStartUtc).toISOString().replace('T', ' ').replace('Z', '');
+      const tzDayEnd = new Date(dayEndUtc).toISOString().replace('T', ' ').replace('Z', '');
+
       const resp = await trainerizePost('/appointment/getList', {
         userID: getTrainerizeTrainerId(env),
-        startDate: `${date}T00:00:00`,
-        endDate: `${date}T23:59:59`,
+        startDate: tzDayStart,
+        endDate: tzDayEnd,
         start: 0,
         count: 50,
       }, env);
       if (resp.ok) {
         const data = await resp.json();
-        for (const apt of (data.appointments || data.result || [])) {
-          const start = new Date(apt.startDate || apt.start);
-          const dur = apt.duration || 60;
-          for (let t = start.getTime(); t < start.getTime() + dur * 60000; t += 30 * 60000) {
-            tzBooked.add(new Date(t).toISOString().slice(0, 16));
+        for (const apt of (data.appointments || [])) {
+          // startDate is UTC in Trainerize response
+          const startStr = apt.startDate || apt.startDateTime;
+          if (!startStr) continue;
+          const startMs = new Date(startStr.replace(' ', 'T') + 'Z').getTime();
+          const endStr = apt.endDate || apt.endDateTime;
+          const endMs = endStr
+            ? new Date(endStr.replace(' ', 'T') + 'Z').getTime()
+            : startMs + (apt.duration || 60) * 60000;
+          for (let t = startMs; t < endMs; t += 30 * 60000) {
+            bookedSlotKeys.add(toSlotKey(t));
           }
         }
       }
@@ -836,37 +857,34 @@ async function getCoachAvailability(date, duration, env) {
     }
   }
 
-  // Generate time slots
+  // ===== GENERATE SLOTS (in Eastern time, stored as UTC) =====
   const now = Date.now();
   const bufferMs = BOOKING_BUFFER_MINUTES * 60000;
   const slots = [];
-  let h = openH;
-  let m = openM;
+  let h = OPEN_H;
+  let m = OPEN_M;
 
-  while (h < closeH || (h === closeH && m + duration <= closeM)) {
-    const slotStart = new Date(`${date}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`);
-    const slotKey = slotStart.toISOString().slice(0, 16);
-    const slotMs = slotStart.getTime();
+  while (h < CLOSE_H || (h === CLOSE_H && m + duration <= CLOSE_M)) {
+    const slotUtcMs = easternToUtcMs(h, m);
 
-    // Check all sub-slots for this duration
+    // Check all 30-min sub-blocks for this duration
     let blocked = false;
-    for (let t = slotMs; t < slotMs + duration * 60000; t += 30 * 60000) {
-      const key = new Date(t).toISOString().slice(0, 16);
-      if (squareBooked.has(key) || tzBooked.has(key)) {
+    for (let t = slotUtcMs; t < slotUtcMs + duration * 60000; t += 30 * 60000) {
+      if (bookedSlotKeys.has(toSlotKey(t))) {
         blocked = true;
         break;
       }
     }
 
-    const isPast = slotMs < now;
-    const withinBuffer = !isPast && (slotMs - now) < bufferMs;
+    const isPast = slotUtcMs < now;
+    const withinBuffer = !isPast && (slotUtcMs - now) < bufferMs;
     const ampm = h >= 12 ? 'PM' : 'AM';
     const displayH = h % 12 || 12;
     const displayM = String(m).padStart(2, '0');
 
     slots.push({
       time: `${displayH}:${displayM} ${ampm}`,
-      startAt: slotStart.toISOString(),
+      startAt: new Date(slotUtcMs).toISOString(),
       available: !blocked && !isPast,
       requiresConfirmation: withinBuffer && !blocked && !isPast,
       blocked,
@@ -880,7 +898,7 @@ async function getCoachAvailability(date, duration, env) {
   return {
     date,
     timezone: TIMEZONE,
-    businessHours: hours,
+    businessHours: { open: `${String(OPEN_H).padStart(2,'0')}:${String(OPEN_M).padStart(2,'0')}`, close: `${String(CLOSE_H).padStart(2,'0')}:${String(CLOSE_M).padStart(2,'0')}` },
     bufferMinutes: BOOKING_BUFFER_MINUTES,
     cancelNoticeHours: CANCEL_NOTICE_HOURS,
     slots,

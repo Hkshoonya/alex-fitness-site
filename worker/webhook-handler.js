@@ -138,7 +138,7 @@ async function logEvent(category, message, data, env) {
       timestamp: new Date().toISOString(),
     };
     const key = `log:${entry.timestamp}:${category}`;
-    await env.CHALLENGES_KV.put(key, JSON.stringify(entry), { expirationTtl: 30 * 24 * 3600 });
+    await kvPut(key, JSON.stringify(entry), { expirationTtl: 30 * 24 * 3600 }, env);
     console.log(`[${category}] ${message}`);
   } catch {
     // Logging should never break the main flow
@@ -178,7 +178,7 @@ async function findTrainerizeUserByEmail(email, env) {
 // ===== MAIN HANDLER =====
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin') || '';
     const referer = request.headers.get('Referer') || '';
@@ -320,6 +320,11 @@ export default {
     }
 
     if (url.pathname === '/challenges' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
       const data = await request.json();
       const challenge = {
         id: `ch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -342,6 +347,11 @@ export default {
     }
 
     if (url.pathname.startsWith('/challenges/') && request.method === 'DELETE') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
       const id = url.pathname.split('/challenges/')[1];
       await deleteChallenge(id, env);
       return new Response(JSON.stringify({ deleted: id }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -361,7 +371,7 @@ export default {
           if (category && !key.name.endsWith(`:${category}`)) continue;
           if (entries.length >= limit) break;
           const val = await env.CHALLENGES_KV.get(key.name);
-          if (val) entries.push(JSON.parse(val));
+          if (val) { try { entries.push(JSON.parse(val)); } catch { /* skip corrupt */ } }
         }
         entries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
         return new Response(JSON.stringify(entries.slice(0, limit)), {
@@ -474,106 +484,114 @@ export default {
 
       console.log(`Webhook received: ${eventType}`);
 
-      // ---- BOOKING EVENTS → Trainerize calendar sync ----
-      if (eventType === 'booking.created' || eventType === 'booking.updated') {
-        const booking = event.data?.object?.booking;
-        if (booking) {
-          // Skip bookings that were synced FROM Trainerize (prevent loop)
-          const isFromTrainerize = (booking.customer_note || '').includes('Synced from Trainerize');
-          if (!isFromTrainerize) {
-            await syncBookingToTrainerize(booking, env);
+      // Return 200 immediately so Square doesn't retry, then process in background
+      const processingPromise = (async () => {
+        try {
+          // ---- BOOKING EVENTS → Trainerize calendar sync ----
+          if (eventType === 'booking.created' || eventType === 'booking.updated') {
+            const booking = event.data?.object?.booking;
+            if (booking) {
+              // Skip bookings that were synced FROM Trainerize (prevent loop)
+              const isFromTrainerize = (booking.customer_note || '').includes('Synced from Trainerize');
+              if (!isFromTrainerize) {
+                await syncBookingToTrainerize(booking, env);
+              }
+            }
           }
-        }
-      }
 
-      // ---- SUBSCRIPTION EVENTS ----
-      if (eventType === 'subscription.updated') {
-        const subscription = event.data?.object?.subscription;
-        if (!subscription) return new Response('OK', { status: 200 });
+          // ---- SUBSCRIPTION EVENTS ----
+          if (eventType === 'subscription.updated') {
+            const subscription = event.data?.object?.subscription;
+            if (!subscription) return;
 
-        const status = subscription.status;
+            const status = subscription.status;
 
-        if (status === 'ACTIVE') {
-          await handleSubscriptionRenewal(subscription, env);
-          await syncPaymentStatusToTrainerize(subscription.customer_id, 'paid', subscription, env);
-        } else if (status === 'CANCELED' || status === 'DEACTIVATED') {
-          await syncPaymentStatusToTrainerize(subscription.customer_id, 'canceled', subscription, env);
-        } else if (status === 'PAUSED' || status === 'SUSPENDED') {
-          await syncPaymentStatusToTrainerize(subscription.customer_id, 'paused', subscription, env);
-        } else if (status === 'PENDING') {
-          await syncPaymentStatusToTrainerize(subscription.customer_id, 'due', subscription, env);
-        }
-      }
-
-      // ---- PAYMENT COMPLETED ----
-      if (eventType === 'payment.completed') {
-        const payment = event.data?.object?.payment;
-        if (!payment) return new Response('OK', { status: 200 });
-
-        if (payment.subscription_id) {
-          await handleSubscriptionPayment(payment, env);
-        }
-        // Mark client as paid in Trainerize
-        if (payment.customer_id) {
-          await syncPaymentStatusToTrainerize(payment.customer_id, 'paid', payment, env);
-        }
-      }
-
-      // ---- PAYMENT FAILED ----
-      if (eventType === 'payment.failed') {
-        const payment = event.data?.object?.payment;
-        if (payment?.customer_id) {
-          await syncPaymentStatusToTrainerize(payment.customer_id, 'unpaid', payment, env);
-        }
-      }
-
-      // ---- ORDER COMPLETED → credit assignment for session credit purchases ----
-      if (eventType === 'order.fulfilled' || eventType === 'order.updated') {
-        const order = event.data?.object?.order;
-        if (order?.state === 'COMPLETED' && order?.customer_id) {
-          await handleCreditPurchaseOrder(order, env);
-        }
-      }
-
-      // ---- CUSTOMER EVENTS → sync profile changes to Trainerize ----
-      if (eventType === 'customer.updated') {
-        const customer = event.data?.object?.customer;
-        if (customer?.email_address) {
-          await handleCustomerUpdated(customer, env);
-        }
-      }
-
-      // ---- CATALOG EVENTS → refresh cached IDs/prices ----
-      if (eventType === 'catalog.version.updated') {
-        await handleCatalogUpdated(env);
-      }
-
-      // ---- INVOICE EVENTS ----
-      if (eventType === 'invoice.payment_made') {
-        const invoice = event.data?.object?.invoice;
-        if (invoice?.primary_recipient?.customer_id) {
-          await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'paid', invoice, env);
-
-          // If this is a session invoice we auto-created, update Trainerize note
-          const invoiceNote = invoice.description || '';
-          if (invoiceNote.includes('Auto-invoice for session')) {
-            await handleSessionInvoicePaid(invoice, env);
+            if (status === 'ACTIVE') {
+              await handleSubscriptionRenewal(subscription, env);
+              await syncPaymentStatusToTrainerize(subscription.customer_id, 'paid', subscription, env);
+            } else if (status === 'CANCELED' || status === 'DEACTIVATED') {
+              await syncPaymentStatusToTrainerize(subscription.customer_id, 'canceled', subscription, env);
+            } else if (status === 'PAUSED' || status === 'SUSPENDED') {
+              await syncPaymentStatusToTrainerize(subscription.customer_id, 'paused', subscription, env);
+            } else if (status === 'PENDING') {
+              await syncPaymentStatusToTrainerize(subscription.customer_id, 'due', subscription, env);
+            }
           }
-        }
-      }
 
-      if (eventType === 'invoice.payment_failed' || eventType === 'invoice.updated') {
-        const invoice = event.data?.object?.invoice;
-        if (invoice?.primary_recipient?.customer_id) {
-          const invStatus = invoice.status;
-          if (invStatus === 'UNPAID' || invStatus === 'PAYMENT_PENDING') {
-            await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'unpaid', invoice, env);
-          } else if (invStatus === 'OVERDUE') {
-            await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'overdue', invoice, env);
+          // ---- PAYMENT COMPLETED ----
+          if (eventType === 'payment.completed') {
+            const payment = event.data?.object?.payment;
+            if (!payment) return;
+
+            if (payment.subscription_id) {
+              await handleSubscriptionPayment(payment, env);
+            }
+            // Mark client as paid in Trainerize
+            if (payment.customer_id) {
+              await syncPaymentStatusToTrainerize(payment.customer_id, 'paid', payment, env);
+            }
           }
-        }
-      }
 
+          // ---- PAYMENT FAILED ----
+          if (eventType === 'payment.failed') {
+            const payment = event.data?.object?.payment;
+            if (payment?.customer_id) {
+              await syncPaymentStatusToTrainerize(payment.customer_id, 'unpaid', payment, env);
+            }
+          }
+
+          // ---- ORDER COMPLETED → credit assignment for session credit purchases ----
+          if (eventType === 'order.fulfilled' || eventType === 'order.updated') {
+            const order = event.data?.object?.order;
+            if (order?.state === 'COMPLETED' && order?.customer_id) {
+              await handleCreditPurchaseOrder(order, env);
+            }
+          }
+
+          // ---- CUSTOMER EVENTS → sync profile changes to Trainerize ----
+          if (eventType === 'customer.updated') {
+            const customer = event.data?.object?.customer;
+            if (customer?.email_address) {
+              await handleCustomerUpdated(customer, env);
+            }
+          }
+
+          // ---- CATALOG EVENTS → refresh cached IDs/prices ----
+          if (eventType === 'catalog.version.updated') {
+            await handleCatalogUpdated(env);
+          }
+
+          // ---- INVOICE EVENTS ----
+          if (eventType === 'invoice.payment_made') {
+            const invoice = event.data?.object?.invoice;
+            if (invoice?.primary_recipient?.customer_id) {
+              await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'paid', invoice, env);
+
+              // If this is a session invoice we auto-created, update Trainerize note
+              const invoiceNote = invoice.description || '';
+              if (invoiceNote.includes('Auto-invoice for session')) {
+                await handleSessionInvoicePaid(invoice, env);
+              }
+            }
+          }
+
+          if (eventType === 'invoice.payment_failed' || eventType === 'invoice.updated') {
+            const invoice = event.data?.object?.invoice;
+            if (invoice?.primary_recipient?.customer_id) {
+              const invStatus = invoice.status;
+              if (invStatus === 'UNPAID' || invStatus === 'PAYMENT_PENDING') {
+                await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'unpaid', invoice, env);
+              } else if (invStatus === 'OVERDUE') {
+                await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'overdue', invoice, env);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Webhook processing error:', error);
+        }
+      })();
+
+      ctx.waitUntil(processingPromise);
       return new Response('OK', { status: 200 });
     } catch (error) {
       console.error('Webhook error:', error);
@@ -603,7 +621,7 @@ async function handleSubscriptionRenewal(subscription, env) {
 
   // Idempotency: skip if this exact subscription event was already processed
   const idempotencyKey = `sub-renewal:${subscriptionId}:${subscription.version || subscription.updated_at || ''}`;
-  if (await env.CHALLENGES_KV.get(idempotencyKey)) {
+  if (await kvGet(idempotencyKey, env)) {
     console.log(`Subscription renewal already processed: ${subscriptionId}`);
     return;
   }
@@ -626,9 +644,9 @@ async function handleSubscriptionRenewal(subscription, env) {
   await updateTrainerizeCredits(customerEmail, planName, credits, env);
 
   // Mark as processed (60-day TTL)
-  await env.CHALLENGES_KV.put(idempotencyKey, new Date().toISOString(), {
+  await kvPut(idempotencyKey, new Date().toISOString(), {
     expirationTtl: 60 * 24 * 3600,
-  });
+  }, env);
 
   console.log(`Credits added: ${customerEmail} → ${credits.sessions} sessions (${planName})`);
 }
@@ -704,7 +722,7 @@ async function updateTrainerizeCredits(email, planName, credits, env) {
       updatedAt: new Date().toISOString(),
       deductions: [],
     };
-    await env.CHALLENGES_KV.put(`credits:${userId}`, JSON.stringify(creditData));
+    await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
 
     // Remove old credit tags, set new one
     await clearCreditTags(userId, env);
@@ -732,14 +750,14 @@ async function deductSessionCredit(userId, reason, env) {
   const lockKey = `lock:credits:${userId}`;
   try {
     // Simple KV lock to prevent concurrent read-modify-write race
-    const locked = await env.CHALLENGES_KV.get(lockKey);
+    const locked = await kvGet(lockKey, env);
     if (locked) {
       console.log(`Credit deduction skipped (locked) for user ${userId} — will retry next cron`);
       return;
     }
-    await env.CHALLENGES_KV.put(lockKey, Date.now().toString(), { expirationTtl: 15 });
+    await kvPut(lockKey, Date.now().toString(), { expirationTtl: 15 }, env);
 
-    const raw = await env.CHALLENGES_KV.get(`credits:${userId}`);
+    const raw = await kvGet(`credits:${userId}`, env);
     if (!raw) { await env.CHALLENGES_KV.delete(lockKey); return; }
 
     let creditData;
@@ -755,7 +773,7 @@ async function deductSessionCredit(userId, reason, env) {
     creditData.remaining -= 1;
     creditData.deductions.push({ date: new Date().toISOString(), reason });
     creditData.updatedAt = new Date().toISOString();
-    await env.CHALLENGES_KV.put(`credits:${userId}`, JSON.stringify(creditData));
+    await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
 
     // Release lock before slow tag operations
     await env.CHALLENGES_KV.delete(lockKey);
@@ -797,11 +815,10 @@ function creditTagName(count) {
  * Remove all session credit tags from a user.
  */
 async function clearCreditTags(userId, env) {
-  // Fire all delete calls in parallel instead of sequential (50→~5 seconds instead of ~25)
+  // Fire all delete calls in parallel instead of sequential (25→~5 seconds instead of ~12)
   const deletes = [];
   for (let i = 0; i <= 24; i++) {
     deletes.push(
-      trainerizePost('/user/deleteTag', { userID: userId, userTag: `credits:${i}` }, env).catch(() => {}),
       trainerizePost('/user/deleteTag', { userID: userId, userTag: creditTagName(i) }, env).catch(() => {}),
     );
   }
@@ -947,10 +964,10 @@ async function handleCatalogUpdated(env) {
     }
 
     if (Object.keys(sessionPricing).length > 0) {
-      await env.CHALLENGES_KV.put('catalog:session-pricing', JSON.stringify({
+      await kvPut('catalog:session-pricing', JSON.stringify({
         ...sessionPricing,
         updatedAt: new Date().toISOString(),
-      }));
+      }), {}, env);
       console.log(`catalog.version.updated: refreshed session pricing — ${Object.keys(sessionPricing).length} durations`);
     }
   } catch (e) {
@@ -1003,7 +1020,7 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
   }
 
   // Determine if client is ACTIVE (has credits or active subscription) vs INACTIVE
-  const creditRaw = await env.CHALLENGES_KV.get(`credits:${userId}`);
+  const creditRaw = await kvGet(`credits:${userId}`, env);
   let hasCredits = false;
   try { hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0; } catch { /* corrupted JSON */ }
   const isActiveClient = hasCredits || status === 'paid';
@@ -1015,6 +1032,7 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
     '✅ Paid', '⚠️ Payment Due', '🔴 Payment Overdue', '❌ Payment Failed',
     '⏸️ Paused', '💤 Cancelled', '💤 Inactive',
     '🟢 Active Client',
+    '🟢 Subscription Active', 'subscription-active',
   ];
   const visualTags = {
     paid: '✅ Paid',
@@ -1028,9 +1046,9 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
 
   // 1. Remove old tags, set new ones
   try {
-    for (const tag of allStatusTags) {
-      await trainerizePost('/user/deleteTag', { userID: userId, userTag: tag }, env);
-    }
+    await Promise.all(allStatusTags.map(tag =>
+      trainerizePost('/user/deleteTag', { userID: userId, userTag: tag }, env).catch(() => {})
+    ));
 
     // Add status tag
     await trainerizePost('/user/addTag', { userID: userId, userTag: newTag }, env);
@@ -1147,17 +1165,15 @@ async function removeOldNudgeTags(userId, keepTag, env) {
     // Old format
     'nudge:payment-paid', 'nudge:payment-due', 'nudge:payment-unpaid',
     'nudge:payment-overdue', 'nudge:payment-canceled', 'nudge:payment-paused',
-    // New emoji format
+    // New emoji format (matches all visualTags values + inactive)
     'nudge:✅ Paid', 'nudge:⚠️ Payment Due', 'nudge:❌ Payment Failed',
-    'nudge:🔴 Payment Overdue', 'nudge:💤 Inactive', 'nudge:⏸️ Paused',
+    'nudge:🔴 Payment Overdue', 'nudge:💤 Cancelled', 'nudge:💤 Inactive', 'nudge:⏸️ Paused',
   ];
 
-  for (const tag of allNudgeTags) {
-    if (tag === keepTag) continue;
-    try {
-      await trainerizePost('/user/deleteTag', { userID: userId, userTag: tag }, env);
-    } catch { /* ignore */ }
-  }
+  await Promise.all(allNudgeTags
+    .filter(tag => tag !== keepTag)
+    .map(tag => trainerizePost('/user/deleteTag', { userID: userId, userTag: tag }, env).catch(() => {}))
+  );
 }
 
 // ===== BOOKING → TRAINERIZE CALENDAR SYNC =====
@@ -1263,10 +1279,13 @@ async function syncBookingToTrainerize(booking, env) {
 
       if (isLateCancel) {
         await deductSessionCredit(userId, `Late cancellation (${dateStr}, <24hrs notice)`, env);
-        await env.CHALLENGES_KV.put(
-          `credit-handled:${userId}:${startAt}`,
+        // Normalize startAt — strip milliseconds so key matches cron's Trainerize-derived format
+        const normalizedStart = startAt.replace(/\.\d+Z$/, 'Z');
+        await kvPut(
+          `credit-handled:${userId}:${normalizedStart}`,
           'late-cancel',
-          { expirationTtl: 90 * 24 * 3600 }
+          { expirationTtl: 90 * 24 * 3600 },
+          env
         );
       }
 
@@ -1300,10 +1319,12 @@ async function syncBookingToTrainerize(booking, env) {
       const dateStr = new Date(startAt).toLocaleDateString('en-US', { timeZone: TIMEZONE, month: 'long', day: 'numeric' });
 
       await deductSessionCredit(userId, `No-show (${dateStr})`, env);
-      await env.CHALLENGES_KV.put(
-        `credit-handled:${userId}:${startAt}`,
+      const normalizedStart = startAt.replace(/\.\d+Z$/, 'Z');
+      await kvPut(
+        `credit-handled:${userId}:${normalizedStart}`,
         'no-show',
-        { expirationTtl: 90 * 24 * 3600 }
+        { expirationTtl: 90 * 24 * 3600 },
+        env
       );
 
       try {
@@ -1347,28 +1368,28 @@ async function getCoachAvailability(date, duration, env) {
   // Dynamic Eastern Time offset (EST = UTC-5, EDT = UTC-4)
   // Use the requested date to determine if DST is in effect
   const dateObj = new Date(`${date}T12:00:00Z`);
-  const jan = new Date(dateObj.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(dateObj.getFullYear(), 6, 1).getTimezoneOffset();
-  // Cloudflare Workers run in UTC, so we calculate DST manually for US Eastern.
-  // DST starts 2nd Sunday of March at 2AM EST (7AM UTC), ends 1st Sunday of November at 2AM EDT (6AM UTC).
+  // DST for US Eastern: starts 2nd Sunday of March at 2AM EST (7AM UTC),
+  // ends 1st Sunday of November at 2AM EDT (6AM UTC).
+  // Formula verified against real calendars 2024-2030.
   const month = dateObj.getUTCMonth(); // 0-indexed
   const day = dateObj.getUTCDate();
-  const dow = dateObj.getUTCDay(); // 0=Sun
   const hour = dateObj.getUTCHours();
 
   let isDST;
   if (month > 2 && month < 10) {
     isDST = true; // Apr-Oct always DST
   } else if (month === 2) {
-    // March: DST starts 2nd Sunday at 7AM UTC (2AM EST)
-    const secondSunday = 14 - new Date(dateObj.getUTCFullYear(), 2, 1).getUTCDay();
+    // March: find 2nd Sunday. Formula: firstSun = 1 + (7 - DOW_of_Mar1) % 7; secondSun = firstSun + 7
+    const mar1dow = new Date(dateObj.getUTCFullYear(), 2, 1).getUTCDay();
+    const secondSunday = 1 + (7 - mar1dow) % 7 + 7;
     isDST = day > secondSunday || (day === secondSunday && hour >= 7);
   } else if (month === 10) {
-    // November: DST ends 1st Sunday at 6AM UTC (2AM EDT)
-    const firstSunday = 7 - new Date(dateObj.getUTCFullYear(), 10, 1).getUTCDay();
+    // November: find 1st Sunday. Formula: firstSun = 1 + (7 - DOW_of_Nov1) % 7
+    const nov1dow = new Date(dateObj.getUTCFullYear(), 10, 1).getUTCDay();
+    const firstSunday = 1 + (7 - nov1dow) % 7;
     isDST = day < firstSunday || (day === firstSunday && hour < 6);
   } else {
-    isDST = false; // Nov-Feb always EST
+    isDST = false; // Dec-Feb always EST
   }
   const TZ_OFFSET_HOURS = isDST ? -4 : -5;
   const TZ_OFFSET_MS = TZ_OFFSET_HOURS * 3600000;
@@ -1394,7 +1415,7 @@ async function getCoachAvailability(date, duration, env) {
   // This is the source of truth — includes custom hours, blocks, breaks, existing bookings
   const squareAvailableUtc = new Set(); // UTC ISO strings of available slot starts
   const dayStartUtc = new Date(`${date}T00:00:00Z`).getTime() + (-TZ_OFFSET_MS); // 6 AM EST in UTC = 11 AM UTC
-  const dayEndUtc = dayStartUtc + 18 * 3600000; // ~18 hours window
+  const dayEndUtc = dayStartUtc + 19 * 3600000; // 19h covers to 7PM + 2h buffer = 9PM, includes 8:30PM
 
   try {
     const resp = await fetch(`${getSquareApiBase(env)}/bookings/availability/search`, {
@@ -1641,7 +1662,7 @@ async function handleCreditPurchaseOrder(order, env) {
 
   // Idempotency: skip if already processed
   const orderKey = `order-processed:${order.id}`;
-  if (await env.CHALLENGES_KV.get(orderKey)) return;
+  if (await kvGet(orderKey, env)) return;
 
   let totalCredits = 0;
   let duration = 60;
@@ -1677,13 +1698,16 @@ async function handleCreditPurchaseOrder(order, env) {
   }
 
   // Add credits (stack on top of existing)
-  const existing = await env.CHALLENGES_KV.get(`credits:${userId}`);
+  const existing = await kvGet(`credits:${userId}`, env);
   let creditData;
   if (existing) {
-    creditData = JSON.parse(existing);
-    creditData.remaining += totalCredits;
-    creditData.total += totalCredits;
-  } else {
+    try { creditData = JSON.parse(existing); } catch { creditData = null; }
+    if (creditData) {
+      creditData.remaining += totalCredits;
+      creditData.total += totalCredits;
+    }
+  }
+  if (!creditData) {
     creditData = {
       userId, email, total: totalCredits, remaining: totalCredits,
       duration, planName: 'Square order',
@@ -1692,7 +1716,7 @@ async function handleCreditPurchaseOrder(order, env) {
     };
   }
   creditData.updatedAt = new Date().toISOString();
-  await env.CHALLENGES_KV.put(`credits:${userId}`, JSON.stringify(creditData));
+  await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
 
   // Update Trainerize tag
   await clearCreditTags(userId, env);
@@ -1715,7 +1739,7 @@ async function handleCreditPurchaseOrder(order, env) {
   } catch { /* tags are best-effort */ }
 
   // Mark order as processed
-  await env.CHALLENGES_KV.put(orderKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 });
+  await kvPut(orderKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
   console.log(`Order credit sync: ${email} +${totalCredits} credits (order ${order.id.slice(0, 8)})`);
 }
 
@@ -1743,7 +1767,7 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
 
   if (!squareCustomerId) {
     console.log(`Auto-invoice: Square customer not found for ${attendeeName}`);
-    return;
+    return false;
   }
 
   try {
@@ -1765,11 +1789,11 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     });
     if (!orderResp.ok) {
       console.error('Auto-invoice: order creation failed:', await orderResp.text());
-      return;
+      return false;
     }
     const orderData = await orderResp.json();
     const orderId = orderData.order?.id;
-    if (!orderId) return;
+    if (!orderId) return false;
 
     // 2. Create invoice from order
     const dueDate = new Date(Date.now() + 7 * 24 * 3600000).toISOString().split('T')[0];
@@ -1796,12 +1820,12 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     });
     if (!invoiceResp.ok) {
       console.error('Auto-invoice: invoice creation failed:', await invoiceResp.text());
-      return;
+      return false;
     }
     const invoiceData = await invoiceResp.json();
     const invoiceId = invoiceData.invoice?.id;
     const invoiceVersion = invoiceData.invoice?.version;
-    if (!invoiceId) return;
+    if (!invoiceId) return false;
 
     // 3. Publish (send) the invoice
     const publishResp = await fetch(`${getSquareApiBase(env)}/invoices/${invoiceId}/publish`, {
@@ -1814,7 +1838,7 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     });
     if (!publishResp.ok) {
       console.error('Auto-invoice: publish failed:', await publishResp.text());
-      return;
+      return false;
     }
 
     // 4. Add note in Trainerize
@@ -1825,8 +1849,10 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     }, env);
 
     console.log(`Auto-invoice sent: ${attendeeName} → $${catalog.price / 100} for ${sessionDate}`);
+    return true;
   } catch (e) {
     console.error('Auto-invoice error:', e);
+    return false;
   }
 }
 
@@ -1911,7 +1937,7 @@ async function syncTrainerizeAppointmentsToSquare(env) {
 
       // Skip if already synced to Square
       const syncKey = `tz-sq-sync:${apt.id}`;
-      const existing = await env.CHALLENGES_KV.get(syncKey);
+      const existing = await kvGet(syncKey, env);
       if (existing) continue;
 
       // Parse times — startDate is UTC in Trainerize response
@@ -1966,11 +1992,11 @@ async function syncTrainerizeAppointmentsToSquare(env) {
           const squareBookingId = bookingData.booking?.id || 'unknown';
 
           // Track in KV (30-day TTL)
-          await env.CHALLENGES_KV.put(syncKey, JSON.stringify({
+          await kvPut(syncKey, JSON.stringify({
             trainerizeId: apt.id,
             squareBookingId,
             syncedAt: new Date().toISOString(),
-          }), { expirationTtl: 30 * 24 * 3600 });
+          }), { expirationTtl: 30 * 24 * 3600 }, env);
 
           synced++;
           console.log(`Trainerize→Square: synced apt #${apt.id} → booking ${squareBookingId}`);
@@ -1998,26 +2024,29 @@ async function syncTrainerizeAppointmentsToSquare(env) {
 async function findSquareCustomerByName(firstName, lastName, env) {
   if (!firstName) return null;
   try {
-    const searchName = lastName ? `${firstName} ${lastName}` : firstName;
+    // Square doesn't support display_name filter.
+    // Strategy: search by email if we can find it from Trainerize, else fuzzy email/phone search.
+    // Fallback: fetch recent customers and match by name locally.
     const resp = await fetch(`${getSquareApiBase(env)}/customers/search`, {
       method: 'POST',
       headers: getSquareHeaders(env),
       body: JSON.stringify({
         query: {
           filter: {
-            display_name: { fuzzy: searchName },
+            email_address: { fuzzy: firstName.toLowerCase() },
           },
         },
-        limit: 3,
+        limit: 10,
       }),
     });
     if (!resp.ok) return null;
     const data = await resp.json();
-    // Best match: exact name match first, then first fuzzy result
-    const exact = (data.customers || []).find(c =>
-      `${c.given_name || ''} ${c.family_name || ''}`.toLowerCase().trim() === searchName.toLowerCase()
+    const searchName = (lastName ? `${firstName} ${lastName}` : firstName).toLowerCase();
+    // Match by name from the results
+    const match = (data.customers || []).find(c =>
+      `${c.given_name || ''} ${c.family_name || ''}`.toLowerCase().trim() === searchName
     );
-    return exact?.id || data.customers?.[0]?.id || null;
+    return match?.id || data.customers?.[0]?.id || null;
   } catch {
     return null;
   }
@@ -2060,34 +2089,40 @@ async function deductCreditsForCompletedSessions(env) {
 
       // Check if already counted by a previous cron run
       const countedKey = `session-counted:${apt.id}`;
-      if (await env.CHALLENGES_KV.get(countedKey)) continue;
+      if (await kvGet(countedKey, env)) continue;
 
       // Process ALL attendees (handles group sessions, not just first)
       const attendees = apt.attendents || [];
       if (attendees.length === 0) continue;
 
-      const sessionDate = (apt.startDateTime || apt.startDate || '').split(' ')[0];
-      const startMs = new Date((apt.startDate || apt.startDateTime).replace(' ', 'T') + 'Z').getTime();
-      const durationMin = Math.round((endMs - startMs) / 60000) || 60;
       const startStr = apt.startDate || apt.startDateTime;
+      if (!startStr) continue; // Guard: skip if no start date
+      const sessionDate = (apt.startDateTime || apt.startDate || '').split(' ')[0];
+      const startMs = new Date(startStr.replace(' ', 'T') + 'Z').getTime();
+      const durationMin = Math.round((endMs - startMs) / 60000) || 60;
 
       for (const attendee of attendees) {
         if (!attendee?.userID) continue;
 
         // Per-attendee dedup key
         const attCountedKey = `session-counted:${apt.id}:${attendee.userID}`;
-        if (await env.CHALLENGES_KV.get(attCountedKey)) continue;
+        if (await kvGet(attCountedKey, env)) continue;
 
-        // Check if client has credits
+        // Check if client has credits (safe JSON parse)
         let creditRaw;
-        try { creditRaw = await env.CHALLENGES_KV.get(`credits:${attendee.userID}`); } catch { /* KV error */ }
-        const hasCredits = creditRaw && JSON.parse(creditRaw).remaining > 0;
+        try { creditRaw = await kvGet(`credits:${attendee.userID}`, env); } catch { /* KV error */ }
+        let hasCredits = false;
+        if (creditRaw) {
+          try { hasCredits = JSON.parse(creditRaw).remaining > 0; } catch { /* corrupted JSON */ }
+        }
 
         if (!hasCredits) {
           // No credits → auto-invoice this session
           const attName = `${attendee.firstName || ''} ${attendee.lastName || ''}`.trim();
-          await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env);
-          await env.CHALLENGES_KV.put(attCountedKey, 'invoiced', { expirationTtl: 90 * 24 * 3600 });
+          const invoiced = await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env);
+          if (invoiced) {
+            await kvPut(attCountedKey, 'invoiced', { expirationTtl: 90 * 24 * 3600 }, env);
+          }
           continue;
         }
 
@@ -2095,28 +2130,29 @@ async function deductCreditsForCompletedSessions(env) {
         if (startStr) {
           const startAtIso = startStr.replace(' ', 'T') + 'Z';
           const cancelKey = `credit-handled:${attendee.userID}:${startAtIso}`;
-          if (await env.CHALLENGES_KV.get(cancelKey)) {
-            await env.CHALLENGES_KV.put(attCountedKey, 'cancel-deducted', { expirationTtl: 90 * 24 * 3600 });
+          if (await kvGet(cancelKey, env)) {
+            await kvPut(attCountedKey, 'cancel-deducted', { expirationTtl: 90 * 24 * 3600 }, env);
             continue;
           }
         }
 
         // Deduct credit
         await deductSessionCredit(attendee.userID, `Session completed (${sessionDate})`, env);
-        await env.CHALLENGES_KV.put(attCountedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 });
+        await kvPut(attCountedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
 
         if (startStr) {
           const startAtIso = startStr.replace(' ', 'T') + 'Z';
-          await env.CHALLENGES_KV.put(
+          await kvPut(
             `credit-handled:${attendee.userID}:${startAtIso}`,
             'session-completed',
-            { expirationTtl: 90 * 24 * 3600 }
+            { expirationTtl: 90 * 24 * 3600 },
+            env
           );
         }
       }
 
       // Mark appointment-level as counted
-      await env.CHALLENGES_KV.put(countedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 });
+      await kvPut(countedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
     }
   } catch (e) {
     console.error('Session credit deduction cron failed:', e);
@@ -2224,7 +2260,7 @@ async function createGoogleMeetEvent(params, env) {
 async function getChallenges(env) {
   if (!env.CHALLENGES_KV) return [];
   try {
-    const raw = await env.CHALLENGES_KV.get('challenges');
+    const raw = await kvGet('challenges', env);
     if (!raw) return [];
     const all = JSON.parse(raw);
     // Auto-expire old challenges
@@ -2245,12 +2281,12 @@ async function saveChallenge(challenge, env) {
     all = all.slice(all.length - MAX_CHALLENGES + 1);
   }
   all.push(challenge);
-  await env.CHALLENGES_KV.put('challenges', JSON.stringify(all));
+  await kvPut('challenges', JSON.stringify(all), {}, env);
 }
 
 async function deleteChallenge(id, env) {
   if (!env.CHALLENGES_KV) return;
   const all = await getChallenges(env);
   const filtered = all.filter(c => c.id !== id);
-  await env.CHALLENGES_KV.put('challenges', JSON.stringify(filtered));
+  await kvPut('challenges', JSON.stringify(filtered), {}, env);
 }

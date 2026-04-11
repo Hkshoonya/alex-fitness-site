@@ -36,7 +36,7 @@ export const SQUARE_WEB_SDK_URL = IS_SANDBOX
  * Get the right service ID based on session duration
  */
 export function getServiceId(duration: number): string {
-  if (duration <= 30) return SERVICE_IDS.consultation || SERVICE_IDS.session30;
+  if (duration <= 30) return SERVICE_IDS.session30 || SERVICE_IDS.consultation;
   if (duration <= 60) return SERVICE_IDS.session60;
   return SERVICE_IDS.session60; // 90 min uses 60 min service
 }

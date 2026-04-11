@@ -288,8 +288,17 @@ async function apiCreateBooking(booking: TrainerizeBooking): Promise<{ success: 
     // Look up client userID by email
     const clientUserId = await findUserIdByEmail(booking.clientEmail);
 
-    // Build start/end datetime — Trainerize needs space-separated format
-    const startIso = `${booking.date}T${booking.time}:00Z`;
+    // Convert 12-hour time (e.g., "2:00 PM") to 24-hour for ISO construction
+    const timeMatch = booking.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    let hour = 0, minute = 0;
+    if (timeMatch) {
+      hour = parseInt(timeMatch[1]);
+      minute = parseInt(timeMatch[2]);
+      const isPM = timeMatch[3].toUpperCase() === 'PM';
+      if (isPM && hour !== 12) hour += 12;
+      if (!isPM && hour === 12) hour = 0;
+    }
+    const startIso = `${booking.date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`;
     const endMs = new Date(startIso).getTime() + booking.duration * 60000;
     const startDate = toTzDate(startIso);
     const endDate = toTzDate(new Date(endMs).toISOString());

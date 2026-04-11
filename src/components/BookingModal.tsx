@@ -82,6 +82,9 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     setCurrentWeekOffset(0);
     setMeetDetails(null);
     setBookingData({ name: '', email: '', phone: '', goals: '' });
+    setBookingError(null);
+    setIsSubmitting(false);
+    setNeedsConfirmation(false);
   };
 
   // --- Handlers ---
@@ -536,7 +539,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
                 <p className="text-[#FF4D2E]">{selectedTime} · {sessionDuration} min</p>
               </div>
 
-              {sessionType === 'virtual' && meetDetails && (
+              {sessionType === 'virtual' && meetDetails && meetDetails.meetLink && (
                 <div className="bg-white/5 border border-white/10 rounded-lg p-4 mb-4">
                   <div className="flex items-center justify-center gap-2 text-white/60 text-sm mb-3">
                     <Video size={16} className="text-green-400" />
@@ -550,8 +553,11 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
                 </div>
               )}
 
-              {sessionType === 'virtual' && (
+              {sessionType === 'virtual' && meetDetails && meetDetails.meetLink && (
                 <p className="text-white/50 text-sm mb-2">Meeting link and calendar invite sent to your email.</p>
+              )}
+              {sessionType === 'virtual' && (!meetDetails || !meetDetails.meetLink) && (
+                <p className="text-white/50 text-sm mb-2">Coach Alex will send you the meeting link via message.</p>
               )}
               {sessionType === 'in-studio' && (
                 <p className="text-white/50 text-sm mb-2">13305 Sanctuary Cove Dr, Temple Terrace, FL</p>

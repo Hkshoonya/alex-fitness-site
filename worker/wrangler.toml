@@ -30,3 +30,7 @@ crons = ["*/15 * * * *"]
 # invoice.payment_made    → invoice paid (including auto-invoices)
 # invoice.payment_failed  → invoice payment failed
 # invoice.updated         → invoice status changed (overdue, etc.)
+# customer.updated        → profile changes → syncs to Trainerize
+# customer.created        → (logged, no action needed — created on first booking)
+# customer.deleted        → (logged only)
+# catalog.version.updated → refreshes cached session pricing in KV

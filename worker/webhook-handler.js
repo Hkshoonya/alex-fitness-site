@@ -100,6 +100,53 @@ async function trainerizePost(path, body, env) {
 }
 
 /**
+ * Safe KV read — returns null on error instead of crashing.
+ */
+async function kvGet(key, env) {
+  try {
+    return await env.CHALLENGES_KV.get(key);
+  } catch (e) {
+    console.error(`KV read failed for ${key}:`, e);
+    return null;
+  }
+}
+
+/**
+ * Safe KV write — logs error instead of crashing.
+ */
+async function kvPut(key, value, options, env) {
+  try {
+    await env.CHALLENGES_KV.put(key, value, options || {});
+    return true;
+  } catch (e) {
+    console.error(`KV write failed for ${key}:`, e);
+    return false;
+  }
+}
+
+/**
+ * Log a critical event to KV for queryable history.
+ * Events persist for 30 days. GET /logs returns recent events.
+ * Categories: credit, payment, sync, error, invoice
+ */
+async function logEvent(category, message, data, env) {
+  try {
+    const entry = {
+      category,
+      message,
+      data: typeof data === 'object' ? JSON.stringify(data) : data,
+      timestamp: new Date().toISOString(),
+    };
+    const key = `log:${entry.timestamp}:${category}`;
+    await env.CHALLENGES_KV.put(key, JSON.stringify(entry), { expirationTtl: 30 * 24 * 3600 });
+    console.log(`[${category}] ${message}`);
+  } catch {
+    // Logging should never break the main flow
+    console.error(`Failed to log event: ${category} ${message}`);
+  }
+}
+
+/**
  * Find a Trainerize user by email → returns integer userID or null
  * Required because tags, messages, and notes all need userID (not email)
  */
@@ -261,6 +308,66 @@ export default {
       return new Response(JSON.stringify({ deleted: id }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
+    // ===== EVENT LOGS =====
+    // GET /logs?category=credit&limit=20 — query recent events
+    if (url.pathname === '/logs' && request.method === 'GET') {
+      const category = url.searchParams.get('category') || '';
+      const limit = parseInt(url.searchParams.get('limit') || '50');
+      const prefix = category ? `log:` : 'log:';
+
+      try {
+        const keys = await env.CHALLENGES_KV.list({ prefix, limit: limit * 3 });
+        const entries = [];
+        for (const key of keys.keys) {
+          if (category && !key.name.endsWith(`:${category}`)) continue;
+          if (entries.length >= limit) break;
+          const val = await env.CHALLENGES_KV.get(key.name);
+          if (val) entries.push(JSON.parse(val));
+        }
+        entries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        return new Response(JSON.stringify(entries.slice(0, limit)), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // ===== HEALTH CHECK =====
+    // GET /health — verify connectivity to Square, Trainerize, and KV
+    if (url.pathname === '/health' && request.method === 'GET') {
+      const checks = { square: false, trainerize: false, kv: false, timestamp: new Date().toISOString() };
+
+      // Square API
+      try {
+        const sq = await fetch(`${getSquareApiBase(env)}/locations`, { headers: getSquareHeaders(env) });
+        checks.square = sq.ok;
+      } catch { checks.square = false; }
+
+      // Trainerize API
+      try {
+        if (isTrainerizeConfigured(env)) {
+          const tz = await trainerizePost('/userTag/getList', { start: 0, count: 1 }, env);
+          checks.trainerize = tz.ok;
+        }
+      } catch { checks.trainerize = false; }
+
+      // KV
+      try {
+        await env.CHALLENGES_KV.put('health-check', Date.now().toString());
+        const val = await env.CHALLENGES_KV.get('health-check');
+        checks.kv = !!val;
+      } catch { checks.kv = false; }
+
+      const allHealthy = checks.square && checks.trainerize && checks.kv;
+      return new Response(JSON.stringify(checks), {
+        status: allHealthy ? 200 : 503,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== AVAILABILITY API =====
     // GET /availability?date=2026-04-15&duration=60
     // Returns coach's real-time availability merging Square bookings + Trainerize appointments
@@ -386,6 +493,19 @@ export default {
         if (order?.state === 'COMPLETED' && order?.customer_id) {
           await handleCreditPurchaseOrder(order, env);
         }
+      }
+
+      // ---- CUSTOMER EVENTS → sync profile changes to Trainerize ----
+      if (eventType === 'customer.updated') {
+        const customer = event.data?.object?.customer;
+        if (customer?.email_address) {
+          await handleCustomerUpdated(customer, env);
+        }
+      }
+
+      // ---- CATALOG EVENTS → refresh cached IDs/prices ----
+      if (eventType === 'catalog.version.updated') {
+        await handleCatalogUpdated(env);
       }
 
       // ---- INVOICE EVENTS ----
@@ -709,6 +829,78 @@ async function updateTrainerizeClientProfile(userId, squareCustomer, env) {
     }
   } catch (e) {
     console.error('Failed to update Trainerize client profile:', e);
+  }
+}
+
+/**
+ * Handle customer.updated webhook — sync Square profile changes to Trainerize.
+ * Fires when customer name, email, phone, or address changes in Square.
+ */
+async function handleCustomerUpdated(customer, env) {
+  if (!isTrainerizeConfigured(env)) return;
+
+  const email = customer.email_address;
+  if (!email) return;
+
+  const userId = await findTrainerizeUserByEmail(email, env);
+  if (!userId) {
+    // Customer might have changed their email — try finding by old email via reference_id
+    // or by name. For now, log and skip.
+    console.log(`customer.updated: Trainerize user not found for ${email}`);
+    return;
+  }
+
+  await updateTrainerizeClientProfile(userId, customer, env);
+  console.log(`customer.updated: synced ${email} to Trainerize (userId: ${userId})`);
+}
+
+/**
+ * Handle catalog.version.updated webhook — refresh cached catalog data.
+ * Fires when prices, service IDs, or products change in Square catalog.
+ * Stores latest service variation IDs and session prices in KV for reference.
+ */
+async function handleCatalogUpdated(env) {
+  try {
+    // Fetch current session pricing from catalog
+    const resp = await fetch(`${getSquareApiBase(env)}/catalog/search`, {
+      method: 'POST',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({ object_types: ['ITEM'], limit: 100 }),
+    });
+
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    const sessionPricing = {};
+    for (const item of (data.objects || [])) {
+      const name = item.item_data?.name || '';
+      if (!name.includes('Single Session') && !name.includes('Training Session')) continue;
+
+      for (const variation of (item.item_data?.variations || [])) {
+        const vData = variation.item_variation_data || {};
+        const price = vData.price_money?.amount || 0;
+        const vName = vData.name || '';
+        const vId = variation.id;
+
+        // Extract duration from variation name
+        let duration = 60;
+        if (vName.includes('30')) duration = 30;
+        else if (vName.includes('90')) duration = 90;
+        else if (vName.includes('45')) duration = 45;
+
+        sessionPricing[duration] = { variationId: vId, price, name: vName };
+      }
+    }
+
+    if (Object.keys(sessionPricing).length > 0) {
+      await env.CHALLENGES_KV.put('catalog:session-pricing', JSON.stringify({
+        ...sessionPricing,
+        updatedAt: new Date().toISOString(),
+      }));
+      console.log(`catalog.version.updated: refreshed session pricing — ${Object.keys(sessionPricing).length} durations`);
+    }
+  } catch (e) {
+    console.error('catalog.version.updated handler failed:', e);
   }
 }
 
@@ -1838,13 +2030,27 @@ async function verifySignature(body, signature, key) {
 
 async function getChallenges(env) {
   if (!env.CHALLENGES_KV) return [];
-  const raw = await env.CHALLENGES_KV.get('challenges');
-  return raw ? JSON.parse(raw) : [];
+  try {
+    const raw = await env.CHALLENGES_KV.get('challenges');
+    if (!raw) return [];
+    const all = JSON.parse(raw);
+    // Auto-expire old challenges
+    const now = new Date().toISOString().split('T')[0];
+    return all.filter(c => !c.endDate || c.endDate >= now);
+  } catch {
+    return [];
+  }
 }
+
+const MAX_CHALLENGES = 50;
 
 async function saveChallenge(challenge, env) {
   if (!env.CHALLENGES_KV) return;
-  const all = await getChallenges(env);
+  let all = await getChallenges(env); // already filtered for expired
+  if (all.length >= MAX_CHALLENGES) {
+    // Remove oldest entries to make room
+    all = all.slice(all.length - MAX_CHALLENGES + 1);
+  }
   all.push(challenge);
   await env.CHALLENGES_KV.put('challenges', JSON.stringify(all));
 }

@@ -548,8 +548,8 @@ async function updateTrainerizeCredits(email, planName, credits, env) {
 
     // Remove old credit tags, set new one
     await clearCreditTags(userId, env);
-    await trainerizePost('/user/addTag', { userID: userId, userTag: 'subscription-active' }, env);
-    await trainerizePost('/user/addTag', { userID: userId, userTag: `credits:${credits.sessions}` }, env);
+    await trainerizePost('/user/addTag', { userID: userId, userTag: '🟢 Subscription Active' }, env);
+    await trainerizePost('/user/addTag', { userID: userId, userTag: creditTagName(credits.sessions) }, env);
 
     // Add credit note
     await trainerizePost('/trainerNote/add', {
@@ -592,7 +592,7 @@ async function deductSessionCredit(userId, reason, env) {
     await clearCreditTags(userId, env);
     await trainerizePost('/user/addTag', {
       userID: userId,
-      userTag: `credits:${creditData.remaining}`,
+      userTag: creditTagName(creditData.remaining),
     }, env);
 
     // Add note
@@ -609,12 +609,28 @@ async function deductSessionCredit(userId, reason, env) {
 }
 
 /**
- * Remove all credits:X tags from a user.
+ * Get the visual tag name for a credit count.
+ * 0 = "❌ 0 Sessions Left", 1-2 = "🔴 X Sessions Left", 3-5 = "🟡 X Sessions Left", 6+ = "🟢 X Sessions Left"
+ */
+function creditTagName(count) {
+  const n = Math.max(0, Math.min(count, 24));
+  if (n === 0) return '❌ 0 Sessions Left';
+  if (n <= 2) return `🔴 ${n} Sessions Left`;
+  if (n <= 5) return `🟡 ${n} Sessions Left`;
+  return `🟢 ${n} Sessions Left`;
+}
+
+/**
+ * Remove all session credit tags from a user.
  */
 async function clearCreditTags(userId, env) {
+  // Clear both old format (credits:X) and new visual format
   for (let i = 0; i <= 24; i++) {
     try {
       await trainerizePost('/user/deleteTag', { userID: userId, userTag: `credits:${i}` }, env);
+    } catch { /* ignore */ }
+    try {
+      await trainerizePost('/user/deleteTag', { userID: userId, userTag: creditTagName(i) }, env);
     } catch { /* ignore */ }
   }
 }
@@ -740,9 +756,20 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
     nextDueDate = eventData.next_payment_date;
   }
 
-  // Tag definitions
-  const allPaymentTags = ['payment-paid', 'payment-due', 'payment-unpaid', 'payment-overdue', 'payment-canceled', 'payment-paused'];
-  const newTag = `payment-${status}`;
+  // Tag definitions — both old plain tags and new visual tags
+  const allPaymentTags = [
+    'payment-paid', 'payment-due', 'payment-unpaid', 'payment-overdue', 'payment-canceled', 'payment-paused',
+    '✅ Paid', '⚠️ Payment Due', '🔴 Payment Overdue', '❌ Payment Failed', '⏸️ Paused',
+  ];
+  const visualTags = {
+    paid: '✅ Paid',
+    due: '⚠️ Payment Due',
+    unpaid: '❌ Payment Failed',
+    overdue: '🔴 Payment Overdue',
+    canceled: '❌ Payment Failed',
+    paused: '⏸️ Paused',
+  };
+  const newTag = visualTags[status] || `payment-${status}`;
 
   // 1. Remove old payment tags, add new one
   try {
@@ -750,7 +777,7 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
       await trainerizePost('/user/deleteTag', { userID: userId, userTag: tag }, env);
     }
 
-    // Add current status tag
+    // Add visual status tag
     await trainerizePost('/user/addTag', { userID: userId, userTag: newTag }, env);
 
     // Add next-due-date tag if available
@@ -781,7 +808,30 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
     console.error('Trainerize note update failed:', e);
   }
 
-  // 3. Nudge tags — triggers Trainerize push notification, non-persistent
+  // 3. Send client-facing message for payment issues (shows in their app inbox)
+  if (status === 'due' || status === 'unpaid' || status === 'overdue') {
+    const clientMessages = {
+      due: `Hi! Just a reminder that your training session payment ${amount ? `of ${amount} ` : ''}is coming up${nextDueDate ? ` on ${nextDueDate}` : ''}. Please make sure your payment method is up to date. Thanks!`,
+      unpaid: `Hi! We noticed your recent payment ${amount ? `of ${amount} ` : ''}didn't go through. Please update your payment method to continue your training sessions. Let me know if you have any questions!`,
+      overdue: `Hi! Your payment ${amount ? `of ${amount} ` : ''}is currently overdue. Please update your payment method as soon as possible to avoid any interruption to your training. Thank you!`,
+    };
+
+    try {
+      await trainerizePost('/message/send', {
+        userID: getTrainerizeTrainerId(env),
+        recipients: [userId],
+        subject: status === 'due' ? 'Payment Reminder' : status === 'overdue' ? 'Payment Overdue' : 'Payment Issue',
+        body: clientMessages[status],
+        threadType: 'mainThread',
+        conversationType: 'single',
+        type: 'text',
+      }, env);
+    } catch (e) {
+      console.error('Payment notification message failed:', e);
+    }
+  }
+
+  // 4. Nudge tags — triggers Trainerize push notification, non-persistent
   //
   // How this works:
   // - We add a "nudge:payment-paid" tag → Trainerize fires a push notification
@@ -1318,7 +1368,7 @@ async function handleCreditPurchaseOrder(order, env) {
   // Update Trainerize tag
   await clearCreditTags(userId, env);
   const tagCredits = Math.min(creditData.remaining, 24);
-  await trainerizePost('/user/addTag', { userID: userId, userTag: `credits:${tagCredits}` }, env);
+  await trainerizePost('/user/addTag', { userID: userId, userTag: creditTagName(tagCredits) }, env);
 
   // Add note
   const totalPaid = (order.total_money?.amount || 0) / 100;
@@ -1465,7 +1515,7 @@ async function handleSessionInvoicePaid(invoice, env) {
     type: 'general',
   }, env);
 
-  await trainerizePost('/user/addTag', { userID: userId, userTag: 'payment-paid' }, env);
+  await trainerizePost('/user/addTag', { userID: userId, userTag: '✅ Paid' }, env);
 }
 
 // ===== TRAINERIZE → SQUARE REVERSE SYNC =====

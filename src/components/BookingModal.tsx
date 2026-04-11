@@ -40,6 +40,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
   const [meetDetails, setMeetDetails] = useState<MeetingDetails | null>(null);
   const [bookingData, setBookingData] = useState({ name: '', email: '', phone: '', goals: '' });
   const [needsConfirmation, setNeedsConfirmation] = useState(false);
+  const [bookingError, setBookingError] = useState<string | null>(null);
 
   const weekStart = addWeeks(startOfWeek(new Date(), { weekStartsOn: 1 }), currentWeekOffset);
   const weekDates = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
@@ -172,9 +173,10 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
 
     setIsSubmitting(false);
     if (result.success) {
+      setBookingError(null);
       setStep('success');
-
-      // Trainerize sync happens automatically inside createBooking
+    } else {
+      setBookingError(result.error || 'Booking failed. Please try again or contact us directly.');
     }
   };
 
@@ -588,12 +590,17 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
             )}
 
             {step === 'details' && (
-              <button onClick={handleSubmit} disabled={isSubmitting || !bookingData.name || !bookingData.email || !bookingData.phone}
-                className="flex-1 btn-primary disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
-                {isSubmitting ? (
-                  <><div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Booking...</>
-                ) : needsConfirmation ? 'Request Booking (Pending Approval)' : 'Confirm Booking'}
-              </button>
+              <>
+                {bookingError && (
+                  <p className="text-red-400 text-sm text-center bg-red-500/10 rounded-lg p-3">{bookingError}</p>
+                )}
+                <button onClick={handleSubmit} disabled={isSubmitting || !bookingData.name || !bookingData.email || !bookingData.phone}
+                  className="flex-1 btn-primary disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                  {isSubmitting ? (
+                    <><div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Booking...</>
+                  ) : needsConfirmation ? 'Request Booking (Pending Approval)' : 'Confirm Booking'}
+                </button>
+              </>
             )}
           </div>
         )}

@@ -498,7 +498,7 @@ export default {
           await syncPaymentStatusToTrainerize(subscription.customer_id, 'paid', subscription, env);
         } else if (status === 'CANCELED' || status === 'DEACTIVATED') {
           await syncPaymentStatusToTrainerize(subscription.customer_id, 'canceled', subscription, env);
-        } else if (status === 'PAUSED') {
+        } else if (status === 'PAUSED' || status === 'SUSPENDED') {
           await syncPaymentStatusToTrainerize(subscription.customer_id, 'paused', subscription, env);
         } else if (status === 'PENDING') {
           await syncPaymentStatusToTrainerize(subscription.customer_id, 'due', subscription, env);
@@ -874,6 +874,7 @@ async function updateTrainerizeClientProfile(userId, squareCustomer, env) {
     if (squareCustomer.given_name) updates.firstName = squareCustomer.given_name;
     if (squareCustomer.family_name) updates.lastName = squareCustomer.family_name;
     if (squareCustomer.phone_number) updates.phone = squareCustomer.phone_number;
+    if (squareCustomer.email_address) updates.email = squareCustomer.email_address;
 
     if (Object.keys(updates).length > 0) {
       await trainerizePost('/user/setProfile', {
@@ -1204,8 +1205,8 @@ async function syncBookingToTrainerize(booking, env) {
 
     try {
       // Convert ISO dates to Trainerize format (space separator, no Z)
-      const tzStart = startAt.replace('T', ' ').replace('Z', '');
-      const tzEnd = endAt.replace('T', ' ').replace('Z', '');
+      const tzStart = startAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
+      const tzEnd = endAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
 
       await trainerizePost('/appointment/add', {
         userID: getTrainerizeTrainerId(env),
@@ -1244,19 +1245,19 @@ async function syncBookingToTrainerize(booking, env) {
         console.error('Trainerize booking message failed:', e);
       }
     }
-  } else if (status === 'CANCELLED_BY_CUSTOMER' || status === 'CANCELLED_BY_SELLER') {
-    // Notify client of cancellation
+  } else if (status === 'CANCELLED_BY_CUSTOMER' || status === 'CANCELLED_BY_SELLER' || status === 'DECLINED') {
+    // Notify client of cancellation or decline
     if (userId) {
-      const cancelledBy = status === 'CANCELLED_BY_CUSTOMER' ? 'you' : 'Coach Alex';
+      const cancelledBy = status === 'CANCELLED_BY_CUSTOMER' ? 'you'
+        : status === 'DECLINED' ? 'Coach Alex (declined)' : 'Coach Alex';
       const dateStr = new Date(startAt).toLocaleDateString('en-US', { timeZone: TIMEZONE, month: 'long', day: 'numeric' });
 
-      // Check if within 24 hours — deduct credit for late cancellation
+      // Check if within 24 hours — deduct credit for late cancellation (not for declined)
       const hoursUntil = (new Date(startAt).getTime() - Date.now()) / 3600000;
       const isLateCancel = hoursUntil < CANCEL_NOTICE_HOURS && status === 'CANCELLED_BY_CUSTOMER';
 
       if (isLateCancel) {
         await deductSessionCredit(userId, `Late cancellation (${dateStr}, <24hrs notice)`, env);
-        // Mark this time slot as credit-handled so the cron doesn't deduct again
         await env.CHALLENGES_KV.put(
           `credit-handled:${userId}:${startAt}`,
           'late-cancel',
@@ -1272,21 +1273,52 @@ async function syncBookingToTrainerize(booking, env) {
         await trainerizePost('/message/send', {
           userID: getTrainerizeTrainerId(env),
           recipients: [userId],
-          subject: 'Session Cancelled',
+          subject: status === 'DECLINED' ? 'Booking Declined' : 'Session Cancelled',
           body: `Your session on ${dateStr} has been cancelled by ${cancelledBy}.${creditWarning}`,
           threadType: 'mainThread',
           conversationType: 'single',
           type: 'text',
         }, env);
 
-        // Log cancellation note
         await trainerizePost('/trainerNote/add', {
           userID: userId,
-          content: `Session cancelled (${dateStr}). Cancelled by: ${cancelledBy}. ${isLateCancel ? 'LATE CANCEL — credit deducted.' : ''}`,
+          content: `Session ${status === 'DECLINED' ? 'declined' : 'cancelled'} (${dateStr}). By: ${cancelledBy}. ${isLateCancel ? 'LATE CANCEL — credit deducted.' : ''}`,
           type: 'general',
         }, env);
       } catch (e) {
         console.error('Trainerize cancellation message failed:', e);
+      }
+    }
+  } else if (status === 'NO_SHOW') {
+    // No-show — deduct credit (same as late cancel)
+    if (userId) {
+      const dateStr = new Date(startAt).toLocaleDateString('en-US', { timeZone: TIMEZONE, month: 'long', day: 'numeric' });
+
+      await deductSessionCredit(userId, `No-show (${dateStr})`, env);
+      await env.CHALLENGES_KV.put(
+        `credit-handled:${userId}:${startAt}`,
+        'no-show',
+        { expirationTtl: 90 * 24 * 3600 }
+      );
+
+      try {
+        await trainerizePost('/message/send', {
+          userID: getTrainerizeTrainerId(env),
+          recipients: [userId],
+          subject: 'Missed Session',
+          body: `We noticed you missed your session on ${dateStr}. A session credit has been deducted. If this was an error, please reach out and we'll sort it out!`,
+          threadType: 'mainThread',
+          conversationType: 'single',
+          type: 'text',
+        }, env);
+
+        await trainerizePost('/trainerNote/add', {
+          userID: userId,
+          content: `NO-SHOW (${dateStr}) — credit deducted.`,
+          type: 'general',
+        }, env);
+      } catch (e) {
+        console.error('No-show message failed:', e);
       }
     }
   }
@@ -1545,8 +1577,9 @@ function findPlanCredits(planName) {
     };
   }
 
-  // Default: 4 sessions of 60 min
-  return { sessions: 4, duration: 60 };
+  // Unrecognized plan — return null to prevent wrong credit assignment
+  console.log(`findPlanCredits: no match for "${planName}"`);
+  return null;
 }
 
 /**
@@ -1656,6 +1689,13 @@ async function handleCreditPurchaseOrder(order, env) {
     type: 'general',
   }, env);
 
+  // Set Active Client tag
+  try {
+    await trainerizePost('/user/deleteTag', { userID: userId, userTag: '💤 Inactive' }, env);
+    await trainerizePost('/user/addTag', { userID: userId, userTag: '🟢 Active Client' }, env);
+    await trainerizePost('/user/addTag', { userID: userId, userTag: '✅ Paid' }, env);
+  } catch { /* tags are best-effort */ }
+
   // Mark order as processed
   await env.CHALLENGES_KV.put(orderKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 });
   console.log(`Order credit sync: ${email} +${totalCredits} credits (order ${order.id.slice(0, 8)})`);
@@ -1665,9 +1705,9 @@ async function handleCreditPurchaseOrder(order, env) {
 
 // Square catalog variation IDs for single sessions
 const SESSION_CATALOG = {
-  30: { variationId: '66QDZG33XW3F62H', price: 5000, name: 'PT - 30 Minute Session' },
-  60: { variationId: 'DFDGPQ56NTEWU4T', price: 8000, name: 'PT - 60 Minute Session' },
-  90: { variationId: 'EFAXK3SOJJPNK2G', price: 11000, name: 'PT - 90 Minute' },
+  30: { variationId: '66QDZG33XW3F62HR63P6VF5G', price: 5000, name: 'PT - 30 Minute Session' },
+  60: { variationId: 'DFDGPQ56NTEWU4TX2WQBU7TR', price: 8000, name: 'PT - 60 Minute Session' },
+  90: { variationId: 'EFAXK3SOJJPNK2G3XK3MHXZI', price: 11000, name: 'PT - 90 Minute' },
 };
 
 /**
@@ -1937,23 +1977,28 @@ async function syncTrainerizeAppointmentsToSquare(env) {
  * Returns customer ID or null.
  */
 async function findSquareCustomerByName(firstName, lastName, env) {
-  if (!firstName || !lastName) return null;
+  if (!firstName) return null;
   try {
+    const searchName = lastName ? `${firstName} ${lastName}` : firstName;
     const resp = await fetch(`${getSquareApiBase(env)}/customers/search`, {
       method: 'POST',
       headers: getSquareHeaders(env),
       body: JSON.stringify({
         query: {
           filter: {
-            fuzzy: { display_name: `${firstName} ${lastName}` },
+            display_name: { fuzzy: searchName },
           },
         },
-        limit: 1,
+        limit: 3,
       }),
     });
     if (!resp.ok) return null;
     const data = await resp.json();
-    return data.customers?.[0]?.id || null;
+    // Best match: exact name match first, then first fuzzy result
+    const exact = (data.customers || []).find(c =>
+      `${c.given_name || ''} ${c.family_name || ''}`.toLowerCase().trim() === searchName.toLowerCase()
+    );
+    return exact?.id || data.customers?.[0]?.id || null;
   } catch {
     return null;
   }

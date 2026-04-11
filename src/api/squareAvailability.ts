@@ -627,7 +627,7 @@ function resolveCoachName(teamMemberId: string): string {
     } catch { /* ignore */ }
   }
   // Known fallbacks
-  if (teamMemberId === 'alex-davis' || teamMemberId === DEFAULT_COACH) return 'Alex Davis';
+  if (teamMemberId === 'alex-davis' || teamMemberId === 'TMr0PTR22KYH_0QK') return 'Alex Davis';
   return 'Coach';
 }
 

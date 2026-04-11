@@ -54,6 +54,12 @@ const PLAN_CREDITS = {
   '4 Week Plan - 30 Min Sessions': { sessions: 4, duration: 30 },
   '4 Week Plan - 60 Min Sessions': { sessions: 4, duration: 60 },
   '4 Week Plan - 90 Min Sessions': { sessions: 4, duration: 90 },
+  '8 Week Plan - 30 Min Sessions': { sessions: 8, duration: 30 },
+  '8 Week Plan - 60 Min Sessions': { sessions: 8, duration: 60 },
+  '8 Week Plan - 90 Min Sessions': { sessions: 8, duration: 90 },
+  '8 Session - 30 Min': { sessions: 8, duration: 30 },
+  '8 Session - 60 Min': { sessions: 8, duration: 60 },
+  '8 Session - 90 Min': { sessions: 8, duration: 90 },
   '12 Week Plan - 30 Min Sessions': { sessions: 12, duration: 30 },
   '12 Week Plan - 60 Min Sessions': { sessions: 12, duration: 60 },
   '12 Week Plan - 90 Min Sessions': { sessions: 12, duration: 90 },
@@ -401,10 +407,15 @@ export default {
     }
   },
 
-  // ===== CRON: Trainerize → Square reverse sync =====
-  // Runs every 15 minutes — syncs Trainerize-only appointments to Square
+  // ===== CRON: periodic sync tasks =====
+  // Runs every 15 minutes:
+  //   1. Sync Trainerize appointments → Square (reverse sync)
+  //   2. Deduct credits for completed sessions (past appointment dates)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(syncTrainerizeAppointmentsToSquare(env));
+    ctx.waitUntil(Promise.all([
+      syncTrainerizeAppointmentsToSquare(env),
+      deductCreditsForCompletedSessions(env),
+    ]));
   },
 };
 
@@ -452,24 +463,32 @@ async function handleSubscriptionPayment(payment, env) {
  * Get customer email from Square Customers API
  */
 async function getCustomerEmail(customerId, env) {
+  const customer = await getSquareCustomer(customerId, env);
+  return customer?.email_address || null;
+}
+
+/**
+ * Get full customer details from Square Customers API
+ * Returns { email_address, given_name, family_name, phone_number, ... } or null
+ */
+async function getSquareCustomer(customerId, env) {
+  if (!customerId) return null;
   try {
     const response = await fetch(
       `${getSquareApiBase(env)}/customers/${customerId}`,
       { headers: getSquareHeaders(env) }
     );
-
     if (!response.ok) return null;
-
     const data = await response.json();
-    return data.customer?.email_address || null;
+    return data.customer || null;
   } catch {
     return null;
   }
 }
 
 /**
- * Update session credits in Trainerize via trainer notes + tags
- * (No direct credits endpoint in v03 API)
+ * Update session credits in Trainerize via trainer notes + tags + KV.
+ * KV stores the authoritative credit balance; tags are kept in sync for display.
  */
 async function updateTrainerizeCredits(email, planName, credits, env) {
   if (!isTrainerizeConfigured(env)) {
@@ -478,26 +497,98 @@ async function updateTrainerizeCredits(email, planName, credits, env) {
   }
 
   try {
-    // Look up client userID by email
     const userId = await findTrainerizeUserByEmail(email, env);
     if (!userId) {
       console.log(`Trainerize user not found for ${email} — skipping credit update`);
       return;
     }
 
-    // Add credit note via trainerNote
-    await trainerizePost('/trainerNote/add', {
-      userID: userId,
-      content: `Session credits renewed: ${credits.sessions} sessions (${planName}, ${credits.duration}min each). Valid until ${getNextBillingDate()}`,
-      type: 'general',
-    }, env);
+    const validUntil = getNextBillingDate();
 
-    // Tag with subscription status and credit count
+    // Store credits in KV (source of truth)
+    const creditData = {
+      userId,
+      email,
+      total: credits.sessions,
+      remaining: credits.sessions,
+      duration: credits.duration,
+      planName,
+      validUntil,
+      updatedAt: new Date().toISOString(),
+      deductions: [],
+    };
+    await env.CHALLENGES_KV.put(`credits:${userId}`, JSON.stringify(creditData));
+
+    // Remove old credit tags, set new one
+    await clearCreditTags(userId, env);
     await trainerizePost('/user/addTag', { userID: userId, userTag: 'subscription-active' }, env);
     await trainerizePost('/user/addTag', { userID: userId, userTag: `credits:${credits.sessions}` }, env);
 
+    // Add credit note
+    await trainerizePost('/trainerNote/add', {
+      userID: userId,
+      content: `Session credits renewed: ${credits.sessions}x ${credits.duration}min sessions (${planName}). Valid until ${new Date(validUntil).toLocaleDateString('en-US', { timeZone: TIMEZONE })}`,
+      type: 'general',
+    }, env);
+
   } catch (error) {
     console.error('Trainerize credit update failed:', error);
+  }
+}
+
+/**
+ * Deduct a session credit for a client.
+ * Called on: session completion (date passed) or late cancellation.
+ * Updates KV balance + Trainerize tag.
+ */
+async function deductSessionCredit(userId, reason, env) {
+  try {
+    const raw = await env.CHALLENGES_KV.get(`credits:${userId}`);
+    if (!raw) return;
+
+    const creditData = JSON.parse(raw);
+    if (creditData.remaining <= 0) {
+      console.log(`No credits remaining for user ${userId}`);
+      return;
+    }
+
+    // Deduct
+    creditData.remaining -= 1;
+    creditData.deductions.push({
+      date: new Date().toISOString(),
+      reason,
+    });
+    creditData.updatedAt = new Date().toISOString();
+    await env.CHALLENGES_KV.put(`credits:${userId}`, JSON.stringify(creditData));
+
+    // Update Trainerize tag
+    await clearCreditTags(userId, env);
+    await trainerizePost('/user/addTag', {
+      userID: userId,
+      userTag: `credits:${creditData.remaining}`,
+    }, env);
+
+    // Add note
+    await trainerizePost('/trainerNote/add', {
+      userID: userId,
+      content: `Credit deducted (${reason}). ${creditData.remaining}/${creditData.total} sessions remaining.`,
+      type: 'general',
+    }, env);
+
+    console.log(`Credit deducted for user ${userId}: ${creditData.remaining}/${creditData.total} remaining (${reason})`);
+  } catch (e) {
+    console.error('Credit deduction failed:', e);
+  }
+}
+
+/**
+ * Remove all credits:X tags from a user.
+ */
+async function clearCreditTags(userId, env) {
+  for (let i = 0; i <= 24; i++) {
+    try {
+      await trainerizePost('/user/deleteTag', { userID: userId, userTag: `credits:${i}` }, env);
+    } catch { /* ignore */ }
   }
 }
 
@@ -524,6 +615,57 @@ async function sendTrainerizeMessage(email, message, env) {
     }, env);
   } catch (error) {
     console.error('Trainerize message failed:', error);
+  }
+}
+
+/**
+ * Create a new client in Trainerize from Square customer data.
+ * Returns the new Trainerize userID or null.
+ */
+async function createTrainerizeClient(squareCustomer, env) {
+  try {
+    const resp = await trainerizePost('/user/add', {
+      user: {
+        firstName: squareCustomer.given_name || '',
+        lastName: squareCustomer.family_name || '',
+        fullName: `${squareCustomer.given_name || ''} ${squareCustomer.family_name || ''}`.trim(),
+        email: squareCustomer.email_address,
+        type: 'client',
+        trainerID: getTrainerizeTrainerId(env),
+        phone: squareCustomer.phone_number || '',
+      },
+      userTag: 'square-client',
+      sendMail: true,
+      isSetup: false,
+    }, env);
+
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.userID || data.user?.userID || null;
+  } catch (e) {
+    console.error('Failed to create Trainerize client:', e);
+    return null;
+  }
+}
+
+/**
+ * Update an existing Trainerize client's profile with latest Square data.
+ * Syncs name, phone, and address changes.
+ */
+async function updateTrainerizeClientProfile(userId, squareCustomer, env) {
+  try {
+    const updates = {};
+    if (squareCustomer.given_name) updates.firstName = squareCustomer.given_name;
+    if (squareCustomer.family_name) updates.lastName = squareCustomer.family_name;
+    if (squareCustomer.phone_number) updates.phone = squareCustomer.phone_number;
+
+    if (Object.keys(updates).length > 0) {
+      await trainerizePost('/user/setProfile', {
+        user: { userID: userId, ...updates },
+      }, env);
+    }
+  } catch (e) {
+    console.error('Failed to update Trainerize client profile:', e);
   }
 }
 
@@ -675,15 +817,27 @@ async function syncBookingToTrainerize(booking, env) {
   const segments = booking.appointment_segments || [];
   const duration = segments[0]?.duration_minutes || 60;
 
-  // Get customer email from Square
-  const email = await getCustomerEmail(customerId, env);
+  // Get full customer details from Square
+  const customer = await getSquareCustomer(customerId, env);
+  const email = customer?.email_address;
   if (!email) {
     console.log(`Booking sync: no email for customer ${customerId}`);
     return;
   }
 
-  // Find Trainerize userID
-  const userId = await findTrainerizeUserByEmail(email, env);
+  // Find or create Trainerize user
+  let userId = await findTrainerizeUserByEmail(email, env);
+
+  if (!userId) {
+    // Client not in Trainerize — create them with full Square details
+    userId = await createTrainerizeClient(customer, env);
+    if (userId) {
+      console.log(`Created Trainerize client: ${email} (userID: ${userId})`);
+    }
+  } else {
+    // Client exists — update profile with latest Square details
+    await updateTrainerizeClientProfile(userId, customer, env);
+  }
 
   if (status === 'ACCEPTED' || status === 'PENDING') {
     // Create/update appointment in Trainerize
@@ -741,9 +895,15 @@ async function syncBookingToTrainerize(booking, env) {
       const cancelledBy = status === 'CANCELLED_BY_CUSTOMER' ? 'you' : 'Coach Alex';
       const dateStr = new Date(startAt).toLocaleDateString('en-US', { timeZone: TIMEZONE, month: 'long', day: 'numeric' });
 
-      // Check if within 24 hours — potential credit loss
+      // Check if within 24 hours — deduct credit for late cancellation
       const hoursUntil = (new Date(startAt).getTime() - Date.now()) / 3600000;
-      const creditWarning = (hoursUntil < CANCEL_NOTICE_HOURS && status === 'CANCELLED_BY_CUSTOMER')
+      const isLateCancel = hoursUntil < CANCEL_NOTICE_HOURS && status === 'CANCELLED_BY_CUSTOMER';
+
+      if (isLateCancel) {
+        await deductSessionCredit(userId, `Late cancellation (${dateStr}, <24hrs notice)`, env);
+      }
+
+      const creditWarning = isLateCancel
         ? '\n\nNote: This session was cancelled with less than 24 hours notice. A session credit has been deducted per our cancellation policy.'
         : '';
 
@@ -761,7 +921,7 @@ async function syncBookingToTrainerize(booking, env) {
         // Log cancellation note
         await trainerizePost('/trainerNote/add', {
           userID: userId,
-          content: `Session cancelled (${dateStr}). Cancelled by: ${cancelledBy}. ${hoursUntil < CANCEL_NOTICE_HOURS ? 'LATE CANCEL — within 24hrs.' : ''}`,
+          content: `Session cancelled (${dateStr}). Cancelled by: ${cancelledBy}. ${isLateCancel ? 'LATE CANCEL — credit deducted.' : ''}`,
           type: 'general',
         }, env);
       } catch (e) {
@@ -1006,12 +1166,25 @@ function checkCancellationPolicy(startAt) {
  * Match plan name to session credits
  */
 function findPlanCredits(planName) {
+  const lower = planName.toLowerCase();
+
+  // Exact match first
   for (const [name, credits] of Object.entries(PLAN_CREDITS)) {
-    if (planName.toLowerCase().includes(name.toLowerCase().split(' - ')[0])) {
-      return credits;
-    }
+    if (lower.includes(name.toLowerCase())) return credits;
   }
-  // Default: 4 sessions per billing cycle
+
+  // Fuzzy match: extract session count and duration from plan name
+  // Handles: "8 Session - 60 Min", "12 Week Plan", "4x 30min sessions", etc.
+  const sessionMatch = lower.match(/(\d+)\s*(?:session|week|pack)/);
+  const durationMatch = lower.match(/(\d+)\s*min/);
+  if (sessionMatch) {
+    return {
+      sessions: parseInt(sessionMatch[1]),
+      duration: durationMatch ? parseInt(durationMatch[1]) : 60,
+    };
+  }
+
+  // Default: 4 sessions of 60 min
   return { sessions: 4, duration: 60 };
 }
 
@@ -1205,6 +1378,63 @@ async function findSquareCustomerByName(firstName, lastName, env) {
     return data.customers?.[0]?.id || null;
   } catch {
     return null;
+  }
+}
+
+// ===== SESSION CREDIT DEDUCTION (CRON) =====
+
+/**
+ * Check for past Trainerize appointments and deduct credits for completed sessions.
+ * Runs on the 15-min cron. Uses KV to track which sessions have been counted.
+ */
+async function deductCreditsForCompletedSessions(env) {
+  if (!isTrainerizeConfigured(env)) return;
+
+  const now = new Date();
+  // Check appointments from the past 24 hours (catch any we missed)
+  const dayAgo = new Date(now.getTime() - 24 * 3600000);
+
+  const tzStart = dayAgo.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+  const tzEnd = now.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+
+  try {
+    const resp = await trainerizePost('/appointment/getList', {
+      userID: getTrainerizeTrainerId(env),
+      startDate: tzStart,
+      endDate: tzEnd,
+      start: 0,
+      count: 100,
+    }, env);
+
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    for (const apt of (data.appointments || [])) {
+      // Only process appointments that have already ended
+      const endStr = apt.endDate || apt.endDateTime;
+      if (!endStr) continue;
+      const endMs = new Date(endStr.replace(' ', 'T') + 'Z').getTime();
+      if (endMs > now.getTime()) continue;
+
+      // Check if already counted
+      const countedKey = `session-counted:${apt.id}`;
+      if (await env.CHALLENGES_KV.get(countedKey)) continue;
+
+      // Find the client attendee
+      const attendee = apt.attendents?.[0];
+      if (!attendee?.userID) continue;
+
+      // Deduct credit
+      const dateStr = (apt.startDateTime || apt.startDate || '').split(' ')[0];
+      await deductSessionCredit(attendee.userID, `Session completed (${dateStr})`, env);
+
+      // Mark as counted (90-day TTL)
+      await env.CHALLENGES_KV.put(countedKey, new Date().toISOString(), {
+        expirationTtl: 90 * 24 * 3600,
+      });
+    }
+  } catch (e) {
+    console.error('Session credit deduction cron failed:', e);
   }
 }
 

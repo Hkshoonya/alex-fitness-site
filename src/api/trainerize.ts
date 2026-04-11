@@ -162,7 +162,7 @@ async function apiCreateClient(client: TrainerizeClient): Promise<{ success: boo
     const existingId = await findUserIdByEmail(client.email);
 
     if (existingId) {
-      // Client exists — update their profile
+      // Client exists — update their profile with latest details
       await apiPost('/user/setProfile', {
         user: {
           userID: existingId,
@@ -177,6 +177,15 @@ async function apiCreateClient(client: TrainerizeClient): Promise<{ success: boo
         for (const tag of client.tags) {
           await apiPost('/user/addTag', { userID: existingId, userTag: tag });
         }
+      }
+
+      // Add notes for existing clients too (goals, preferences)
+      if (client.notes) {
+        await apiPost('/trainerNote/add', {
+          userID: existingId,
+          content: client.notes,
+          type: 'general',
+        });
       }
 
       return { success: true, clientId: String(existingId) };

@@ -1805,6 +1805,30 @@ async function handleCreditPurchaseOrder(order, env) {
 
 // ===== PAY-PER-SESSION AUTO-INVOICE =====
 
+/**
+ * Cancel a Square order by transitioning it to CANCELED state. Best-effort —
+ * used to clean up orphaned orders when a later step in the auto-invoice flow
+ * (invoice creation or publish) fails.
+ */
+async function cancelSquareOrder(orderId, orderVersion, env) {
+  if (!orderId) return;
+  try {
+    const resp = await fetch(`${getSquareApiBase(env)}/orders/${orderId}`, {
+      method: 'PUT',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({
+        order: { version: orderVersion, state: 'CANCELED' },
+        idempotency_key: `cancel-${orderId}`,
+      }),
+    });
+    if (!resp.ok) {
+      console.error(`Failed to cancel orphan order ${orderId}:`, await resp.text());
+    }
+  } catch (e) {
+    console.error(`Failed to cancel orphan order ${orderId}:`, e);
+  }
+}
+
 // Square catalog variation IDs for single sessions
 const SESSION_CATALOG = {
   30: { variationId: '66QDZG33XW3F62HR63P6VF5G', price: 5000, name: 'PT - 30 Minute Session' },
@@ -1857,6 +1881,7 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     }
     const orderData = await orderResp.json();
     const orderId = orderData.order?.id;
+    const orderVersion = orderData.order?.version;
     if (!orderId) return false;
 
     // 2. Create invoice from order
@@ -1884,6 +1909,9 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     });
     if (!invoiceResp.ok) {
       console.error('Auto-invoice: invoice creation failed:', await invoiceResp.text());
+      // Clean up the orphan order — without the invoice it would sit OPEN in
+      // Square indefinitely and throw off reporting.
+      await cancelSquareOrder(orderId, orderVersion, env);
       return false;
     }
     const invoiceData = await invoiceResp.json();

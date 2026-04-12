@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
-import { X, Trophy, Check, User, Mail, Phone, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { X, Trophy, Check, User, Mail, Phone, Loader2, CreditCard } from 'lucide-react';
 import { joinChallenge, type Challenge } from '@/api/challenges';
+import { initializeAllPaymentMethods, createGenericCardPayment } from '@/api/squarePayments';
 
 interface JoinChallengeModalProps {
   challenge: Challenge | null;
@@ -13,9 +14,14 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
-  const [step, setStep] = useState<'form' | 'sending' | 'done' | 'error'>('form');
+  const [step, setStep] = useState<'form' | 'payment' | 'sending' | 'done' | 'error'>('form');
   const [errorMsg, setErrorMsg] = useState('');
   const [finalChallenge, setFinalChallenge] = useState<Challenge | null>(null);
+  const cardRef = useRef<any>(null);
+  const [cardReady, setCardReady] = useState(false);
+  const cardContainerId = 'challenge-join-card-container';
+  const price = typeof challenge?.price === 'number' ? challenge.price : 0;
+  const isPaid = price > 0;
 
   useEffect(() => {
     if (isOpen) {
@@ -30,19 +36,60 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
       setName('');
       setEmail('');
       setPhone('');
+      cardRef.current = null;
+      setCardReady(false);
     }
     return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
 
+  // When the user reaches the payment step for a paid challenge, initialize
+  // the Square Web SDK and attach the card input. Uses the same pattern as
+  // TrainingPlansShop — no new Square integration, just the existing SDK.
+  useEffect(() => {
+    if (step !== 'payment' || !isPaid || cardRef.current) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const methods = await initializeAllPaymentMethods(Math.round(price * 100));
+        if (cancelled || !methods?.card) {
+          if (!cancelled) setErrorMsg('Could not load the card form. Please try again or contact Alex directly.');
+          return;
+        }
+        await methods.card.attach(`#${cardContainerId}`);
+        if (cancelled) return;
+        cardRef.current = methods.card;
+        setCardReady(true);
+      } catch (e) {
+        if (!cancelled) setErrorMsg(e instanceof Error ? e.message : 'Card form failed to load');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [step, isPaid, price]);
+
   if (!isOpen || !challenge) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  // Form submit: for free challenges → join directly; for paid ones →
+  // advance to the payment step so the user can enter a card.
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!name.trim() || !email.trim()) {
+      setErrorMsg('Name and email are required.');
+      return;
+    }
+    if (isPaid) {
+      setStep('payment');
+      return;
+    }
+    await submitJoin();
+  };
+
+  const submitJoin = async (paymentId?: string) => {
     setStep('sending');
-    const result = await joinChallenge(challenge.id, {
+    const result = await joinChallenge(challenge!.id, {
       name: name.trim(),
       email: email.trim(),
       phone: phone.trim(),
+      paymentId,
     });
     if (result.ok) {
       setFinalChallenge(result.challenge || challenge);
@@ -50,6 +97,37 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
       if (result.challenge && onJoined) onJoined(result.challenge);
     } else {
       setErrorMsg(result.error || 'Something went wrong.');
+      setStep('error');
+    }
+  };
+
+  const handlePaymentSubmit = async () => {
+    if (!cardRef.current) {
+      setErrorMsg('Card form not ready. Please wait a moment.');
+      return;
+    }
+    setStep('sending');
+    try {
+      const tok = await cardRef.current.tokenize();
+      if (tok.status !== 'OK') {
+        setErrorMsg(tok.errors?.[0]?.detail || 'Card could not be verified. Please check the details.');
+        setStep('error');
+        return;
+      }
+      const paymentResult = await createGenericCardPayment({
+        cardToken: tok.token,
+        amountCents: Math.round(price * 100),
+        referenceId: `ch-${challenge!.id}`,
+        note: `Challenge entry: ${challenge!.title} — ${email.trim()}`,
+      });
+      if (!paymentResult.success || !paymentResult.paymentId) {
+        setErrorMsg(paymentResult.error || 'Payment failed.');
+        setStep('error');
+        return;
+      }
+      await submitJoin(paymentResult.paymentId);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : 'Payment failed unexpectedly.');
       setStep('error');
     }
   };
@@ -108,7 +186,7 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
               <p className="text-white/60 text-sm">Saving your spot…</p>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleFormSubmit} className="space-y-4">
               {challenge.spotsLeft !== undefined && challenge.spotsLeft !== null && (
                 <p className="text-xs text-white/50">
                   {challenge.spotsLeft} of {challenge.spots ?? challenge.spotsLeft} spots remaining.
@@ -144,9 +222,43 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
               </div>
 
               <button type="submit" className="w-full btn-primary text-sm mt-2">
-                Secure my spot
+                {isPaid ? `Continue to payment — $${price}` : 'Secure my spot'}
               </button>
             </form>
+          )}
+
+          {step === 'payment' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-white/60">Entry fee</span>
+                <span className="text-white font-semibold">${price}</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-white/50 bg-white/5 rounded-lg p-3">
+                <CreditCard size={14} /> Payments processed by Square. Your card is not stored on our servers.
+              </div>
+              <div
+                id={cardContainerId}
+                className="bg-white/5 border border-white/10 rounded-lg p-3 min-h-[60px]"
+              />
+              {errorMsg && <p className="text-red-400 text-xs">{errorMsg}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setStep('form'); setErrorMsg(''); }}
+                  className="px-4 py-3 bg-white/5 hover:bg-white/10 text-white text-sm rounded-lg"
+                >
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePaymentSubmit}
+                  disabled={!cardReady}
+                  className="flex-1 btn-primary text-sm disabled:opacity-50"
+                >
+                  {cardReady ? `Pay $${price} & join` : 'Loading card form…'}
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>

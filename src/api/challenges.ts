@@ -172,7 +172,7 @@ export interface JoinChallengeResult {
  */
 export async function joinChallenge(
   id: string,
-  participant: { name: string; email: string; phone?: string }
+  participant: { name: string; email: string; phone?: string; paymentId?: string }
 ): Promise<JoinChallengeResult> {
   if (!WORKER_URL) {
     return { ok: false, error: 'Challenge sign-up is not configured right now — please contact the coach directly.' };

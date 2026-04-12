@@ -10,6 +10,8 @@ import {
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus } from '@/api/squareCatalog';
 import { initializeAllPaymentMethods, createCardPayment, storePurchase, type PaymentMethods } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
+
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 // Recurring auto-pay (purchaseAndSubscribe) is deferred — see handlePayment.
 
 export interface ClientInfo {
@@ -181,23 +183,47 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
       }
 
       const freq = selectedPlan.frequency[selectedFrequency];
+      const sessionsGranted = freq?.totalSessions || 1;
+      const validUntil = new Date(Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000).toISOString();
+
       storePurchase({
         planId: selectedPlan.id,
         trainerId: selectedTrainer.id,
         paymentId,
         amount: getCurrentPrice(),
         purchaseDate: new Date().toISOString(),
-        sessionsRemaining: freq?.totalSessions || 1,
+        sessionsRemaining: sessionsGranted,
         // Default to 12 weeks when planWeeks is 0/missing (single sessions,
         // classes) — otherwise validUntil=now and the purchase is filtered
         // out as expired immediately.
-        validUntil: new Date(Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000).toISOString(),
+        validUntil,
         // Carry the client details through so PostPurchaseBooking can write
         // real bookings instead of "Client Name" / "client@example.com".
         clientName: clientInfo.name,
         clientEmail: clientInfo.email,
         clientPhone: clientInfo.phone,
       });
+
+      // Register the purchase's sessions in worker KV so the cron doesn't
+      // auto-invoice the client for sessions they already paid for.
+      // Payment ID is verified server-side against Square — attacker can't
+      // forge free credits by POSTing to this endpoint. Fire-and-forget
+      // because the user's purchase should succeed even if KV is briefly
+      // unavailable; worker will re-reconcile when possible.
+      if (WORKER_URL && paymentId && !paymentId.startsWith('mock_')) {
+        fetch(`${WORKER_URL}/credit-grant`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            paymentId,
+            email: clientInfo.email,
+            sessions: sessionsGranted,
+            duration: selectedPlan.duration,
+            planName: selectedPlan.name,
+            validUntil,
+          }),
+        }).catch(e => console.error('credit-grant call failed:', e));
+      }
 
       // NOTE: Recurring auto-pay subscription is NOT wired up yet. The
       // previous fire-and-forget call passed a Square catalog item ID

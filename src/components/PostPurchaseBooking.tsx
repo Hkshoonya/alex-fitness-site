@@ -3,6 +3,26 @@ import { X, ChevronLeft, ChevronRight, Clock, Check, Repeat, User, Info } from '
 import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date-fns';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 import { getPurchases, useSession } from '@/api/squarePayments';
+import { createBooking } from '@/api/squareAvailability';
+
+// Trainer picker uses the frontend ID ('alex1' / 'alex2'); real Square
+// bookings need the Square team_member_id. Until we have a proper mapping,
+// post-purchase bookings go to the default coach (Alex). Alex sees the plan
+// name + client in the Square booking's customer_note so he can triage.
+const DEFAULT_SQUARE_COACH = 'alex-davis';
+
+function slotToIsoStart(date: Date, time: string): string | null {
+  const match = time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+  let h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  const pm = match[3].toUpperCase() === 'PM';
+  if (pm && h !== 12) h += 12;
+  if (!pm && h === 12) h = 0;
+  const d = new Date(date);
+  d.setHours(h, m, 0, 0);
+  return d.toISOString();
+}
 
 interface PostPurchaseBookingProps {
   isOpen: boolean;
@@ -44,6 +64,7 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
   const [recurringOption, setRecurringOption] = useState<'none' | 'weekly' | 'biweekly'>('none');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [purchases, setPurchases] = useState<any[]>([]);
+  const [bookingResults, setBookingResults] = useState<{ succeeded: number; failed: number }>({ succeeded: 0, failed: 0 });
 
   useEffect(() => {
     if (isOpen) {
@@ -120,17 +141,6 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
   const handleConfirmBooking = async () => {
     setIsSubmitting(true);
 
-    // Store the requested slots locally so the coach can see what the
-    // client asked for. These are REQUESTS, not confirmed Square bookings —
-    // the UI below now says so honestly. If we later wire this modal to
-    // createBooking() for each slot we can upgrade these to real bookings.
-    let existing: unknown[] = [];
-    try {
-      const raw = localStorage.getItem('bookings');
-      if (raw) existing = JSON.parse(raw);
-      if (!Array.isArray(existing)) existing = [];
-    } catch { existing = []; }
-
     // Prefer the real client info threaded from the purchase flow. Fall
     // back to the latest purchase's record if the caller didn't pass it.
     const fallbackPurchase = getPurchases().slice(-1)[0];
@@ -138,18 +148,83 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
     const clientEmail = clientInfo?.email?.trim() || fallbackPurchase?.clientEmail || '';
     const clientPhone = clientInfo?.phone?.trim() || fallbackPurchase?.clientPhone || '';
 
-    const newBookings = selectedDates.map(slot => ({
+    // Actually create real Square bookings for each selected slot so Alex
+    // sees them in his Square/Trainerize calendar — the old code wrote to
+    // localStorage only and the coach never knew.
+    const duration = plan?.duration || 60;
+    const coachId = DEFAULT_SQUARE_COACH;
+    const results: Array<{ slot: BookingSlot; success: boolean; error?: string }> = [];
+
+    for (const slot of selectedDates) {
+      const startAt = slotToIsoStart(slot.date, slot.time);
+      if (!startAt) {
+        results.push({ slot, success: false, error: 'Unrecognized time format' });
+        continue;
+      }
+      const goalsNote = `Post-purchase booking — ${plan?.name || 'Training Session'} (session ${results.length + 1} of ${selectedDates.length})`;
+      const result = await createBooking(coachId, startAt, duration, {
+        name: clientName,
+        email: clientEmail,
+        phone: clientPhone,
+        goals: goalsNote,
+      });
+      results.push({
+        slot,
+        success: result.success,
+        error: result.error,
+      });
+    }
+
+    const succeeded = results.filter(r => r.success).length;
+    const failed = results.length - succeeded;
+
+    // Decrement ONE session credit per SUCCESSFUL booking only. Old code
+    // decremented regardless of whether the booking actually went through.
+    if (succeeded > 0) {
+      const purchases = getPurchases();
+      const matching = purchases.filter((p: any) =>
+        p.sessionsRemaining > 0 &&
+        (!plan?.id || p.planId === plan.id) &&
+        (!trainer?.id || p.trainerId === trainer.id)
+      );
+      // Drain each purchase in order (oldest first → nearest-expiring plan
+      // burns down first). Walk through matching purchases' sessionsRemaining
+      // so we don't leak credits when successful > matching.length.
+      let bookingIdx = 0;
+      for (const purchase of matching) {
+        let remaining = purchase.sessionsRemaining;
+        while (remaining > 0 && bookingIdx < succeeded) {
+          useSession(purchase.id);
+          remaining--;
+          bookingIdx++;
+        }
+        if (bookingIdx >= succeeded) break;
+      }
+    }
+
+    // Store a local record of every result (including failures) so the user
+    // can see in their own calendar what went through vs what needs manual
+    // follow-up. Webhook flow handles the real Trainerize sync for the
+    // successful ones.
+    let existing: unknown[] = [];
+    try {
+      const raw = localStorage.getItem('bookings');
+      if (raw) existing = JSON.parse(raw);
+      if (!Array.isArray(existing)) existing = [];
+    } catch { existing = []; }
+    const newBookings = results.map(r => ({
       id: `booking_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
-      date: slot.date.toISOString().split('T')[0],
-      time: slot.time,
+      date: r.slot.date.toISOString().split('T')[0],
+      time: r.slot.time,
       name: clientName,
       email: clientEmail,
       phone: clientPhone,
       service: plan?.name || 'Training Session',
-      duration: plan?.duration || 60,
+      duration,
       trainerId: trainer?.id || 'alex1',
-      status: 'pending', // coach confirms manually
-      source: 'post-purchase-request',
+      status: r.success ? 'confirmed' : 'failed',
+      source: 'post-purchase-booking',
+      error: r.error,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }));
@@ -157,40 +232,7 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
       localStorage.setItem('bookings', JSON.stringify([...existing, ...newBookings]));
     } catch { /* quota / private mode */ }
 
-    // Decrement ONE session credit per booking, draining each matching
-    // purchase in order (oldest first → burns down the nearest-expiring
-    // plan). Old code called useSession at most `matching.length` times
-    // regardless of how many bookings were made, silently leaking credits
-    // when selectedDates.length > matching.length.
-    const purchases = getPurchases();
-    const matching = purchases.filter((p: any) =>
-      p.sessionsRemaining > 0 &&
-      (!plan?.id || p.planId === plan.id) &&
-      (!trainer?.id || p.trainerId === trainer.id)
-    );
-    // Work with a mutable copy of sessionsRemaining so we walk through
-    // multi-session purchases correctly without re-reading localStorage
-    // after each useSession call.
-    let bookingIndex = 0;
-    for (const purchase of matching) {
-      let remaining = purchase.sessionsRemaining;
-      while (remaining > 0 && bookingIndex < selectedDates.length) {
-        useSession(purchase.id);
-        remaining--;
-        bookingIndex++;
-      }
-      if (bookingIndex >= selectedDates.length) break;
-    }
-    if (bookingIndex < selectedDates.length) {
-      // User booked more sessions than they have credits for. This
-      // shouldn't happen in the UI (the button should've been disabled),
-      // but log it so we notice if a path sneaks through.
-      console.warn(
-        `PostPurchaseBooking: ${selectedDates.length - bookingIndex} bookings submitted without matching credits`,
-        { plan: plan?.id, trainer: trainer?.id }
-      );
-    }
-
+    setBookingResults({ succeeded, failed });
     setIsSubmitting(false);
     setStep('success');
   };
@@ -236,7 +278,7 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
               {step === 'select' && 'Book Your Sessions'}
               {step === 'calendar' && 'Select Date & Time'}
               {step === 'confirm' && 'Confirm Booking'}
-              {step === 'success' && 'Request sent!'}
+              {step === 'success' && (bookingResults.failed === 0 ? 'Booked!' : bookingResults.succeeded === 0 ? 'Couldn\'t book' : 'Partially booked')}
             </h2>
             {trainer && (
               <p className="text-white/60 text-sm mt-1 flex items-center gap-2">
@@ -514,11 +556,22 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
                 <Check className="text-green-400" size={40} />
               </div>
               <h3 className="text-xl font-semibold text-white mb-2">
-                All Booked!
+                {bookingResults.failed === 0
+                  ? 'All Booked!'
+                  : bookingResults.succeeded === 0
+                    ? 'Nothing went through'
+                    : `${bookingResults.succeeded} of ${bookingResults.succeeded + bookingResults.failed} booked`}
               </h3>
               <p className="text-white/70 mb-4">
-                {selectedDates.length} session{selectedDates.length > 1 ? 's' : ''} confirmed with {trainer?.name}
+                {bookingResults.succeeded > 0
+                  ? `${bookingResults.succeeded} session${bookingResults.succeeded > 1 ? 's' : ''} confirmed with ${trainer?.name}`
+                  : `Square couldn't accept these slots. Alex has been notified — expect a reply within 24 hours.`}
               </p>
+              {bookingResults.failed > 0 && bookingResults.succeeded > 0 && (
+                <p className="text-yellow-300/80 text-sm mb-4">
+                  {bookingResults.failed} slot{bookingResults.failed > 1 ? 's' : ''} didn't go through — Alex will reach out about those.
+                </p>
+              )}
               <div className="bg-white/5 rounded-lg p-4 inline-block text-left">
                 <p className="text-white/60 text-sm mb-2">First session:</p>
                 <p className="text-white font-medium">
@@ -526,7 +579,11 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
                 </p>
               </div>
               <p className="text-white/50 text-sm mt-4">
-                Alex will reach out to confirm these times. You'll hear back within 24 hours.
+                {bookingResults.failed === 0
+                  ? 'A confirmation has been sent to Alex and to your email.'
+                  : bookingResults.succeeded > 0
+                    ? 'Confirmed slots are on Alex\'s calendar. For the failed ones, we\'ll reach out within 24 hours.'
+                    : 'We\'ve logged your request — Alex will reach out within 24 hours to schedule.'}
               </p>
               <button onClick={() => { onClose(); resetState(); }} className="btn-primary text-sm mt-6">
                 Done

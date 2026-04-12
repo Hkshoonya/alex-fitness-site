@@ -115,6 +115,51 @@ export const initializeAllPaymentMethods = async (
   return methods;
 };
 
+/**
+ * Generic card payment — used by flows that aren't tied to a training plan
+ * (e.g. challenge entry fees). Returns the Square payment ID so the caller
+ * can pass it to worker-side flows that need to verify a real charge
+ * happened.
+ */
+export const createGenericCardPayment = async (params: {
+  cardToken: string;
+  amountCents: number;
+  referenceId: string;
+  note: string;
+}): Promise<{ success: boolean; paymentId?: string; error?: string }> => {
+  if (!SQUARE_APPLICATION_ID) {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    return { success: true, paymentId: `mock_payment_${Date.now()}` };
+  }
+  if (params.amountCents <= 0) {
+    return { success: false, error: 'Amount must be greater than zero' };
+  }
+
+  try {
+    const response = await fetch(`${SQUARE_API_BASE}/payments`, {
+      method: 'POST',
+      headers: getSquareHeaders(),
+      body: JSON.stringify({
+        source_id: params.cardToken,
+        idempotency_key: `pay_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        amount_money: { amount: params.amountCents, currency: 'USD' },
+        location_id: SQUARE_LOCATION_ID,
+        reference_id: params.referenceId.slice(0, 40),
+        note: params.note.slice(0, 500),
+        autocomplete: true,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.errors?.[0]?.detail || 'Payment failed');
+    }
+    return { success: true, paymentId: data.payment.id };
+  } catch (error) {
+    console.error('Generic payment error:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Payment failed' };
+  }
+};
+
 export const createCardPayment = async (
   plan: TrainingPlan,
   trainerId: 'alex1' | 'alex2',

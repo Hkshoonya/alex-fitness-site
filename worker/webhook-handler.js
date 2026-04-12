@@ -419,6 +419,187 @@ export default {
       return new Response(JSON.stringify(challenge), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
+    // POST /credit-grant — frontend calls this after a successful
+    // createCardPayment to register the purchase's sessions in worker KV.
+    // Without this the cron sees no credits for a client who legitimately
+    // paid, and fires auto-invoices for every completed session (double
+    // billing). We verify the paymentId against Square to ensure the
+    // caller actually paid — random visitors can't forge free credits.
+    if (url.pathname === '/credit-grant' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!await checkRateLimit(request, 'credit-grant', 10, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      let body;
+      try { body = await request.json(); }
+      catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }); }
+
+      const paymentId = typeof body.paymentId === 'string' ? body.paymentId.trim() : '';
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      const sessions = Number(body.sessions);
+      const duration = Number(body.duration) || 60;
+      const planName = typeof body.planName === 'string' ? body.planName.slice(0, 200) : 'Purchase';
+      const validUntilInput = typeof body.validUntil === 'string' ? body.validUntil : '';
+
+      if (!paymentId || !email || !Number.isFinite(sessions) || sessions <= 0 || sessions > 52) {
+        return new Response(JSON.stringify({ error: 'paymentId, email, and sessions (1-52) are required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return new Response(JSON.stringify({ error: 'Invalid email format' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Dedup: one grant per paymentId. Without this, a malicious script
+      // could hammer /credit-grant 100x with the same paymentId and rack up
+      // session credits.
+      const grantKey = `credit-grant:${paymentId}`;
+      if (await kvGet(grantKey, env)) {
+        return new Response(JSON.stringify({ alreadyGranted: true }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Verify the payment actually exists in Square AND was completed.
+      // Without this check, an attacker could forge a random string and
+      // mint themselves free session credits.
+      try {
+        const verifyResp = await fetch(`${getSquareApiBase(env)}/payments/${encodeURIComponent(paymentId)}`, {
+          headers: getSquareHeaders(env),
+        });
+        if (!verifyResp.ok) {
+          await logEvent('error', 'credit-grant-payment-not-found', {
+            paymentId, email, status: verifyResp.status,
+          }, env);
+          return new Response(JSON.stringify({ error: 'Payment not found or not authorized' }), {
+            status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const paymentData = await verifyResp.json();
+        const paymentStatus = paymentData.payment?.status;
+        if (paymentStatus !== 'COMPLETED' && paymentStatus !== 'APPROVED') {
+          return new Response(JSON.stringify({ error: `Payment status is ${paymentStatus}, must be COMPLETED` }), {
+            status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      } catch (e) {
+        await logEvent('error', 'credit-grant-verify-failed', {
+          paymentId, email, err: e?.message,
+        }, env);
+        return new Response(JSON.stringify({ error: 'Could not verify payment with Square' }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Find Trainerize user ID — the credits KV key is keyed by it.
+      if (!isTrainerizeConfigured(env)) {
+        return new Response(JSON.stringify({ error: 'Trainerize not configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let userId = await findTrainerizeUserByEmail(email, env);
+      if (!userId) {
+        // Client isn't in Trainerize yet (first-time purchaser). Log and
+        // return accepted — when they next book via Square, the booking
+        // webhook will create their Trainerize user and the next cron
+        // pass can reconcile.
+        await logEvent('credit', 'credit-grant-deferred-no-tz-user', {
+          paymentId, email, sessions, planName,
+        }, env);
+        await kvPut(grantKey, JSON.stringify({
+          paymentId, email, sessions, duration, planName,
+          deferred: true, grantedAt: new Date().toISOString(),
+        }), { expirationTtl: 90 * 24 * 3600 }, env);
+        return new Response(JSON.stringify({
+          ok: true, deferred: true,
+          message: 'Credits will be applied once the client account syncs',
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Take the credits lock (same key deductSessionCredit uses) so a
+      // concurrent cron deduction doesn't race with our credit add.
+      const lockKey = `lock:credits:${userId}`;
+      const locked = await kvGet(lockKey, env);
+      if (locked) {
+        return new Response(JSON.stringify({ error: 'User credits are being updated — try again in a moment' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      await kvPut(lockKey, Date.now().toString(), { expirationTtl: 60 }, env);
+
+      try {
+        const existing = await kvGet(`credits:${userId}`, env);
+        let creditData;
+        if (existing) {
+          try { creditData = JSON.parse(existing); }
+          catch {
+            await logEvent('error', 'credit-grant-corrupt-existing', {
+              paymentId, email, userId,
+            }, env);
+            return new Response(JSON.stringify({ error: 'Existing credit record is corrupt — contact support' }), {
+              status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+          creditData.remaining = (creditData.remaining || 0) + sessions;
+          creditData.total = (creditData.total || 0) + sessions;
+          if (validUntilInput) creditData.validUntil = validUntilInput;
+          creditData.planName = planName;
+        } else {
+          creditData = {
+            userId, email,
+            total: sessions, remaining: sessions,
+            duration, planName,
+            validUntil: validUntilInput || new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString(),
+            updatedAt: new Date().toISOString(),
+            deductions: [],
+          };
+        }
+        creditData.updatedAt = new Date().toISOString();
+        await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
+
+        // Mark this payment as granted so replayed calls short-circuit.
+        await kvPut(grantKey, JSON.stringify({
+          paymentId, email, userId, sessions, duration, planName,
+          grantedAt: new Date().toISOString(),
+        }), { expirationTtl: 90 * 24 * 3600 }, env);
+
+        await logEvent('credit', `Granted ${sessions} sessions to ${email}`, {
+          paymentId, userId, planName, sessions,
+        }, env);
+
+        // Best-effort Trainerize tag so the coach sees the updated balance.
+        try {
+          await clearCreditTags(userId, env);
+          const tagCredits = Math.min(creditData.remaining, 24);
+          await trainerizePost('/user/addTag', {
+            userID: userId, userTag: creditTagName(tagCredits),
+          }, env);
+          await trainerizePost('/trainerNote/add', {
+            userID: userId,
+            content: `${sessions} session credits added via ${planName} (payment ${paymentId.slice(0, 8)}). Balance: ${creditData.remaining}/${creditData.total}.`,
+            type: 'general',
+          }, env);
+        } catch (e) {
+          console.error('credit-grant Trainerize tag best-effort failed:', e);
+        }
+
+        return new Response(JSON.stringify({
+          ok: true, userId, remaining: creditData.remaining, total: creditData.total,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } finally {
+        try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* best-effort */ }
+      }
+    }
+
     // POST /challenges/:id/join — public, non-admin endpoint. Atomically
     // decrements spotsLeft, records the join per email so the same person
     // can't double-claim a spot. Returns the updated challenge.
@@ -476,9 +657,8 @@ export default {
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
-      // Read-modify-write the challenge list. KV has no atomic CAS so we
-      // accept a small race window; the per-email dedup above catches the
-      // common case of a single user double-clicking.
+      // Read the challenge first — we need its price to decide whether a
+      // payment is required before admitting the user.
       const all = await getChallenges(env);
       const idx = all.findIndex(c => c.id === id);
       if (idx < 0) {
@@ -487,6 +667,59 @@ export default {
         });
       }
       const challenge = all[idx];
+
+      // Paid challenges: require a valid Square paymentId. Verify the
+      // charge actually happened (amount + status) BEFORE decrementing the
+      // spot. Without this, anyone could POST `/join` and claim a paid slot
+      // for free.
+      const challengePrice = typeof challenge.price === 'number' ? challenge.price : 0;
+      const rawPaymentId = typeof body.paymentId === 'string' ? body.paymentId.trim() : '';
+      if (challengePrice > 0) {
+        if (!rawPaymentId) {
+          return new Response(JSON.stringify({
+            error: `This challenge requires a $${challengePrice} entry fee. Payment is required.`,
+          }), { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        // Reject reused payment IDs — one payment, one join.
+        if (await kvGet(`challenge-payment:${rawPaymentId}`, env)) {
+          return new Response(JSON.stringify({ error: 'This payment has already been used for a challenge join' }), {
+            status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        // Ask Square to confirm the payment exists, is completed, and is
+        // for at least the challenge's price.
+        try {
+          const vr = await fetch(`${getSquareApiBase(env)}/payments/${encodeURIComponent(rawPaymentId)}`, {
+            headers: getSquareHeaders(env),
+          });
+          if (!vr.ok) {
+            return new Response(JSON.stringify({ error: 'Payment could not be verified with Square' }), {
+              status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+          const pd = await vr.json();
+          const ps = pd.payment?.status;
+          const paidCents = pd.payment?.amount_money?.amount || 0;
+          if (ps !== 'COMPLETED' && ps !== 'APPROVED') {
+            return new Response(JSON.stringify({ error: `Payment status is ${ps}, must be COMPLETED` }), {
+              status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+          if (paidCents < Math.round(challengePrice * 100)) {
+            return new Response(JSON.stringify({ error: `Payment amount is too low for this challenge` }), {
+              status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+        } catch (e) {
+          await logEvent('error', 'challenge-join-verify-failed', {
+            paymentId: rawPaymentId, challengeId: id, email, err: e?.message,
+          }, env);
+          return new Response(JSON.stringify({ error: 'Payment verification failed' }), {
+            status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
       if (challenge.spotsLeft !== undefined && challenge.spotsLeft !== null) {
         if (challenge.spotsLeft <= 0) {
           return new Response(JSON.stringify({ error: 'Challenge is full', challenge }), {
@@ -498,8 +731,16 @@ export default {
       all[idx] = challenge;
       await kvPut('challenges', JSON.stringify(all), {}, env);
       await kvPut(joinKey, JSON.stringify({
-        email, name, phone, joinedAt: new Date().toISOString(),
+        email, name, phone,
+        paymentId: rawPaymentId || undefined,
+        joinedAt: new Date().toISOString(),
       }), { expirationTtl: 365 * 24 * 3600 }, env);
+      // Burn the payment ID so it can't be reused for another challenge.
+      if (rawPaymentId) {
+        await kvPut(`challenge-payment:${rawPaymentId}`, id, {
+          expirationTtl: 365 * 24 * 3600,
+        }, env);
+      }
 
       // Best-effort: if the challenge has a Trainerize group link, tag the
       // user so the coach sees their participation.

@@ -1829,6 +1829,25 @@ async function cancelSquareOrder(orderId, orderVersion, env) {
   }
 }
 
+/**
+ * Delete a DRAFT Square invoice. No-op for non-draft invoices — the caller
+ * should only invoke this before /publish succeeds.
+ */
+async function deleteDraftInvoice(invoiceId, invoiceVersion, env) {
+  if (!invoiceId) return;
+  try {
+    const resp = await fetch(`${getSquareApiBase(env)}/invoices/${invoiceId}?version=${invoiceVersion}`, {
+      method: 'DELETE',
+      headers: getSquareHeaders(env),
+    });
+    if (!resp.ok) {
+      console.error(`Failed to delete draft invoice ${invoiceId}:`, await resp.text());
+    }
+  } catch (e) {
+    console.error(`Failed to delete draft invoice ${invoiceId}:`, e);
+  }
+}
+
 // Square catalog variation IDs for single sessions
 const SESSION_CATALOG = {
   30: { variationId: '66QDZG33XW3F62HR63P6VF5G', price: 5000, name: 'PT - 30 Minute Session' },
@@ -1857,6 +1876,17 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
   // Idempotency suffix must include the appointment ID so two sessions on the
   // same day don't collide and share a single invoice.
   const idemSuffix = aptId ? `${sessionDate}-${aptId}` : sessionDate;
+
+  // Cooldown: if a previous publish failed we cleaned up the draft+order,
+  // but Square's idempotency cache still remembers the order key for ~24h.
+  // Don't retry inside that window — we'd just churn against the same cached
+  // (now CANCELED) order. Caller leaves attCountedKey unset so we WILL retry
+  // after the cooldown expires.
+  const cooldownKey = `auto-invoice-cooldown:${attendeeUserId}:${idemSuffix}`;
+  if (await kvGet(cooldownKey, env)) {
+    console.log(`Auto-invoice: cooldown active for ${attendeeName} (${sessionDate}) — will retry later`);
+    return false;
+  }
 
   try {
     // 1. Create Square order
@@ -1930,6 +1960,12 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     });
     if (!publishResp.ok) {
       console.error('Auto-invoice: publish failed:', await publishResp.text());
+      // Clean up: delete the draft invoice, cancel the order. Write a cooldown
+      // marker so the next cron tick (15 min) doesn't immediately re-enter
+      // while Square's idempotency cache still holds the now-canceled order.
+      await deleteDraftInvoice(invoiceId, invoiceVersion, env);
+      await cancelSquareOrder(orderId, orderVersion, env);
+      await kvPut(cooldownKey, 'publish-failed', { expirationTtl: 24 * 3600 }, env);
       return false;
     }
 

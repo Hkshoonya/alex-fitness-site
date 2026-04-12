@@ -10,12 +10,18 @@ import {
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus } from '@/api/squareCatalog';
 import { initializeAllPaymentMethods, createCardPayment, storePurchase, type PaymentMethods } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
-import { purchaseAndSubscribe } from '@/api/squareSubscriptions';
+// Recurring auto-pay (purchaseAndSubscribe) is deferred — see handlePayment.
+
+export interface ClientInfo {
+  name: string;
+  email: string;
+  phone: string;
+}
 
 interface TrainingPlansShopProps {
   isOpen: boolean;
   onClose: () => void;
-  onPurchaseComplete?: (plan: TrainingPlan, trainer: Trainer) => void;
+  onPurchaseComplete?: (plan: TrainingPlan, trainer: Trainer, clientInfo: ClientInfo) => void;
 }
 
 type CategoryFilter = 'all' | 'personal-4week' | 'personal-12week' | 'online' | 'app' | 'class' | 'single-session';
@@ -186,24 +192,24 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         // classes) — otherwise validUntil=now and the purchase is filtered
         // out as expired immediately.
         validUntil: new Date(Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000).toISOString(),
+        // Carry the client details through so PostPurchaseBooking can write
+        // real bookings instead of "Client Name" / "client@example.com".
+        clientName: clientInfo.name,
+        clientEmail: clientInfo.email,
+        clientPhone: clientInfo.phone,
       });
 
-      // Set up recurring auto-pay subscription (fire-and-forget)
-      // First payment is already done above — this stores card on file
-      // and creates subscription so next billing cycle auto-charges
-      if (selectedPlan.planWeeks >= 12 && selectedPlan.frequency.length > 0) {
-        // Multi-week plans with sessions → monthly auto-pay
-        const customerId = paymentId; // In production, use the real Square customer ID
-        purchaseAndSubscribe({
-          customerId,
-          cardToken: cardToken ?? `mock_token_${Date.now()}`,
-          planVariationId: selectedPlan.squareItemId || '',
-          firstPaymentAmountCents: 0, // Already paid above, so first sub charge = $0
-        });
-      }
+      // NOTE: Recurring auto-pay subscription is NOT wired up yet. The
+      // previous fire-and-forget call passed a Square catalog item ID
+      // where a subscription_plan_variation_id is required, a $0 first
+      // charge (Square rejects those), and a payment ID as customer ID —
+      // so every multi-week purchase silently failed to set up recurring
+      // billing. Removed until a real Square Subscriptions plan exists and
+      // the correct IDs are threaded through. Until then, plans charge
+      // once at purchase and the coach invoices manually for renewal.
 
       setStep('success');
-      if (onPurchaseComplete) onPurchaseComplete(selectedPlan, selectedTrainer);
+      if (onPurchaseComplete) onPurchaseComplete(selectedPlan, selectedTrainer, clientInfo);
 
       // Provision client in Trainerize (fire-and-forget)
       // Creates client account → generates ID + password → sends activation email → assigns plan

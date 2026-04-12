@@ -246,8 +246,19 @@ async function fetchFromSquare(): Promise<TrainingPlan[]> {
     return plans;
   } catch (error) {
     console.error('Square catalog fetch failed:', error);
+    lastCatalogError = error instanceof Error ? error.message : 'catalog fetch failed';
     return [];
   }
+}
+
+// Tracks the most recent catalog fetch error so the shop UI can surface a
+// "showing cached plans" banner when Square is unreachable — otherwise the
+// site silently serves stale hardcoded plans and nobody notices a bad
+// API key / 401 / rate-limit until a customer complains.
+let lastCatalogError: string | null = null;
+
+export function getLastCatalogError(): string | null {
+  return lastCatalogError;
 }
 
 /**
@@ -257,12 +268,16 @@ async function fetchFromSquare(): Promise<TrainingPlan[]> {
 export async function getTrainingPlans(): Promise<TrainingPlan[]> {
   if (isCacheFresh()) {
     const cached = getCachedPlans();
-    if (cached && cached.length > 0) return cached;
+    if (cached && cached.length > 0) {
+      lastCatalogError = null;
+      return cached;
+    }
   }
 
   const squarePlans = await fetchFromSquare();
   if (squarePlans.length > 0) {
     cachePlans(squarePlans);
+    lastCatalogError = null;
     return squarePlans;
   }
 

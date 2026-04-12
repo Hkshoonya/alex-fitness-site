@@ -251,7 +251,9 @@ export default {
         /subscriptions\/.+\/(cancel|actions)/, // cancel/force subscription state
         /^user\/(delete|remove)/,     // trainerize: delete client
         /^account\/delete/,           // trainerize: delete account
-        /^team-members/,              // square: add/update/remove coaches
+        // Square: block add/update/delete of coaches, but NOT /team-members/search
+        // (which the frontend needs to populate the coach picker).
+        /^team-members\/(?!search)[^/]+$/, // /team-members/{id} — mutation target
       ];
       const isDangerous = dangerousPatterns.some(re => re.test(proxyPath));
       // Only block mutating methods so read-only lookups (e.g. GET) still work.
@@ -402,6 +404,92 @@ export default {
 
       await saveChallenge(challenge, env);
       return new Response(JSON.stringify(challenge), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // POST /challenges/:id/join — public, non-admin endpoint. Atomically
+    // decrements spotsLeft, records the join per email so the same person
+    // can't double-claim a spot. Returns the updated challenge.
+    if (url.pathname.startsWith('/challenges/') && url.pathname.endsWith('/join') && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!await checkRateLimit(request, 'challenge-join', 10, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const id = url.pathname.split('/challenges/')[1].replace('/join', '');
+      let body;
+      try { body = await request.json(); }
+      catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }); }
+
+      const email = (body.email || '').trim().toLowerCase();
+      const name = (body.name || '').trim();
+      if (!email || !name) {
+        return new Response(JSON.stringify({ error: 'Name and email are required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Per-email dedup: if this person already joined this challenge, return
+      // the current challenge state (no extra decrement, no extra Trainerize
+      // action). 365-day TTL covers the lifetime of any reasonable challenge.
+      const joinKey = `challenge-join:${id}:${email}`;
+      if (await kvGet(joinKey, env)) {
+        const all = await getChallenges(env);
+        const current = all.find(c => c.id === id);
+        return new Response(JSON.stringify({
+          alreadyJoined: true, challenge: current || null,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Read-modify-write the challenge list. KV has no atomic CAS so we
+      // accept a small race window; the per-email dedup above catches the
+      // common case of a single user double-clicking.
+      const all = await getChallenges(env);
+      const idx = all.findIndex(c => c.id === id);
+      if (idx < 0) {
+        return new Response(JSON.stringify({ error: 'Challenge not found' }), {
+          status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const challenge = all[idx];
+      if (challenge.spotsLeft !== undefined && challenge.spotsLeft !== null) {
+        if (challenge.spotsLeft <= 0) {
+          return new Response(JSON.stringify({ error: 'Challenge is full', challenge }), {
+            status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        challenge.spotsLeft = Math.max(0, challenge.spotsLeft - 1);
+      }
+      all[idx] = challenge;
+      await kvPut('challenges', JSON.stringify(all), {}, env);
+      await kvPut(joinKey, JSON.stringify({
+        email, name, phone: body.phone || '', joinedAt: new Date().toISOString(),
+      }), { expirationTtl: 365 * 24 * 3600 }, env);
+
+      // Best-effort: if the challenge has a Trainerize group link, tag the
+      // user so the coach sees their participation.
+      if (challenge.trainerizeId && isTrainerizeConfigured(env)) {
+        try {
+          const userId = await findTrainerizeUserByEmail(email, env);
+          if (userId) {
+            await trainerizePost('/user/addTag', {
+              userID: userId, userTag: `🏆 Challenge: ${challenge.title}`,
+            }, env);
+          }
+        } catch (e) { console.error('Challenge-join Trainerize tag failed:', e); }
+      }
+
+      await logEvent('challenge', `Joined: ${email} → ${challenge.title}`, {
+        challengeId: id, email, name,
+      }, env);
+
+      return new Response(JSON.stringify({ ok: true, challenge }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
     if (url.pathname.startsWith('/challenges/') && request.method === 'DELETE') {

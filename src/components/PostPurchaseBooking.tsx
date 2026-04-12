@@ -9,6 +9,7 @@ interface PostPurchaseBookingProps {
   onClose: () => void;
   plan?: TrainingPlan;
   trainer?: Trainer;
+  clientInfo?: { name: string; email: string; phone: string };
 }
 
 interface BookingSlot {
@@ -35,7 +36,7 @@ const generateAvailableDates = (weeks: number = 4) => {
   return dates;
 };
 
-export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer }: PostPurchaseBookingProps) {
+export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, clientInfo }: PostPurchaseBookingProps) {
   const [step, setStep] = useState<'select' | 'calendar' | 'confirm' | 'success'>('select');
   const [selectedDates, setSelectedDates] = useState<BookingSlot[]>([]);
   const [currentWeekOffset, setCurrentWeekOffset] = useState(0);
@@ -119,32 +120,54 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer }: 
   const handleConfirmBooking = async () => {
     setIsSubmitting(true);
 
-    // Simulate API call to Square for booking
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Store the requested slots locally so the coach can see what the
+    // client asked for. These are REQUESTS, not confirmed Square bookings —
+    // the UI below now says so honestly. If we later wire this modal to
+    // createBooking() for each slot we can upgrade these to real bookings.
+    let existing: unknown[] = [];
+    try {
+      const raw = localStorage.getItem('bookings');
+      if (raw) existing = JSON.parse(raw);
+      if (!Array.isArray(existing)) existing = [];
+    } catch { existing = []; }
 
-    // Store bookings
-    const existingBookings = JSON.parse(localStorage.getItem('bookings') || '[]');
+    // Prefer the real client info threaded from the purchase flow. Fall
+    // back to the latest purchase's record if the caller didn't pass it.
+    const fallbackPurchase = getPurchases().slice(-1)[0];
+    const clientName = clientInfo?.name?.trim() || fallbackPurchase?.clientName || '';
+    const clientEmail = clientInfo?.email?.trim() || fallbackPurchase?.clientEmail || '';
+    const clientPhone = clientInfo?.phone?.trim() || fallbackPurchase?.clientPhone || '';
+
     const newBookings = selectedDates.map(slot => ({
-      id: `booking_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: `booking_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
       date: slot.date.toISOString().split('T')[0],
       time: slot.time,
-      name: 'Client Name', // Would come from user profile
-      email: 'client@example.com',
-      phone: '',
+      name: clientName,
+      email: clientEmail,
+      phone: clientPhone,
       service: plan?.name || 'Training Session',
       duration: plan?.duration || 60,
       trainerId: trainer?.id || 'alex1',
-      status: 'confirmed',
+      status: 'pending', // coach confirms manually
+      source: 'post-purchase-request',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }));
+    try {
+      localStorage.setItem('bookings', JSON.stringify([...existing, ...newBookings]));
+    } catch { /* quota / private mode */ }
 
-    localStorage.setItem('bookings', JSON.stringify([...existingBookings, ...newBookings]));
-
-    // Use sessions from purchase
-    const userPurchases = getPurchases();
-    for (let i = 0; i < selectedDates.length && i < userPurchases.length; i++) {
-      useSession(userPurchases[i].id);
+    // Decrement session credits against the purchase that matches THIS
+    // plan/trainer, not by array index. Prevents draining sessions from an
+    // unrelated prior purchase when the user has multiple active plans.
+    const purchases = getPurchases();
+    const matching = purchases.filter((p: any) =>
+      p.sessionsRemaining > 0 &&
+      (!plan?.id || p.planId === plan.id) &&
+      (!trainer?.id || p.trainerId === trainer.id)
+    );
+    for (let i = 0; i < selectedDates.length && i < matching.length; i++) {
+      useSession(matching[i].id);
     }
 
     setIsSubmitting(false);
@@ -192,7 +215,7 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer }: 
               {step === 'select' && 'Book Your Sessions'}
               {step === 'calendar' && 'Select Date & Time'}
               {step === 'confirm' && 'Confirm Booking'}
-              {step === 'success' && 'Booking Confirmed!'}
+              {step === 'success' && 'Request sent!'}
             </h2>
             {trainer && (
               <p className="text-white/60 text-sm mt-1 flex items-center gap-2">
@@ -482,7 +505,7 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer }: 
                 </p>
               </div>
               <p className="text-white/50 text-sm mt-4">
-                Confirmation emails have been sent.
+                Alex will reach out to confirm these times. You'll hear back within 24 hours.
               </p>
               <button onClick={() => { onClose(); resetState(); }} className="btn-primary text-sm mt-6">
                 Done

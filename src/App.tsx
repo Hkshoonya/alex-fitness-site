@@ -41,6 +41,7 @@ function App() {
   const [messageModalOpen, setMessageModalOpen] = useState(false);
   const [purchasedPlan, setPurchasedPlan] = useState<TrainingPlan | undefined>();
   const [selectedTrainer, setSelectedTrainer] = useState<Trainer | undefined>();
+  const [purchaseClient, setPurchaseClient] = useState<{ name: string; email: string; phone: string } | undefined>();
   const heroRef = useRef<HTMLDivElement>(null);
   const valueRef = useRef<HTMLDivElement>(null);
   const plansRef = useRef<HTMLDivElement>(null);
@@ -278,9 +279,10 @@ function App() {
     }
   };
 
-  const handlePurchaseComplete = (plan: TrainingPlan, trainer: Trainer) => {
+  const handlePurchaseComplete = (plan: TrainingPlan, trainer: Trainer, clientInfo: { name: string; email: string; phone: string }) => {
     setPurchasedPlan(plan);
     setSelectedTrainer(trainer);
+    setPurchaseClient(clientInfo);
     setShopOpen(false);
     setPostPurchaseOpen(true);
   };
@@ -837,6 +839,7 @@ function App() {
         onClose={() => setPostPurchaseOpen(false)}
         plan={purchasedPlan}
         trainer={selectedTrainer}
+        clientInfo={purchaseClient}
       />
 
       {/* Quick Message Modal */}

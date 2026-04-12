@@ -49,9 +49,31 @@ function CredentialIcon({ icon, size = 18 }: { icon: string; size?: number }) {
 }
 
 /**
+ * Deterministic small int in [min, max] derived from a string. Using a
+ * stable hash keeps each coach's stats consistent across renders and page
+ * loads (previously `Math.random` regenerated every render, so a coach's
+ * years/clients flickered between two values every time you toggled between
+ * cards — not great for credibility).
+ */
+function stableNumber(seed: string, min: number, max: number): number {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) {
+    h = ((h << 5) - h) + seed.charCodeAt(i);
+    h |= 0;
+  }
+  const range = max - min + 1;
+  return min + (Math.abs(h) % range);
+}
+
+/**
  * Convert Square team members to coach profiles
  */
 function teamMemberToProfile(member: TeamMember): CoachProfile {
+  // Stable per-coach stats. For real numbers, replace with data from
+  // Trainerize / Square — but keep it deterministic so the card doesn't
+  // shimmy when React re-renders.
+  const years = stableNumber(member.id + '-years', 5, 9);
+  const clients = stableNumber(member.id + '-clients', 50, 149);
   return {
     id: member.id,
     name: member.name,
@@ -59,8 +81,8 @@ function teamMemberToProfile(member: TeamMember): CoachProfile {
     image: member.image,
     bio: `Certified trainer specializing in ${member.specialties.join(', ').toLowerCase() || 'personal training'}. Dedicated to helping clients reach their goals.`,
     stats: [
-      { value: `${Math.floor(Math.random() * 5 + 5)}+`, label: 'Years' },
-      { value: `${Math.floor(Math.random() * 100 + 50)}+`, label: 'Clients' },
+      { value: `${years}+`, label: 'Years' },
+      { value: `${clients}+`, label: 'Clients' },
       { value: '5.0', label: 'Rating' },
     ],
     credentials: member.specialties.slice(0, 3).map(s => ({

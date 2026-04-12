@@ -165,10 +165,22 @@ export const storePurchase = (purchase: {
   purchaseDate: string;
   sessionsRemaining: number;
   validUntil: string;
+  // Optional client details captured during checkout — used by the
+  // post-purchase booking flow so the stored booking records carry real
+  // contact info instead of the old "Client Name" / "client@example.com"
+  // placeholders.
+  clientName?: string;
+  clientEmail?: string;
+  clientPhone?: string;
 }) => {
-  const purchases = JSON.parse(localStorage.getItem('purchases') || '[]');
+  let purchases: unknown[] = [];
+  try {
+    const raw = localStorage.getItem('purchases');
+    if (raw) purchases = JSON.parse(raw);
+    if (!Array.isArray(purchases)) purchases = [];
+  } catch { purchases = []; }
   purchases.push({ ...purchase, id: `purchase_${Date.now()}` });
-  localStorage.setItem('purchases', JSON.stringify(purchases));
+  try { localStorage.setItem('purchases', JSON.stringify(purchases)); } catch { /* quota */ }
   return purchase;
 };
 

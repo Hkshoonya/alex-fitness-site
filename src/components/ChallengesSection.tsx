@@ -1,22 +1,32 @@
 import { useState, useEffect } from 'react';
-import { Trophy, Calendar, Users, Tag, Clock, ChevronRight, Flame, Plus, X, Check } from 'lucide-react';
-import { getActiveChallenges, addChallenge, removeChallenge, seedDemoChallenges, type Challenge } from '@/api/challenges';
+import { Trophy, Calendar, Users, Tag, Clock, ChevronRight, Flame, Plus, X, Check, Lock } from 'lucide-react';
+import { getActiveChallenges, addChallenge, removeChallenge, seedDemoChallenges, setAdminToken, getAdminToken, type Challenge } from '@/api/challenges';
 import { asset } from '@/lib/assets';
+import JoinChallengeModal from '@/components/JoinChallengeModal';
 
 interface ChallengesSectionProps {
   onBooking: () => void;
 }
 
-export default function ChallengesSection({ onBooking }: ChallengesSectionProps) {
+// `onBooking` stays in the prop list for backward compatibility with the
+// parent, but challenge joins now use a dedicated JoinChallengeModal that
+// actually posts to the worker and decrements spots. `onBooking` is only
+// used as a fallback if the worker is somehow unreachable.
+export default function ChallengesSection({ onBooking: _onBooking }: ChallengesSectionProps) {
   const [challenges, setChallenges] = useState<Challenge[]>([]);
   const [showAdmin, setShowAdmin] = useState(false);
+  const [joinTarget, setJoinTarget] = useState<Challenge | null>(null);
+  const [adminError, setAdminError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Check URL param for admin mode
+    // Check URL param for admin mode. Admin actions are additionally gated
+    // by an admin token the user must paste in — see AdminLock below.
     const params = new URLSearchParams(window.location.search);
     if (params.get('admin') === 'challenges') setShowAdmin(true);
 
-    // Seed demo challenges on first load
+    // Seed demo challenges on first load (local cache only — real
+    // challenges live in the worker and only appear here when added via
+    // the admin form).
     seedDemoChallenges();
     loadChallenges();
   }, []);
@@ -53,19 +63,74 @@ export default function ChallengesSection({ onBooking }: ChallengesSectionProps)
             <ChallengeCard
               key={challenge.id}
               challenge={challenge}
-              onJoin={onBooking}
+              onJoin={() => setJoinTarget(challenge)}
               showAdmin={showAdmin}
-              onDelete={async () => { await removeChallenge(challenge.id); loadChallenges(); }}
+              onDelete={async () => {
+                try {
+                  await removeChallenge(challenge.id);
+                  setAdminError(null);
+                  loadChallenges();
+                } catch (e) {
+                  setAdminError(e instanceof Error ? e.message : 'Delete failed');
+                }
+              }}
             />
           ))}
         </div>
 
         {/* Admin: Add Challenge */}
         {showAdmin && (
-          <AdminAddChallenge onAdded={loadChallenges} />
+          <>
+            <AdminLock />
+            {adminError && (
+              <p className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg p-3 mb-4">{adminError}</p>
+            )}
+            <AdminAddChallenge onAdded={loadChallenges} onError={setAdminError} />
+          </>
         )}
       </div>
+
+      <JoinChallengeModal
+        challenge={joinTarget}
+        isOpen={!!joinTarget}
+        onClose={() => setJoinTarget(null)}
+        onJoined={updated => {
+          setChallenges(list => list.map(c => c.id === updated.id ? updated : c));
+        }}
+      />
     </section>
+  );
+}
+
+function AdminLock() {
+  const [token, setToken] = useState(getAdminToken());
+  const [open, setOpen] = useState(!getAdminToken());
+
+  return (
+    <div className="mb-4">
+      {!open ? (
+        <button onClick={() => setOpen(true)} className="text-white/40 hover:text-white text-xs flex items-center gap-2">
+          <Lock size={12} /> Admin token set — change
+        </button>
+      ) : (
+        <div className="bg-white/[0.03] border border-white/10 rounded-xl p-4 flex items-center gap-3">
+          <Lock size={16} className="text-[#FF4D2E]" />
+          <input
+            type="password"
+            value={token}
+            onChange={e => setToken(e.target.value)}
+            placeholder="Paste admin token to enable add/delete"
+            className="flex-1 bg-white/5 border border-white/10 rounded-lg py-2 px-3 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+          />
+          <button
+            onClick={() => { setAdminToken(token); setOpen(false); }}
+            className="px-4 py-2 bg-[#FF4D2E] hover:bg-[#e54327] text-white rounded-lg text-xs font-semibold"
+          >
+            Save
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -152,7 +217,7 @@ function ChallengeCard({ challenge, onJoin, showAdmin, onDelete }: {
   );
 }
 
-function AdminAddChallenge({ onAdded }: { onAdded: () => void }) {
+function AdminAddChallenge({ onAdded, onError }: { onAdded: () => void; onError: (msg: string | null) => void }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
     title: '', description: '', startDate: '', endDate: '', duration: '',
@@ -161,20 +226,44 @@ function AdminAddChallenge({ onAdded }: { onAdded: () => void }) {
   const [saved, setSaved] = useState(false);
 
   const handleSave = async () => {
-    if (!form.title || !form.startDate || !form.endDate) return;
+    onError(null);
+    if (!form.title.trim() || !form.startDate || !form.endDate) {
+      onError('Title, start date, and end date are required.');
+      return;
+    }
+    if (new Date(form.endDate) < new Date(form.startDate)) {
+      onError('End date must be on or after the start date.');
+      return;
+    }
+    // NaN guards — users may paste garbage into number fields.
+    const spotsNum = form.spots ? parseInt(form.spots, 10) : undefined;
+    if (form.spots && Number.isNaN(spotsNum)) {
+      onError('Spots must be a whole number.');
+      return;
+    }
+    const priceNum = form.price ? parseFloat(form.price) : 0;
+    if (form.price && Number.isNaN(priceNum)) {
+      onError('Price must be a number.');
+      return;
+    }
 
-    await addChallenge({
-      title: form.title,
-      description: form.description,
-      startDate: form.startDate,
-      endDate: form.endDate,
-      duration: form.duration || '4 Weeks',
-      prize: form.prize || undefined,
-      spots: form.spots ? parseInt(form.spots) : undefined,
-      spotsLeft: form.spots ? parseInt(form.spots) : undefined,
-      price: form.price ? parseFloat(form.price) : 0,
-      tags: form.tags ? form.tags.split(',').map(t => t.trim()) : [],
-    });
+    try {
+      await addChallenge({
+        title: form.title.trim(),
+        description: form.description.trim(),
+        startDate: form.startDate,
+        endDate: form.endDate,
+        duration: form.duration.trim() || '4 Weeks',
+        prize: form.prize.trim() || undefined,
+        spots: spotsNum,
+        spotsLeft: spotsNum,
+        price: priceNum,
+        tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+      });
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Add failed');
+      return;
+    }
 
     setSaved(true);
     setTimeout(() => {

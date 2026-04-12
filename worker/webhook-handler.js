@@ -2011,7 +2011,10 @@ async function syncTrainerizeAppointmentsToSquare(env) {
           method: 'POST',
           headers: getSquareHeaders(env),
           body: JSON.stringify({
-            idempotency_key: `tz-sync-${apt.id}`,
+            // Include start time so a rescheduled appointment gets a fresh
+            // idempotency key — otherwise Square would return the original
+            // (stale) booking after the KV sync marker expires (30d TTL).
+            idempotency_key: `tz-sync-${apt.id}-${startAt.replace(/[:.]/g, '')}`,
             booking: {
               start_at: startAt,
               location_id: LOCATION_ID,

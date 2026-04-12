@@ -2251,6 +2251,10 @@ async function deductCreditsForCompletedSessions(env) {
     const data = await resp.json();
 
     for (const apt of (data.appointments || [])) {
+      // Wrap each appointment in its own try/catch so a single bad record
+      // (malformed date, API failure, unexpected shape) doesn't abort the
+      // whole batch and leave later appointments unprocessed.
+      try {
       // Only process appointments that have already ended
       const endStr = apt.endDate || apt.endDateTime;
       if (!endStr) continue;
@@ -2334,6 +2338,11 @@ async function deductCreditsForCompletedSessions(env) {
       // the outstanding attendees.
       if (allAttendeesHandled) {
         await kvPut(countedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
+      }
+      } catch (aptErr) {
+        console.error(`Cron: failed processing appointment ${apt?.id || '?'}:`, aptErr);
+        // Continue to next appointment — outer key intentionally not written
+        // so this apt retries next tick.
       }
     }
   } catch (e) {

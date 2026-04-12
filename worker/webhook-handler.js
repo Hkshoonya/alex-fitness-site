@@ -129,6 +129,26 @@ async function kvPut(key, value, options, env) {
  * Events persist for 30 days. GET /logs returns recent events.
  * Categories: credit, payment, sync, error, invoice
  */
+/**
+ * Per-IP rate limit backed by KV. Uses a coarse per-minute bucket so the worst
+ * a caller can do is `max` requests per minute. Returns true when the caller
+ * is under the limit (and the counter has been incremented); false when they
+ * should be rejected. KV eventual consistency means a determined attacker
+ * might get a few extra per minute — good enough to prevent abuse-scale
+ * quota burn, not a hard ceiling.
+ */
+async function checkRateLimit(request, bucket, max, env) {
+  const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Real-IP') || 'anon';
+  const minute = Math.floor(Date.now() / 60000);
+  const key = `ratelimit:${bucket}:${ip}:${minute}`;
+  const raw = await kvGet(key, env);
+  const count = raw ? parseInt(raw, 10) : 0;
+  if (count >= max) return false;
+  // 120s TTL keeps the prior-minute bucket around briefly for race cleanup
+  await kvPut(key, String(count + 1), { expirationTtl: 120 }, env);
+  return true;
+}
+
 async function logEvent(category, message, data, env) {
   try {
     const entry = {
@@ -214,6 +234,33 @@ export default {
       return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
         status: 403, headers: { 'Content-Type': 'application/json' },
       });
+    }
+
+    // ===== PROXY PATH BLOCKLIST =====
+    // Origin check alone is bypassable (Origin header is spoofable by non-browser
+    // clients). Even if an attacker forges the header, they still can't reach
+    // the most destructive upstream endpoints because we refuse to relay them.
+    // Anything the frontend legitimately needs should NOT appear here.
+    if (isProxyRoute) {
+      const proxyPath = url.pathname.replace(/^\/api\/(square|trainerize)\//, '').toLowerCase();
+      const method = request.method.toUpperCase();
+      const dangerousPatterns = [
+        /^refunds(\/|$)/,             // square: issue a refund
+        /^payments\/[^/]+\/refund/,   // square: refund a specific payment
+        /^bulk-/,                     // any bulk endpoint
+        /subscriptions\/.+\/(cancel|actions)/, // cancel/force subscription state
+        /^user\/(delete|remove)/,     // trainerize: delete client
+        /^account\/delete/,           // trainerize: delete account
+        /^team-members/,              // square: add/update/remove coaches
+      ];
+      const isDangerous = dangerousPatterns.some(re => re.test(proxyPath));
+      // Only block mutating methods so read-only lookups (e.g. GET) still work.
+      if (isDangerous && method !== 'GET' && method !== 'OPTIONS') {
+        console.error(`Blocked proxy call to dangerous path: ${method} ${proxyPath}`);
+        return new Response(JSON.stringify({ error: 'Endpoint not permitted via proxy' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // ===== GOOGLE MEET API (server-side — secrets never exposed to frontend) =====
@@ -317,6 +364,9 @@ export default {
     // DELETE /challenges/:id — remove a challenge
 
     if (url.pathname === '/challenges' && request.method === 'GET') {
+      if (!await checkRateLimit(request, 'challenges-get', 120, env)) {
+        return new Response('Too many requests', { status: 429, headers: corsHeaders });
+      }
       const challenges = await getChallenges(env);
       const now = new Date();
       const active = challenges.filter(c => new Date(c.endDate) > now);
@@ -328,6 +378,10 @@ export default {
         return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
           status: 403, headers: { 'Content-Type': 'application/json' },
         });
+      }
+      // Creating challenges is an admin action — require the admin token.
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
       }
       const data = await request.json();
       const challenge = {
@@ -355,6 +409,11 @@ export default {
         return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
           status: 403, headers: { 'Content-Type': 'application/json' },
         });
+      }
+      // Delete is also admin-only — IDs are guessable (timestamp + 5 chars of
+      // base36), so origin alone is not sufficient protection.
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
       }
       const id = url.pathname.split('/challenges/')[1];
       await deleteChallenge(id, env);
@@ -437,6 +496,11 @@ export default {
     // GET /availability?date=2026-04-15&duration=60
     // Returns coach's real-time availability merging Square bookings + Trainerize appointments
     if (url.pathname === '/availability' && request.method === 'GET') {
+      // Each request hits Square's bookings API — without a limit an attacker
+      // can burn through Alex's Square quota (100k/day) for free.
+      if (!await checkRateLimit(request, 'availability', 30, env)) {
+        return new Response('Too many requests', { status: 429, headers: corsHeaders });
+      }
       const date = url.searchParams.get('date') || new Date().toISOString().split('T')[0];
       const duration = parseInt(url.searchParams.get('duration') || '60');
 
@@ -648,7 +712,19 @@ export default {
             await kvPut(processedKey, 'done', { expirationTtl: 7 * 24 * 3600 }, env);
           }
         } catch (error) {
+          // Surface permanent handler failures to /logs so they don't vanish
+          // into wrangler tail. The "processing" marker expires in 5 min and
+          // Square retries, but if the underlying issue is persistent the
+          // event will eventually stop retrying — this record is the last
+          // trace we'll have.
           console.error('Webhook processing error:', error);
+          try {
+            await logEvent('error', 'webhook-handler-failed', {
+              eventId, eventType,
+              message: error?.message || String(error),
+              stack: error?.stack?.split('\n').slice(0, 5).join('\n'),
+            }, env);
+          } catch { /* logEvent must never throw out of the catch */ }
         }
       })();
 
@@ -1099,11 +1175,22 @@ async function syncPaymentStatusToTrainerize(squareCustomerId, status, eventData
   }
 
   const email = await getCustomerEmail(squareCustomerId, env);
-  if (!email) return;
+  if (!email) {
+    await logEvent('error', 'payment-sync-no-email', {
+      squareCustomerId, status,
+    }, env);
+    return;
+  }
 
   // Look up Trainerize userID (required for all v03 endpoints)
   const userId = await findTrainerizeUserByEmail(email, env);
   if (!userId) {
+    // Silent drop here used to mask real incidents (Trainerize 503 during
+    // outage, or a client who paid but was never created in Trainerize).
+    // Surface to /logs so we can reconcile.
+    await logEvent('error', 'payment-sync-user-not-found', {
+      squareCustomerId, email, status,
+    }, env);
     console.log(`Trainerize user not found for ${email} — skipping payment sync`);
     return;
   }
@@ -1320,7 +1407,26 @@ async function syncBookingToTrainerize(booking, env) {
     await updateTrainerizeClientProfile(userId, customer, env);
   }
 
+  // Key tracking the Square booking → Trainerize appointment link, so we
+  // can delete the old Trainerize appt on reschedule/cancel instead of
+  // leaving ghost appointments on the coach's calendar.
+  const aptLinkKey = `tz-apt:${booking.id}`;
+
   if (status === 'ACCEPTED' || status === 'PENDING') {
+    // If a prior Trainerize appt already exists for this Square booking
+    // (e.g., booking.updated fires with a new start_at after a reschedule),
+    // delete it before creating the replacement. Skip if the value is the
+    // sentinel 'deleted' — means a cancel handler already removed it.
+    const existingAptId = await kvGet(aptLinkKey, env);
+    if (existingAptId && existingAptId !== 'deleted' && /^\d+$/.test(existingAptId)) {
+      try {
+        await trainerizePost('/appointment/delete', { id: Number(existingAptId) }, env);
+        console.log(`Reschedule cleanup: deleted Trainerize apt ${existingAptId} for Square booking ${booking.id}`);
+      } catch (e) {
+        console.error(`Failed to delete prior Trainerize apt ${existingAptId}:`, e);
+      }
+    }
+
     // Create/update appointment in Trainerize
     const endMs = new Date(startAt).getTime() + duration * 60000;
     const endAt = new Date(endMs).toISOString();
@@ -1333,7 +1439,7 @@ async function syncBookingToTrainerize(booking, env) {
       const tzStart = startAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
       const tzEnd = endAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
 
-      await trainerizePost('/appointment/add', {
+      const resp = await trainerizePost('/appointment/add', {
         userID: getTrainerizeTrainerId(env),
         startDate: tzStart,
         endDate: tzEnd,
@@ -1341,6 +1447,18 @@ async function syncBookingToTrainerize(booking, env) {
         notes: `${duration}min ${isVirtual ? 'virtual' : 'in-person'} session (Square #${booking.id.slice(0, 8)})${!userId ? ` | Client: ${customer.given_name || ''} ${customer.family_name || ''} <${email}>` : ''}${isVirtual ? '' : ' | ' + STUDIO_ADDRESS}`,
         attendents: userId ? [{ userID: userId }] : [],
       }, env);
+
+      // Persist the Trainerize appt ID so reschedule/cancel can find it.
+      // 90-day TTL matches our cron retention window.
+      if (resp?.ok) {
+        try {
+          const data = await resp.json();
+          const aptId = data.id ?? data.appointmentID ?? data.result?.id;
+          if (aptId) {
+            await kvPut(aptLinkKey, String(aptId), { expirationTtl: 90 * 24 * 3600 }, env);
+          }
+        } catch { /* response parse best-effort */ }
+      }
 
       console.log(`Booking synced to Trainerize: ${email} → ${startAt} (${duration}min)`);
     } catch (e) {
@@ -1371,6 +1489,20 @@ async function syncBookingToTrainerize(booking, env) {
       }
     }
   } else if (status === 'CANCELLED_BY_CUSTOMER' || status === 'CANCELLED_BY_SELLER' || status === 'DECLINED') {
+    // Remove the appointment from Trainerize so the coach's calendar
+    // reflects the cancellation (otherwise orphan appts accumulate).
+    const linkedAptId = await kvGet(aptLinkKey, env);
+    if (linkedAptId && linkedAptId !== 'deleted' && /^\d+$/.test(linkedAptId)) {
+      try {
+        await trainerizePost('/appointment/delete', { id: Number(linkedAptId) }, env);
+        console.log(`Cancelled Trainerize apt ${linkedAptId} for Square booking ${booking.id}`);
+      } catch (e) {
+        console.error(`Failed to delete Trainerize apt ${linkedAptId} on cancel:`, e);
+      }
+      // Sentinel: keeps repeat-cancel webhooks from calling /appointment/delete
+      // on a stale id. Expires after 7 days.
+      await kvPut(aptLinkKey, 'deleted', { expirationTtl: 7 * 24 * 3600 }, env);
+    }
     // Notify client of cancellation or decline
     if (userId) {
       const cancelledBy = status === 'CANCELLED_BY_CUSTOMER' ? 'you'
@@ -1580,7 +1712,10 @@ async function getCoachAvailability(date, duration, env) {
             : startMs + (apt.duration || 60) * 60000;
           // Block in 15-min increments to match Square's granularity
           for (let t = startMs; t < endMs; t += 15 * 60000) {
-            tzBlockedUtc.add(new Date(t).toISOString().replace('.000', ''));
+            // Regex strips any ms fraction (e.g. .000Z or .123Z) so keys
+            // match Square's bookings format (which has no fractional seconds)
+            // regardless of what millisecond value Date.toISOString emits.
+            tzBlockedUtc.add(new Date(t).toISOString().replace(/\.\d+Z$/, 'Z'));
           }
         }
       }
@@ -1610,7 +1745,7 @@ async function getCoachAvailability(date, duration, env) {
 
     // Check if Trainerize blocks this slot
     const blockedByTz = tzBlockedUtc.has(isoStr) ||
-      tzBlockedUtc.has(new Date(utcMs).toISOString().replace('.000', ''));
+      tzBlockedUtc.has(new Date(utcMs).toISOString().replace(/\.\d+Z$/, 'Z'));
 
     const isPast = utcMs < now;
     const withinBuffer = !isPast && (utcMs - now) < bufferMs;
@@ -1814,6 +1949,20 @@ async function handleCreditPurchaseOrder(order, env) {
     return;
   }
 
+  // Take the same credits lock that deductSessionCredit uses — otherwise a
+  // cron-driven deduction and an order.fulfilled purchase can interleave and
+  // the last writer silently loses the other's change.
+  const lockKey = `lock:credits:${userId}`;
+  const locked = await kvGet(lockKey, env);
+  if (locked) {
+    // Another writer is mid-flight. Don't double-apply credits and don't
+    // promote the order to done — Square's retry after 5 min will re-enter
+    // once the lock has cleared.
+    console.log(`Order credit sync: lock held for user ${userId}, deferring to retry`);
+    return;
+  }
+  await kvPut(lockKey, Date.now().toString(), { expirationTtl: 60 }, env);
+
   // Add credits (stack on top of existing)
   const existing = await kvGet(`credits:${userId}`, env);
   let creditData;
@@ -1827,6 +1976,7 @@ async function handleCreditPurchaseOrder(order, env) {
         userId, email, kvKey: `credits:${userId}`, rawLength: existing.length,
       }, env);
       console.error(`Credit JSON corrupt for user ${userId} — skipping to preserve balance`, err);
+      try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* best-effort */ }
       return;
     }
     creditData.remaining += totalCredits;
@@ -1842,29 +1992,38 @@ async function handleCreditPurchaseOrder(order, env) {
   creditData.updatedAt = new Date().toISOString();
   await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
 
-  // Update Trainerize tag
-  await clearCreditTags(userId, env);
-  const tagCredits = Math.min(creditData.remaining, 24);
-  await trainerizePost('/user/addTag', { userID: userId, userTag: creditTagName(tagCredits) }, env);
+  // Promote to "done" IMMEDIATELY after the credit KV write. The Trainerize
+  // tag/note calls below are best-effort cosmetics; if any of them throws
+  // and the done marker hasn't been written, Square's retry after our 5-min
+  // processing TTL expires would re-enter this function, read the already-
+  // incremented balance, and double-apply credits. Writing done-marker first
+  // closes that window.
+  await kvPut(orderKey, 'done', { expirationTtl: 90 * 24 * 3600 }, env);
 
-  // Add note
-  const totalPaid = (order.total_money?.amount || 0) / 100;
-  await trainerizePost('/trainerNote/add', {
-    userID: userId,
-    content: `${totalCredits} session credits added (Square order $${totalPaid.toFixed(0)}). Balance: ${creditData.remaining}/${creditData.total}.`,
-    type: 'general',
-  }, env);
+  // Release the credits lock now — balance is persisted. Trainerize tag/note
+  // calls below don't touch the balance so they don't need to hold it.
+  try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* best-effort */ }
 
-  // Set Active Client tag
+  // Everything below is best-effort cosmetic — wrap it so a transient
+  // Trainerize API blip doesn't leak an unhandled rejection.
   try {
+    await clearCreditTags(userId, env);
+    const tagCredits = Math.min(creditData.remaining, 24);
+    await trainerizePost('/user/addTag', { userID: userId, userTag: creditTagName(tagCredits) }, env);
+
+    const totalPaid = (order.total_money?.amount || 0) / 100;
+    await trainerizePost('/trainerNote/add', {
+      userID: userId,
+      content: `${totalCredits} session credits added (Square order $${totalPaid.toFixed(0)}). Balance: ${creditData.remaining}/${creditData.total}.`,
+      type: 'general',
+    }, env);
+
     await trainerizePost('/user/deleteTag', { userID: userId, userTag: '💤 Inactive' }, env);
     await trainerizePost('/user/addTag', { userID: userId, userTag: '🟢 Active Client' }, env);
     await trainerizePost('/user/addTag', { userID: userId, userTag: '✅ Paid' }, env);
-  } catch { /* tags are best-effort */ }
-
-  // Promote to "done" — long TTL so retries of either order.fulfilled or
-  // order.updated over the next 90 days are reliably skipped.
-  await kvPut(orderKey, 'done', { expirationTtl: 90 * 24 * 3600 }, env);
+  } catch (e) {
+    console.error(`Order credit sync: Trainerize tag/note best-effort failed for ${email}:`, e);
+  }
   console.log(`Order credit sync: ${email} +${totalCredits} credits (order ${order.id.slice(0, 8)})`);
 }
 
@@ -2396,7 +2555,29 @@ async function verifySignature(url, body, signature, key) {
   const sig = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
   const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
 
-  return computed === signature;
+  return safeEqual(computed, signature);
+}
+
+/**
+ * Constant-time string compare via SHA-256 digest comparison. A naive `===`
+ * on the computed vs provided signature short-circuits on the first differing
+ * byte, leaking timing information — an attacker with remote retries can
+ * infer the signature byte-by-byte. Hashing both inputs and XOR-comparing
+ * fixed-length digests removes that oracle.
+ */
+async function safeEqual(a, b) {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
+  const va = new Uint8Array(ha);
+  const vb = new Uint8Array(hb);
+  let diff = 0;
+  for (let i = 0; i < 32; i++) diff |= va[i] ^ vb[i];
+  // Also require the plaintext lengths to match — same-length guarantees
+  // the digest compare was meaningful.
+  return diff === 0 && a.length === b.length;
 }
 
 // ===== GOOGLE MEET (server-side) =====

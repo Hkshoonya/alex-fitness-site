@@ -151,6 +151,10 @@ async function logEvent(category, message, data, env) {
  * Required because tags, messages, and notes all need userID (not email)
  */
 async function findTrainerizeUserByEmail(email, env) {
+  // Guard empty/whitespace: /user/find with an empty searchTerm returns a
+  // broad list, and the downstream email equality would match any user with
+  // a blank email field — returning the wrong user.
+  if (!email || !String(email).trim()) return null;
   try {
     const response = await trainerizePost('/user/find', {
       searchTerm: email,
@@ -593,15 +597,13 @@ export default {
 
           // ---- INVOICE EVENTS ----
           // Only propagate invoice status to Trainerize when the invoice is
-          // actually for training. Any other paid invoice (merch, retail,
-          // misc) shouldn't flip the client's training-payment status.
-          const isTrainingInvoice = (invoice) => {
-            const desc = invoice?.description || '';
-            const title = invoice?.title || '';
-            return desc.includes('Auto-invoice for session') ||
-              /session|training/i.test(desc) ||
-              /session|training/i.test(title);
-          };
+          // one WE auto-created. Any keyword regex on title/description would
+          // false-positive on merch like "Training T-shirt" or "Session Tank
+          // Top" and wrongly flip training-payment status. Manual training
+          // payments come through the subscription + payment.completed webhooks
+          // already, which have customer/subscription context we can trust.
+          const isTrainingInvoice = (invoice) =>
+            (invoice?.description || '').includes('Auto-invoice for session');
 
           if (eventType === 'invoice.payment_made') {
             const invoice = event.data?.object?.invoice;

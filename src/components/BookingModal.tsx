@@ -125,12 +125,16 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     setIsLoadingSlots(true);
     const coachId = mode === 'consultation' ? DEFAULT_COACH : (selectedCoach?.id || DEFAULT_COACH);
     const dateStr = date.toISOString().split('T')[0];
-    const avail = await getAvailability(dateStr, coachId, sessionDuration);
-    // Drop the result if the user has clicked another date while we waited —
-    // a later call incremented the ref past our requestId.
-    if (requestId !== slotsRequestIdRef.current) return;
-    setTimeSlots(avail.slots);
-    setIsLoadingSlots(false);
+    try {
+      const avail = await getAvailability(dateStr, coachId, sessionDuration);
+      if (requestId !== slotsRequestIdRef.current) return;
+      setTimeSlots(avail.slots);
+    } finally {
+      // Only the latest request clears the spinner — a stale one that returned
+      // early would otherwise leak the loading state if a future refactor
+      // makes getAvailability throw.
+      if (requestId === slotsRequestIdRef.current) setIsLoadingSlots(false);
+    }
   };
 
   const handleDateSelect = (date: Date) => {
@@ -200,12 +204,20 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     setBookingData(prev => ({ ...prev, [e.target.name]: e.target.value }));
   };
 
+  // useEffect on [isOpen] only resets mode/step — name/email/phone/goals and
+  // the date/time/coach selections all persist. Wrap every close site so the
+  // form resets cleanly when the user dismisses the modal.
+  const handleClose = () => {
+    resetState();
+    onClose();
+  };
+
   const handleBack = () => {
     if (step === 'details') setStep('calendar');
     else if (step === 'calendar') setStep('type');
     else if (step === 'type' && mode === 'session') setStep('coach');
     else if (step === 'type' && mode === 'consultation' && showChoice) setStep('choose');
-    else if (step === 'type' && mode === 'consultation' && !showChoice) onClose();
+    else if (step === 'type' && mode === 'consultation' && !showChoice) handleClose();
     else if (step === 'coach') setStep('duration');
     else if (step === 'duration') setStep('choose');
     else setStep('choose');
@@ -232,15 +244,6 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
   };
 
   if (!isOpen) return null;
-
-  // The useEffect on [isOpen] only resets mode/step on reopen — name, email,
-  // phone, goals, selected date/time/coach, and meet details all persist.
-  // Wrap the close handlers so they reset the form when the user dismisses
-  // the modal mid-flow (backdrop click, X button).
-  const handleClose = () => {
-    resetState();
-    onClose();
-  };
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -594,7 +597,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
               </p>
 
               <button
-                onClick={() => { onClose(); resetState(); }}
+                onClick={handleClose}
                 className="btn-primary text-sm"
               >
                 Done

@@ -171,15 +171,22 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
 
     try {
       let paymentId: string;
+      let squareCustomerId: string | undefined;
+      let squareCardId: string | undefined;
       let cardToken: string | null = null;
 
       if (cardElement) {
         const result = await cardElement.tokenize();
         if (result.status !== 'OK') throw new Error('Card tokenization failed');
         cardToken = result.token;
-        const paymentResult = await createCardPayment(selectedPlan, selectedTrainer.id, cardToken!);
+        const paymentResult = await createCardPayment(
+          selectedPlan, selectedTrainer.id, cardToken!,
+          { email: clientInfo.email, name: clientInfo.name, phone: clientInfo.phone },
+        );
         if (!paymentResult.success) throw new Error(paymentResult.error || 'Payment failed');
         paymentId = paymentResult.paymentId!;
+        squareCustomerId = paymentResult.customerId;
+        squareCardId = paymentResult.cardId;
       } else {
         await new Promise(resolve => setTimeout(resolve, 2000));
         paymentId = `mock_payment_${Date.now()}`;
@@ -224,6 +231,11 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
             duration: selectedPlan.duration,
             planName: selectedPlan.name,
             validUntil,
+            // Forward the IDs so the credit record knows which Square
+            // customer + saved card to auto-charge when the plan's credits
+            // run out.
+            squareCustomerId,
+            squareCardId,
           }),
         }).catch(e => console.error('credit-grant call failed:', e));
       }

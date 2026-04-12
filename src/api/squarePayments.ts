@@ -160,41 +160,51 @@ export const createGenericCardPayment = async (params: {
   }
 };
 
+// Plan purchases route through the worker's /checkout/charge endpoint so
+// the card is saved to a Square Customer on the same round trip as the
+// charge. Without that, auto-invoice CARD_ON_FILE at credit exhaustion has
+// nothing to charge and falls back to emailing a pay-link.
 export const createCardPayment = async (
   plan: TrainingPlan,
   trainerId: 'alex1' | 'alex2',
-  cardToken: string
-): Promise<{ success: boolean; paymentId?: string; error?: string }> => {
+  cardToken: string,
+  client: { email: string; name: string; phone?: string }
+): Promise<{ success: boolean; paymentId?: string; customerId?: string; cardId?: string; error?: string }> => {
   if (!SQUARE_APPLICATION_ID) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     return { success: true, paymentId: `mock_payment_${Date.now()}` };
   }
+  const workerUrl = import.meta.env.VITE_WORKER_URL || '';
+  if (!workerUrl) return { success: false, error: 'Worker URL not configured' };
+
+  const nameParts = client.name.trim().split(/\s+/);
+  const firstName = nameParts[0] || '';
+  const lastName = nameParts.slice(1).join(' ');
 
   try {
-    const response = await fetch(`${SQUARE_API_BASE}/payments`, {
+    const response = await fetch(`${workerUrl}/checkout/charge`, {
       method: 'POST',
-      headers: getSquareHeaders(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        source_id: cardToken,
-        idempotency_key: `pay_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        amount_money: {
-          amount: Math.round(plan.price * 100),
-          currency: 'USD',
-        },
-        location_id: SQUARE_LOCATION_ID,
-        reference_id: plan.id,
+        cardToken,
+        email: client.email,
+        firstName, lastName,
+        phone: client.phone || '',
+        amountCents: Math.round(plan.price * 100),
+        referenceId: plan.id,
         note: `${plan.name} - ${trainerId}`,
-        autocomplete: true,
       }),
     });
-
     const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.errors?.[0]?.detail || 'Payment failed');
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || data.detail || 'Payment failed');
     }
-
-    return { success: true, paymentId: data.payment.id };
+    return {
+      success: true,
+      paymentId: data.paymentId,
+      customerId: data.customerId,
+      cardId: data.cardId,
+    };
   } catch (error) {
     console.error('Payment error:', error);
     return { success: false, error: error instanceof Error ? error.message : 'Payment failed' };

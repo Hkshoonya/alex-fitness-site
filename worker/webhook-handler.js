@@ -478,6 +478,159 @@ export default {
       return new Response(JSON.stringify(challenge), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
+    // POST /checkout/charge — single atomic operation at checkout:
+    //   1. Upsert Square Customer by email (create if missing)
+    //   2. Save the tokenized card to that customer as a Card entity
+    //   3. Charge the saved card via /v2/payments
+    // Returns { paymentId, customerId, cardId }.
+    //
+    // This replaces the one-off /v2/payments call from the frontend. The
+    // saved card + customerId are what lets the auto-invoice cron (at
+    // webhook-handler.js ~2700, uses `automatic_payment_source: CARD_ON_FILE`)
+    // actually auto-charge when credits deplete — previously no card was
+    // saved, so published invoices required manual client payment.
+    if (url.pathname === '/checkout/charge' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!await checkRateLimit(request, 'checkout-charge', 10, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let body;
+      try { body = await request.json(); }
+      catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }); }
+
+      const cardToken = typeof body.cardToken === 'string' ? body.cardToken.trim() : '';
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      const firstName = typeof body.firstName === 'string' ? body.firstName.trim().slice(0, 80) : '';
+      const lastName = typeof body.lastName === 'string' ? body.lastName.trim().slice(0, 80) : '';
+      const phone = typeof body.phone === 'string' ? body.phone.trim().slice(0, 40) : '';
+      const amountCents = Math.round(Number(body.amountCents) || 0);
+      const referenceId = typeof body.referenceId === 'string' ? body.referenceId.slice(0, 40) : '';
+      const note = typeof body.note === 'string' ? body.note.slice(0, 500) : '';
+
+      if (!cardToken || !email || !Number.isFinite(amountCents) || amountCents <= 0 || amountCents > 2_000_000) {
+        return new Response(JSON.stringify({ error: 'cardToken, email, and amountCents (1..2_000_000) required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return new Response(JSON.stringify({ error: 'Invalid email format' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      try {
+        // 1. Upsert Square Customer by email
+        let customerId = null;
+        try {
+          const searchResp = await fetch(`${getSquareApiBase(env)}/customers/search`, {
+            method: 'POST', headers: getSquareHeaders(env),
+            body: JSON.stringify({
+              query: { filter: { email_address: { exact: email } } }, limit: 1,
+            }),
+          });
+          if (searchResp.ok) {
+            const sd = await searchResp.json();
+            customerId = sd.customers?.[0]?.id || null;
+          }
+        } catch { /* fall through to create */ }
+
+        if (!customerId) {
+          const createResp = await fetch(`${getSquareApiBase(env)}/customers`, {
+            method: 'POST', headers: getSquareHeaders(env),
+            body: JSON.stringify({
+              idempotency_key: `cust-${email.slice(0, 40)}-${Date.now()}`,
+              given_name: firstName || undefined,
+              family_name: lastName || undefined,
+              email_address: email,
+              phone_number: phone || undefined,
+            }),
+          });
+          if (!createResp.ok) {
+            const errText = await createResp.text();
+            await logEvent('error', 'checkout-customer-create-failed', { email, err: errText }, env);
+            return new Response(JSON.stringify({ error: 'Could not create customer' }), {
+              status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+          const cd = await createResp.json();
+          customerId = cd.customer?.id;
+          if (!customerId) {
+            return new Response(JSON.stringify({ error: 'Customer created but no id returned' }), {
+              status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+        }
+
+        // 2. Save the card to the customer. /v2/cards consumes the token
+        // and returns a persistent card.id we can reuse indefinitely.
+        const cardResp = await fetch(`${getSquareApiBase(env)}/cards`, {
+          method: 'POST', headers: getSquareHeaders(env),
+          body: JSON.stringify({
+            idempotency_key: `card-${cardToken.slice(0, 16)}-${Date.now()}`,
+            source_id: cardToken,
+            card: { customer_id: customerId },
+          }),
+        });
+        if (!cardResp.ok) {
+          const errText = await cardResp.text();
+          await logEvent('error', 'checkout-card-save-failed', { email, customerId, err: errText }, env);
+          return new Response(JSON.stringify({ error: 'Could not save card on file' }), {
+            status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const cardData = await cardResp.json();
+        const cardId = cardData.card?.id;
+        if (!cardId) {
+          return new Response(JSON.stringify({ error: 'Card saved but no id returned' }), {
+            status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        // 3. Charge the saved card
+        const payResp = await fetch(`${getSquareApiBase(env)}/payments`, {
+          method: 'POST', headers: getSquareHeaders(env),
+          body: JSON.stringify({
+            idempotency_key: `pay-${cardId}-${Date.now()}`,
+            source_id: cardId,
+            customer_id: customerId,
+            amount_money: { amount: amountCents, currency: 'USD' },
+            location_id: env.SQUARE_LOCATION_ID,
+            reference_id: referenceId || undefined,
+            note: note || undefined,
+            autocomplete: true,
+          }),
+        });
+        if (!payResp.ok) {
+          const errText = await payResp.text();
+          await logEvent('error', 'checkout-payment-failed', { email, customerId, cardId, err: errText }, env);
+          return new Response(JSON.stringify({ error: 'Payment declined', detail: errText.slice(0, 500) }), {
+            status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const pd = await payResp.json();
+        const paymentId = pd.payment?.id;
+
+        await logEvent('payment', `Checkout success: ${email} → $${amountCents / 100}`, {
+          paymentId, customerId, cardId, amountCents, email,
+        }, env);
+
+        return new Response(JSON.stringify({
+          success: true, paymentId, customerId, cardId,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (e) {
+        await logEvent('error', 'checkout-charge-unexpected', { email, err: e?.message }, env);
+        return new Response(JSON.stringify({ error: 'Checkout failed', detail: e?.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     // POST /credit-grant — frontend calls this after a successful
     // createCardPayment to register the purchase's sessions in worker KV.
     // Without this the cron sees no credits for a client who legitimately
@@ -506,6 +659,11 @@ export default {
       const duration = Number(body.duration) || 60;
       const planName = typeof body.planName === 'string' ? body.planName.slice(0, 200) : 'Purchase';
       const validUntilInput = typeof body.validUntil === 'string' ? body.validUntil : '';
+      // Optional — when the caller used /checkout/charge these let the
+      // auto-invoice path auto-charge the saved card instead of fuzzy-matching
+      // the customer at invoice time.
+      const squareCustomerId = typeof body.squareCustomerId === 'string' ? body.squareCustomerId.trim().slice(0, 80) : '';
+      const squareCardId = typeof body.squareCardId === 'string' ? body.squareCardId.trim().slice(0, 80) : '';
 
       if (!paymentId || !email || !Number.isFinite(sessions) || sessions <= 0 || sessions > 52) {
         return new Response(JSON.stringify({ error: 'paymentId, email, and sessions (1-52) are required' }), {
@@ -612,6 +770,10 @@ export default {
           creditData.total = (creditData.total || 0) + sessions;
           if (validUntilInput) creditData.validUntil = validUntilInput;
           creditData.planName = planName;
+          // Preserve existing IDs; only overwrite when caller provides new
+          // values (shouldn't happen for a returning client, but be safe).
+          if (squareCustomerId) creditData.squareCustomerId = squareCustomerId;
+          if (squareCardId) creditData.squareCardId = squareCardId;
         } else {
           creditData = {
             userId, email,
@@ -620,6 +782,8 @@ export default {
             validUntil: validUntilInput || new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString(),
             updatedAt: new Date().toISOString(),
             deductions: [],
+            ...(squareCustomerId ? { squareCustomerId } : {}),
+            ...(squareCardId ? { squareCardId } : {}),
           };
         }
         creditData.updatedAt = new Date().toISOString();
@@ -2634,10 +2798,27 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
   const catalog = SESSION_CATALOG[durationMin] || SESSION_CATALOG[60];
   const locationId = 'LD0SGZXT6ZSSD';
 
-  // Find Square customer by name
-  const firstName = attendeeName.split(' ')[0];
-  const lastName = attendeeName.split(' ').slice(1).join(' ');
-  const squareCustomerId = await findSquareCustomerByName(firstName, lastName, env);
+  // Prefer the squareCustomerId we stored at checkout (when the client paid
+  // via /checkout/charge they got a Square Customer + saved card). That's
+  // required for CARD_ON_FILE auto-charge; the legacy fuzzy-name lookup only
+  // finds a customer record, not a saved payment method.
+  let squareCustomerId = null;
+  try {
+    const creditRaw = await kvGet(`credits:${attendeeUserId}`, env);
+    if (creditRaw) {
+      const c = JSON.parse(creditRaw);
+      if (c.squareCustomerId) squareCustomerId = c.squareCustomerId;
+    }
+  } catch { /* fall through to legacy lookup */ }
+
+  if (!squareCustomerId) {
+    // Legacy path for pre-card-on-file purchases — fuzzy name match. Invoice
+    // will still PUBLISH but can't auto-charge (no saved card), so client
+    // receives an email and pays manually.
+    const firstName = attendeeName.split(' ')[0];
+    const lastName = attendeeName.split(' ').slice(1).join(' ');
+    squareCustomerId = await findSquareCustomerByName(firstName, lastName, env);
+  }
 
   if (!squareCustomerId) {
     console.log(`Auto-invoice: Square customer not found for ${attendeeName}`);

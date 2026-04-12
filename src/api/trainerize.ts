@@ -128,6 +128,10 @@ async function apiPost(path: string, body: Record<string, unknown> = {}): Promis
 
 /** Look up a Trainerize userID (integer) by email. Required for tags, messages, etc. */
 async function findUserIdByEmail(email: string): Promise<number | null> {
+  // Guard empty/whitespace email: /user/find with an empty searchTerm returns
+  // a full user list, and the (u.email || '') === '' comparison below would
+  // then match any user with a blank email field — returning the wrong user.
+  if (!email?.trim()) return null;
   try {
     const response = await apiPost('/user/find', {
       searchTerm: email,
@@ -161,6 +165,12 @@ async function findUserIdByEmail(email: string): Promise<number | null> {
  * - Client gets a unique ID and temporary password to activate the app
  */
 async function apiCreateClient(client: TrainerizeClient): Promise<{ success: boolean; clientId?: string }> {
+  // Without an email Trainerize can't send the activation invite and we can't
+  // disambiguate the user later; don't silently create an orphan record.
+  if (!client.email?.trim()) {
+    console.error('apiCreateClient: missing email — refusing to create client', client);
+    return { success: false };
+  }
   try {
     // Check if client already exists
     const existingId = await findUserIdByEmail(client.email);

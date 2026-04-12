@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X, ChevronLeft, ChevronRight, Clock, Calendar, Check, Phone, Mail, User, MapPin, Video, Dumbbell, Users } from 'lucide-react';
 import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date-fns';
 import { getAvailability, getTeamMembers, createBooking, CANCEL_NOTICE_HOURS, type TimeSlot, type TeamMember } from '@/api/squareAvailability';
@@ -41,6 +41,11 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
   const [bookingData, setBookingData] = useState({ name: '', email: '', phone: '', goals: '' });
   const [needsConfirmation, setNeedsConfirmation] = useState(false);
   const [bookingError, setBookingError] = useState<string | null>(null);
+
+  // Monotonic request ID for loadSlots — rapid date clicks issue overlapping
+  // fetches, and without a sequence check the slower response could arrive
+  // last and paint the wrong day's slots.
+  const slotsRequestIdRef = useRef(0);
 
   const weekStart = addWeeks(startOfWeek(new Date(), { weekStartsOn: 1 }), currentWeekOffset);
   const weekDates = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
@@ -116,10 +121,14 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
   };
 
   const loadSlots = async (date: Date) => {
+    const requestId = ++slotsRequestIdRef.current;
     setIsLoadingSlots(true);
     const coachId = mode === 'consultation' ? DEFAULT_COACH : (selectedCoach?.id || DEFAULT_COACH);
     const dateStr = date.toISOString().split('T')[0];
     const avail = await getAvailability(dateStr, coachId, sessionDuration);
+    // Drop the result if the user has clicked another date while we waited —
+    // a later call incremented the ref past our requestId.
+    if (requestId !== slotsRequestIdRef.current) return;
     setTimeSlots(avail.slots);
     setIsLoadingSlots(false);
   };

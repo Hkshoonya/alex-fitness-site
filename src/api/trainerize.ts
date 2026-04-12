@@ -47,6 +47,10 @@ export interface TrainerizeBooking {
   coachName: string;
   service: string;
   meetLink?: string;
+  // Preferred: full UTC ISO from Square. When present, apiCreateBooking uses this
+  // directly and ignores the legacy local-time `date`+`time` fields. Legacy fields
+  // are kept so Zapier webhook consumers still receive the expected shape.
+  startAt?: string;
 }
 
 export interface TrainerizeSessionCredit {
@@ -288,17 +292,29 @@ async function apiCreateBooking(booking: TrainerizeBooking): Promise<{ success: 
     // Look up client userID by email
     const clientUserId = await findUserIdByEmail(booking.clientEmail);
 
-    // Convert 12-hour time (e.g., "2:00 PM") to 24-hour for ISO construction
-    const timeMatch = booking.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-    let hour = 0, minute = 0;
-    if (timeMatch) {
-      hour = parseInt(timeMatch[1]);
-      minute = parseInt(timeMatch[2]);
+    let startIso: string;
+    if (booking.startAt) {
+      // Preferred path: caller already has the Square UTC ISO. Use it verbatim.
+      startIso = booking.startAt;
+    } else {
+      // Legacy path: reconstruct from 12-hour local time. `booking.time` is
+      // local ("2:00 PM") so `booking.date` must also be the local calendar date.
+      const timeMatch = booking.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!timeMatch) {
+        console.error('Trainerize create booking: unrecognized time format', booking.time);
+        return { success: false };
+      }
+      let hour = parseInt(timeMatch[1]);
+      const minute = parseInt(timeMatch[2]);
       const isPM = timeMatch[3].toUpperCase() === 'PM';
       if (isPM && hour !== 12) hour += 12;
       if (!isPM && hour === 12) hour = 0;
+      // Build a local Date so the local clock time is preserved, then convert
+      // to UTC ISO. This matches what the user saw on screen.
+      const [y, m, d] = booking.date.split('-').map(n => parseInt(n));
+      const local = new Date(y, m - 1, d, hour, minute, 0, 0);
+      startIso = local.toISOString();
     }
-    const startIso = `${booking.date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`;
     const endMs = new Date(startIso).getTime() + booking.duration * 60000;
     const startDate = toTzDate(startIso);
     const endDate = toTzDate(new Date(endMs).toISOString());

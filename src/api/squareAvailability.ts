@@ -608,10 +608,14 @@ function syncToTrainerize(
     notes: customerInfo.goals?.replace(/\[.*?\]/g, '').trim(),
   });
 
-  // Sync booking
+  // Sync booking.
+  // startAt is the full Square UTC ISO — apiCreateBooking uses it directly so
+  // there's no local→UTC drift. date/time are kept for Zapier webhook consumers
+  // (filled from the user's local clock so "time" reads naturally for humans).
   syncBooking({
     clientEmail: customerInfo.email,
-    date: startDate.toISOString().split('T')[0],
+    startAt,
+    date: `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}`,
     time: formatTime(startDate.getHours(), startDate.getMinutes()),
     duration,
     type: isVirtual ? 'virtual' : 'in-studio',

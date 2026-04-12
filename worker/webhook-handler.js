@@ -469,14 +469,22 @@ export default {
     try {
       const body = await request.text();
 
-      // Verify Square webhook signature (HMAC-SHA256 of URL + body)
-      if (env.SQUARE_WEBHOOK_SIGNATURE_KEY) {
-        const signature = request.headers.get('x-square-hmacsha256-signature');
-        const webhookUrl = request.url;
-        const isValid = await verifySignature(webhookUrl, body, signature, env.SQUARE_WEBHOOK_SIGNATURE_KEY);
-        if (!isValid) {
-          return new Response('Invalid signature', { status: 401 });
-        }
+      // Verify Square webhook signature (HMAC-SHA256 of URL + body).
+      // Fail CLOSED if the signing secret isn't configured — silently accepting
+      // unverified webhooks would let anyone with the URL forge payment/credit
+      // events.
+      if (!env.SQUARE_WEBHOOK_SIGNATURE_KEY) {
+        console.error('SQUARE_WEBHOOK_SIGNATURE_KEY not set — rejecting webhook');
+        await logEvent('error', 'webhook-sig-key-missing', {
+          method: request.method, path: new URL(request.url).pathname,
+        }, env);
+        return new Response('Webhook verification not configured', { status: 503 });
+      }
+      const signature = request.headers.get('x-square-hmacsha256-signature');
+      const webhookUrl = request.url;
+      const isValid = await verifySignature(webhookUrl, body, signature, env.SQUARE_WEBHOOK_SIGNATURE_KEY);
+      if (!isValid) {
+        return new Response('Invalid signature', { status: 401 });
       }
 
       const event = JSON.parse(body);

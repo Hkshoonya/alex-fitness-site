@@ -8,10 +8,11 @@ interface QuickMessageModalProps {
 }
 
 export default function QuickMessageModal({ isOpen, onClose }: QuickMessageModalProps) {
-  const [step, setStep] = useState<'form' | 'sending' | 'sent'>('form');
+  const [step, setStep] = useState<'form' | 'sending' | 'sent' | 'error'>('form');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [message, setMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
 
   useEffect(() => {
     if (isOpen) {
@@ -30,14 +31,19 @@ export default function QuickMessageModal({ isOpen, onClose }: QuickMessageModal
     e.preventDefault();
     setStep('sending');
 
-    await sendMessageToAlex({
+    const result = await sendMessageToAlex({
       senderName: name,
       senderPhone: phone,
       message,
     });
 
-    setStep('sent');
-    setTimeout(() => onClose(), 2500);
+    if (result.success) {
+      setStep('sent');
+      setTimeout(() => onClose(), 2500);
+    } else {
+      setErrorMessage(result.error || 'Message could not be sent. Please try again.');
+      setStep('error');
+    }
   };
 
   if (!isOpen) return null;
@@ -73,6 +79,17 @@ export default function QuickMessageModal({ isOpen, onClose }: QuickMessageModal
               </div>
               <p className="text-white font-semibold mb-1">Got it!</p>
               <p className="text-white/60 text-sm">Alex will get back to you shortly.</p>
+            </div>
+          ) : step === 'error' ? (
+            <div className="text-center py-6">
+              <p className="text-white font-semibold mb-2">Couldn't deliver</p>
+              <p className="text-white/60 text-sm mb-4">{errorMessage}</p>
+              <button
+                onClick={() => { setStep('form'); setErrorMessage(''); }}
+                className="text-[#FF4D2E] text-sm font-semibold hover:underline"
+              >
+                Try again
+              </button>
             </div>
           ) : step === 'sending' ? (
             <div className="flex items-center justify-center py-12">

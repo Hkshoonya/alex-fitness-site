@@ -569,6 +569,10 @@ export async function createBooking(
 
     return { success: true, bookingId: data.booking.id };
   } catch (error) {
+    // Bust the cache even on failure — if two users raced for the same slot,
+    // the loser's next attempt would otherwise read the same stale "available"
+    // slot from cache until the 15-min TTL.
+    try { localStorage.removeItem(AVAILABILITY_CACHE_KEY); } catch { /* private mode */ }
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Booking failed',

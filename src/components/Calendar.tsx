@@ -29,16 +29,49 @@ export default function Calendar({ onSelectSlot, selectable = false, showBooking
   }, []);
 
   const loadBookings = () => {
-    // Load from localStorage (includes both website and Square bookings)
-    const websiteBookings = JSON.parse(localStorage.getItem('bookings') || '[]');
-    const squareBookings = JSON.parse(localStorage.getItem('square_bookings') || '[]');
-    
-    const allBookings = [...websiteBookings, ...squareBookings]
-      .filter((b: Booking) => b.status !== 'cancelled')
-      .sort((a: Booking, b: Booking) => 
-        new Date(a.date + 'T' + a.time).getTime() - new Date(b.date + 'T' + b.time).getTime()
-      );
-    
+    // Load from localStorage (includes both website and Square bookings).
+    // Guard the parses — a corrupted localStorage entry shouldn't crash
+    // the calendar render.
+    const safeParse = (key: string): Booking[] => {
+      try { return JSON.parse(localStorage.getItem(key) || '[]'); }
+      catch { return []; }
+    };
+    const websiteBookings = safeParse('bookings');
+    const squareBookings = safeParse('square_bookings');
+
+    // Convert a booking's (date, time) to a sortable epoch ms. `time` may be
+    // either "7:30 AM" (12-hour, website-side) or "07:30" (24-hour, Square-side);
+    // the old code passed the 12-hour form straight to Date() which returned
+    // Invalid Date → NaN → sort was a no-op.
+    const toEpoch = (b: Booking): number => {
+      if (!b.date) return 0;
+      const raw = (b.time || '00:00').trim();
+      const m12 = raw.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      let h = 0, mm = 0;
+      if (m12) {
+        h = parseInt(m12[1]);
+        mm = parseInt(m12[2]);
+        const pm = m12[3].toUpperCase() === 'PM';
+        if (pm && h !== 12) h += 12;
+        if (!pm && h === 12) h = 0;
+      } else {
+        const m24 = raw.match(/^(\d{1,2}):(\d{2})$/);
+        if (m24) { h = parseInt(m24[1]); mm = parseInt(m24[2]); }
+      }
+      const [y, M, d] = b.date.split('-').map(n => parseInt(n));
+      return new Date(y, (M || 1) - 1, d || 1, h, mm).getTime();
+    };
+
+    // Dedupe by id — the same booking can end up in both lists when the
+    // Square sync path populates both caches.
+    const byId = new Map<string, Booking>();
+    for (const b of [...websiteBookings, ...squareBookings]) {
+      if (b?.status === 'cancelled') continue;
+      const key = b.id || `${b.date}|${b.time}|${b.email || ''}`;
+      if (!byId.has(key)) byId.set(key, b);
+    }
+    const allBookings = Array.from(byId.values()).sort((a, b) => toEpoch(a) - toEpoch(b));
+
     setBookings(allBookings);
   };
 

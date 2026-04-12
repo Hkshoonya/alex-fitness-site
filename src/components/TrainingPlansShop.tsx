@@ -182,7 +182,10 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         amount: getCurrentPrice(),
         purchaseDate: new Date().toISOString(),
         sessionsRemaining: freq?.totalSessions || 1,
-        validUntil: new Date(Date.now() + selectedPlan.planWeeks * 7 * 24 * 60 * 60 * 1000).toISOString(),
+        // Default to 12 weeks when planWeeks is 0/missing (single sessions,
+        // classes) — otherwise validUntil=now and the purchase is filtered
+        // out as expired immediately.
+        validUntil: new Date(Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000).toISOString(),
       });
 
       // Set up recurring auto-pay subscription (fire-and-forget)
@@ -228,7 +231,10 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
           totalSessions: freq?.totalSessions || 1,
           sessionsUsed: 0,
           sessionsRemaining: freq?.totalSessions || 1,
-          validUntil: new Date(Date.now() + selectedPlan.planWeeks * 7 * 24 * 60 * 60 * 1000).toISOString(),
+          // Default to 12 weeks when planWeeks is 0/missing (single sessions,
+        // classes) — otherwise validUntil=now and the purchase is filtered
+        // out as expired immediately.
+        validUntil: new Date(Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000).toISOString(),
         }
       );
     } catch (err) {

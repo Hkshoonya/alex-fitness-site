@@ -141,7 +141,9 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     setSelectedDate(date);
     setSelectedTime(null);
     setSelectedStartAt(null);
-    loadSlots(date);
+    // loadSlots swallows errors internally today, but surface any future leak
+    // via .catch so we don't get unhandled rejection warnings in dev.
+    loadSlots(date).catch(err => console.error('loadSlots failed:', err));
   };
 
   const handleTimeSelect = (slot: TimeSlot) => {

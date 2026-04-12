@@ -363,10 +363,22 @@ export default {
 
     // ===== EVENT LOGS =====
     // GET /logs?category=credit&limit=20 — query recent events
+    // Auth: requires X-Admin-Token header matching env.ADMIN_LOG_TOKEN.
+    // Logs contain emails and Trainerize userIDs (from logEvent calls) —
+    // without a gate any visitor can scrape client PII.
     if (url.pathname === '/logs' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN) {
+        return new Response('Logs endpoint not configured', {
+          status: 503, headers: corsHeaders,
+        });
+      }
+      const provided = request.headers.get('x-admin-token') || '';
+      if (provided !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
       const category = url.searchParams.get('category') || '';
       const limit = parseInt(url.searchParams.get('limit') || '50');
-      const prefix = category ? `log:` : 'log:';
+      const prefix = 'log:';
 
       try {
         const keys = await env.CHALLENGES_KV.list({ prefix, limit: limit * 3 });
@@ -847,7 +859,7 @@ async function deductSessionCredit(userId, reason, env) {
     // Idempotency: if this same reason was already recorded recently, skip.
     const tenMinAgo = Date.now() - 10 * 60 * 1000;
     const alreadyDeducted = (creditData.deductions || []).some(d =>
-      d.reason === reason && new Date(d.date).getTime() > tenMinAgo
+      d && d.reason === reason && d.date && new Date(d.date).getTime() > tenMinAgo
     );
     if (alreadyDeducted) {
       console.log(`Credit deduction skipped (already counted) for user ${userId}: ${reason}`);
@@ -1370,7 +1382,9 @@ async function syncBookingToTrainerize(booking, env) {
       const isLateCancel = hoursUntil < CANCEL_NOTICE_HOURS && status === 'CANCELLED_BY_CUSTOMER';
 
       if (isLateCancel) {
-        await deductSessionCredit(userId, `Late cancellation (${dateStr}, <24hrs notice)`, env);
+        // startAt included so the 10-min reason-idempotency can't collide
+        // between two different same-day bookings for the same user.
+        await deductSessionCredit(userId, `Late cancellation (${dateStr}, <24hrs notice) [${startAt}]`, env);
         // Normalize startAt — strip milliseconds so key matches cron's Trainerize-derived format
         const normalizedStart = startAt.replace(/\.\d+Z$/, 'Z');
         await kvPut(
@@ -1410,7 +1424,7 @@ async function syncBookingToTrainerize(booking, env) {
     if (userId) {
       const dateStr = new Date(startAt).toLocaleDateString('en-US', { timeZone: TIMEZONE, month: 'long', day: 'numeric' });
 
-      await deductSessionCredit(userId, `No-show (${dateStr})`, env);
+      await deductSessionCredit(userId, `No-show (${dateStr}) [${startAt}]`, env);
       const normalizedStart = startAt.replace(/\.\d+Z$/, 'Z');
       await kvPut(
         `credit-handled:${userId}:${normalizedStart}`,
@@ -1752,9 +1766,20 @@ function getSquareHeaders(env) {
 async function handleCreditPurchaseOrder(order, env) {
   if (!isTrainerizeConfigured(env)) return;
 
-  // Idempotency: skip if already processed
+  // Two-phase idempotency. Square fires BOTH `order.fulfilled` and
+  // `order.updated` for a single state change; the event-level marker in the
+  // webhook dispatcher doesn't dedupe them because event_ids differ. Without
+  // this, credits get added TWICE per order. Write a short-lived "processing"
+  // marker immediately so concurrent siblings short-circuit, then promote to
+  // a long-TTL "done" marker once credit application succeeds.
   const orderKey = `order-processed:${order.id}`;
-  if (await kvGet(orderKey, env)) return;
+  const state = await kvGet(orderKey, env);
+  if (state === 'done') return;
+  if (state === 'processing') {
+    console.log(`Order ${order.id}: sibling event already processing — skipping`);
+    return;
+  }
+  await kvPut(orderKey, 'processing', { expirationTtl: 5 * 60 }, env);
 
   let totalCredits = 0;
   let duration = 60;
@@ -1837,8 +1862,9 @@ async function handleCreditPurchaseOrder(order, env) {
     await trainerizePost('/user/addTag', { userID: userId, userTag: '✅ Paid' }, env);
   } catch { /* tags are best-effort */ }
 
-  // Mark order as processed
-  await kvPut(orderKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
+  // Promote to "done" — long TTL so retries of either order.fulfilled or
+  // order.updated over the next 90 days are reliably skipped.
+  await kvPut(orderKey, 'done', { expirationTtl: 90 * 24 * 3600 }, env);
   console.log(`Order credit sync: ${email} +${totalCredits} credits (order ${order.id.slice(0, 8)})`);
 }
 
@@ -2321,7 +2347,7 @@ async function deductCreditsForCompletedSessions(env) {
         }
 
         // Deduct credit
-        await deductSessionCredit(attendee.userID, `Session completed (${sessionDate})`, env);
+        await deductSessionCredit(attendee.userID, `Session completed (${sessionDate}) [apt ${apt.id}]`, env);
         await kvPut(attCountedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
 
         if (startStr) {

@@ -659,6 +659,7 @@ async function handleSubscriptionRenewal(subscription, env) {
   // Square subscription has plan_variation_id, not plan_variation_data.
   // Fetch the plan name from the catalog using the ID.
   let planName = '';
+  let catalogError = null;
   if (subscription.plan_variation_id) {
     try {
       const catResp = await fetch(
@@ -668,8 +669,12 @@ async function handleSubscriptionRenewal(subscription, env) {
       if (catResp.ok) {
         const catData = await catResp.json();
         planName = catData.object?.subscription_plan_variation_data?.name || '';
+      } else {
+        catalogError = `catalog fetch ${catResp.status}`;
       }
-    } catch { /* catalog fetch failed */ }
+    } catch (e) {
+      catalogError = e?.message || 'catalog fetch threw';
+    }
   }
 
   // Idempotency: skip if this exact subscription event was already processed
@@ -682,7 +687,15 @@ async function handleSubscriptionRenewal(subscription, env) {
   // Find matching plan credits
   const credits = findPlanCredits(planName);
   if (!credits) {
-    console.log(`No credit mapping for plan: ${planName}`);
+    // Surface in /logs so unrecognized/missing plans are visible, not silent.
+    await logEvent('error', 'no-credit-mapping', {
+      subscriptionId,
+      customerId,
+      planVariationId: subscription.plan_variation_id,
+      planName,
+      catalogError,
+    }, env);
+    console.log(`No credit mapping for plan: "${planName}" (sub ${subscriptionId})`);
     return;
   }
 

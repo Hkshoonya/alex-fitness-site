@@ -584,14 +584,24 @@ export default {
           }
 
           // ---- INVOICE EVENTS ----
+          // Only propagate invoice status to Trainerize when the invoice is
+          // actually for training. Any other paid invoice (merch, retail,
+          // misc) shouldn't flip the client's training-payment status.
+          const isTrainingInvoice = (invoice) => {
+            const desc = invoice?.description || '';
+            const title = invoice?.title || '';
+            return desc.includes('Auto-invoice for session') ||
+              /session|training/i.test(desc) ||
+              /session|training/i.test(title);
+          };
+
           if (eventType === 'invoice.payment_made') {
             const invoice = event.data?.object?.invoice;
-            if (invoice?.primary_recipient?.customer_id) {
+            if (invoice?.primary_recipient?.customer_id && isTrainingInvoice(invoice)) {
               await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'paid', invoice, env);
 
               // If this is a session invoice we auto-created, update Trainerize note
-              const invoiceNote = invoice.description || '';
-              if (invoiceNote.includes('Auto-invoice for session')) {
+              if ((invoice.description || '').includes('Auto-invoice for session')) {
                 await handleSessionInvoicePaid(invoice, env);
               }
             }
@@ -599,7 +609,7 @@ export default {
 
           if (eventType === 'invoice.payment_failed' || eventType === 'invoice.updated') {
             const invoice = event.data?.object?.invoice;
-            if (invoice?.primary_recipient?.customer_id) {
+            if (invoice?.primary_recipient?.customer_id && isTrainingInvoice(invoice)) {
               const invStatus = invoice.status;
               if (invStatus === 'UNPAID' || invStatus === 'PAYMENT_PENDING') {
                 await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'unpaid', invoice, env);

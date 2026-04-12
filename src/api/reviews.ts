@@ -19,8 +19,13 @@ interface ReviewCache {
 }
 
 // Configuration
-const GOOGLE_PLACE_ID = import.meta.env.VITE_GOOGLE_PLACE_ID || '';
-const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+// Google Places API calls used to happen directly from the browser, but they
+// (a) require a key that would be baked into the public JS bundle, and
+// (b) are CORS-blocked by Google for browser-origin requests anyway. Dropping
+// that path entirely — the site now always renders FALLBACK_REVIEWS. If we
+// want live reviews in the future, wire a /api/google/places/details endpoint
+// into the worker and proxy the call there.
+const GOOGLE_PLACE_ID = '';
 const CACHE_KEY = 'alex_fitness_reviews';
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 const GOOGLE_MAPS_URL = 'https://www.google.com/maps/place/Alex+Davis+Fitness/';
@@ -145,38 +150,12 @@ function cacheReviews(reviews: GoogleReview[]): void {
 }
 
 /**
- * Fetch reviews from Google Places API
- * Requires VITE_GOOGLE_MAPS_API_KEY and VITE_GOOGLE_PLACE_ID env vars
+ * Placeholder — live Google reviews fetching was removed when we stopped
+ * shipping the Google API key in the browser bundle. Returns [] so the
+ * caller falls back to FALLBACK_REVIEWS.
  */
 async function fetchFromGoogle(): Promise<GoogleReview[]> {
-  if (!GOOGLE_API_KEY || !GOOGLE_PLACE_ID) {
-    return [];
-  }
-
-  try {
-    const response = await fetch(
-      `https://maps.googleapis.com/maps/api/place/details/json?place_id=${GOOGLE_PLACE_ID}&fields=reviews&key=${GOOGLE_API_KEY}`
-    );
-
-    if (!response.ok) throw new Error('Google API request failed');
-
-    const data = await response.json();
-    const googleReviews = data.result?.reviews || [];
-
-    return googleReviews.map((r: any, i: number) => ({
-      id: `google_${i}_${Date.now()}`,
-      name: r.author_name || 'Anonymous',
-      rating: r.rating || 5,
-      date: new Date(r.time * 1000).toISOString().split('T')[0],
-      relativeTime: r.relative_time_description || '',
-      text: r.text || '',
-      profilePhoto: r.profile_photo_url,
-      source: 'google' as const,
-    }));
-  } catch (error) {
-    console.error('Failed to fetch Google reviews:', error);
-    return [];
-  }
+  return [];
 }
 
 /**
@@ -284,5 +263,6 @@ export function getGoogleReviewsUrl(): string {
  * Check if Google API is configured
  */
 export function isGoogleApiConfigured(): boolean {
-  return !!(GOOGLE_API_KEY && GOOGLE_PLACE_ID);
+  // Live Google fetch is disabled; see fetchFromGoogle notes.
+  return false;
 }

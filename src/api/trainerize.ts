@@ -14,18 +14,16 @@
 // Requires: Studio or Enterprise plan for direct API
 // Fallback: Zapier webhook (any plan)
 
-const TRAINERIZE_API_TOKEN = import.meta.env.VITE_TRAINERIZE_API_KEY || '';
-const TRAINERIZE_API_DIRECT = import.meta.env.VITE_TRAINERIZE_API_URL || 'https://api.trainerize.com/v03';
+// Trainerize's API token and group ID are SERVER-SIDE only — they live in the
+// Cloudflare Worker environment, never the browser bundle. All direct calls
+// from here route through the worker's /api/trainerize proxy. A Zapier
+// webhook URL is supported as a fallback for environments without a worker.
 const TRAINERIZE_WEBHOOK_URL = import.meta.env.VITE_TRAINERIZE_WEBHOOK_URL || '';
-const TRAINERIZE_TRAINER_GROUP_ID = import.meta.env.VITE_TRAINERIZE_TRAINER_GROUP_ID || '';
 const TRAINERIZE_COACH_USER_ID = import.meta.env.VITE_TRAINERIZE_COACH_USER_ID || '10860818';
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
-// When worker proxy is configured, route REST calls through it (avoids CORS)
 // Worker maps /api/trainerize/... → api.trainerize.com/v03/...
-const TRAINERIZE_API_BASE = WORKER_URL
-  ? `${WORKER_URL}/api/trainerize`
-  : TRAINERIZE_API_DIRECT;
+const TRAINERIZE_API_BASE = WORKER_URL ? `${WORKER_URL}/api/trainerize` : '';
 
 // ===== TYPES =====
 
@@ -89,25 +87,18 @@ type TrainerizeEvent =
 // ===== CONFIG =====
 
 export function isTrainerizeConfigured(): boolean {
-  return !!((TRAINERIZE_TRAINER_GROUP_ID && TRAINERIZE_API_TOKEN) || WORKER_URL || TRAINERIZE_WEBHOOK_URL);
+  return !!(WORKER_URL || TRAINERIZE_WEBHOOK_URL);
 }
 
 function isDirectApiConfigured(): boolean {
-  return !!(WORKER_URL || (TRAINERIZE_TRAINER_GROUP_ID && TRAINERIZE_API_TOKEN));
+  // "Direct" now means "the worker proxy exists" — we never talk to
+  // api.trainerize.com from the browser.
+  return !!WORKER_URL;
 }
 
 function apiHeaders(): Record<string, string> {
-  // When using the worker proxy, don't send Authorization — the worker adds it server-side.
-  if (WORKER_URL) {
-    return { 'Content-Type': 'application/json' };
-  }
-
-  // Direct mode: Basic Auth — base64(groupID:APIToken)
-  const token = btoa(`${TRAINERIZE_TRAINER_GROUP_ID}:${TRAINERIZE_API_TOKEN}`);
-  return {
-    'Authorization': `Basic ${token}`,
-    'Content-Type': 'application/json',
-  };
+  // Worker adds Basic Auth server-side. Browser sends only Content-Type.
+  return { 'Content-Type': 'application/json' };
 }
 
 // ===== API HELPERS =====

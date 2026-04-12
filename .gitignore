@@ -7,3 +7,16 @@ TODO.md
 
 .playwright-mcp/
 worker/.wrangler/
+
+# Tooling workspaces — can contain credentials, site links, or build artifacts
+.netlify/
+.vercel/
+.cloudflare/
+*.local
+
+# Credential files that might get dropped in the root accidentally
+*credentials*.json
+*service-account*.json
+*.pem
+*.p12
+*secret*.json

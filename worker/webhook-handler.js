@@ -37,11 +37,21 @@
  *   4. Done — Square auto-pay → Trainerize sync, fully automatic
  */
 
-// Trainerize appointment type for synced bookings.
-// In-person types require locationID which the API key can't access,
-// so we use the virtual PT type for all synced bookings (works without location).
-// The notes field contains the actual location for in-person sessions.
-const TZ_SYNC_APPOINTMENT_TYPE = 2845440; // "30 min PT Session (virtual)" — duration set via start/end times
+// Trainerize appointment type IDs for synced bookings. These get picked per
+// booking based on whether Square flagged it virtual (CUSTOMER_LOCATION or
+// "virtual" in the note) vs in-person. Both can be overridden via env var;
+// see /admin/trainerize-appointment-types endpoint to list available IDs.
+const TZ_SYNC_VIRTUAL_DEFAULT = 2845440;   // "30 min PT Session (virtual)"
+const TZ_SYNC_INPERSON_DEFAULT = null;      // No default — must be set via env
+
+function getVirtualApptType(env) {
+  const v = parseInt(env.TZ_VIRTUAL_APPOINTMENT_TYPE_ID || '', 10);
+  return Number.isFinite(v) && v > 0 ? v : TZ_SYNC_VIRTUAL_DEFAULT;
+}
+function getInPersonApptType(env) {
+  const v = parseInt(env.TZ_INPERSON_APPOINTMENT_TYPE_ID || '', 10);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
 const STUDIO_ADDRESS = '13305 Sanctuary Cove Dr, Temple Terrace, FL 33637';
 
 // Booking policy constants
@@ -147,6 +157,23 @@ async function checkRateLimit(request, bucket, max, env) {
   // 120s TTL keeps the prior-minute bucket around briefly for race cleanup
   await kvPut(key, String(count + 1), { expirationTtl: 120 }, env);
   return true;
+}
+
+/**
+ * Short-lived KV lock. Holds `lockKey` for up to `ttlSec`, runs `fn`, then
+ * best-effort deletes the key. Returns { ok:true, value } on success, or
+ * { ok:false, busy:true } when the lock is already held (caller should 409).
+ * Throws whatever `fn` throws AFTER unlocking.
+ */
+async function withLock(lockKey, ttlSec, env, fn) {
+  if (await kvGet(lockKey, env)) return { ok: false, busy: true };
+  await kvPut(lockKey, Date.now().toString(), { expirationTtl: ttlSec }, env);
+  try {
+    const value = await fn();
+    return { ok: true, value };
+  } finally {
+    try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* best-effort */ }
+  }
 }
 
 async function logEvent(category, message, data, env) {
@@ -286,6 +313,13 @@ export default {
       if (!isAllowedOrigin) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 403, headers: corsHeaders });
       }
+      // Origin is spoofable from non-browser clients. Rate-limit per IP so a
+      // script can't burn Google Calendar API quota even with a forged Origin.
+      if (!await checkRateLimit(request, 'google-meet', 20, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       try {
         const params = await request.json();
         const meeting = await createGoogleMeetEvent(params, env);
@@ -302,6 +336,14 @@ export default {
     // ===== SQUARE API PROXY =====
     // ANY /api/square/* → forwards to Square Connect API with server-side auth
     if (url.pathname.startsWith('/api/square/')) {
+      // Origin is spoofable; rate-limit per IP so a scripted attacker can't
+      // enumerate /customers/search or burn Alex's 100k/day Square quota.
+      // Legitimate browser usage rarely exceeds a few req/sec.
+      if (!await checkRateLimit(request, 'square-proxy', 60, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       try {
         const subpath = url.pathname.replace('/api/square/', '');
         const squareBase = getSquareApiBase(env);
@@ -343,6 +385,13 @@ export default {
     // ===== TRAINERIZE API PROXY =====
     // ANY /api/trainerize/* → forwards to Trainerize v03 API with server-side Basic Auth
     if (url.pathname.startsWith('/api/trainerize/')) {
+      // Origin is spoofable; rate-limit to protect Trainerize v03's 1000 req/min
+      // group-token cap and to stop PII exfiltration via /user/list enumeration.
+      if (!await checkRateLimit(request, 'trainerize-proxy', 60, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       try {
         const subpath = url.pathname.replace('/api/trainerize/', '');
         const targetUrl = `${TRAINERIZE_API_BASE}/${subpath}${url.search}`;
@@ -420,7 +469,12 @@ export default {
         createdAt: new Date().toISOString(),
       };
 
-      await saveChallenge(challenge, env);
+      const lock = await withLock('lock:challenges-write', 15, env, () => saveChallenge(challenge, env));
+      if (!lock.ok) {
+        return new Response(JSON.stringify({ error: 'Challenge list is being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       return new Response(JSON.stringify(challenge), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
@@ -725,16 +779,37 @@ export default {
         }
       }
 
-      if (challenge.spotsLeft !== undefined && challenge.spotsLeft !== null) {
-        if (challenge.spotsLeft <= 0) {
-          return new Response(JSON.stringify({ error: 'Challenge is full', challenge }), {
-            status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
+      // Serialize the read-decrement-write of the shared `challenges` key
+      // so two concurrent joins on a spotsLeft=1 challenge can't both pass
+      // the check and over-subscribe. Re-read INSIDE the lock — another
+      // writer may have decremented after our earlier read at line 689.
+      const lockRes = await withLock('lock:challenges-write', 10, env, async () => {
+        const fresh = await getChallenges(env);
+        const fIdx = fresh.findIndex(c => c.id === id);
+        if (fIdx < 0) return { err: 'Challenge not found', status: 404 };
+        const freshChallenge = fresh[fIdx];
+        if (freshChallenge.spotsLeft !== undefined && freshChallenge.spotsLeft !== null) {
+          if (freshChallenge.spotsLeft <= 0) {
+            return { err: 'Challenge is full', status: 409, challenge: freshChallenge };
+          }
+          freshChallenge.spotsLeft = Math.max(0, freshChallenge.spotsLeft - 1);
         }
-        challenge.spotsLeft = Math.max(0, challenge.spotsLeft - 1);
+        fresh[fIdx] = freshChallenge;
+        await kvPut('challenges', JSON.stringify(fresh), {}, env);
+        return { challenge: freshChallenge };
+      });
+      if (!lockRes.ok) {
+        return new Response(JSON.stringify({ error: 'Challenge list is being updated — retry in a moment' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
       }
-      all[idx] = challenge;
-      await kvPut('challenges', JSON.stringify(all), {}, env);
+      if (lockRes.value.err) {
+        return new Response(JSON.stringify({
+          error: lockRes.value.err,
+          ...(lockRes.value.challenge ? { challenge: lockRes.value.challenge } : {}),
+        }), { status: lockRes.value.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const joinedChallenge = lockRes.value.challenge;
       await kvPut(joinKey, JSON.stringify({
         email, name, phone,
         paymentId: rawPaymentId || undefined,
@@ -749,22 +824,22 @@ export default {
 
       // Best-effort: if the challenge has a Trainerize group link, tag the
       // user so the coach sees their participation.
-      if (challenge.trainerizeId && isTrainerizeConfigured(env)) {
+      if (joinedChallenge.trainerizeId && isTrainerizeConfigured(env)) {
         try {
           const userId = await findTrainerizeUserByEmail(email, env);
           if (userId) {
             await trainerizePost('/user/addTag', {
-              userID: userId, userTag: `🏆 Challenge: ${challenge.title}`,
+              userID: userId, userTag: `🏆 Challenge: ${joinedChallenge.title}`,
             }, env);
           }
         } catch (e) { console.error('Challenge-join Trainerize tag failed:', e); }
       }
 
-      await logEvent('challenge', `Joined: ${email} → ${challenge.title}`, {
+      await logEvent('challenge', `Joined: ${email} → ${joinedChallenge.title}`, {
         challengeId: id, email, name,
       }, env);
 
-      return new Response(JSON.stringify({ ok: true, challenge }), {
+      return new Response(JSON.stringify({ ok: true, challenge: joinedChallenge }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
@@ -781,8 +856,38 @@ export default {
         return new Response('Unauthorized', { status: 401, headers: corsHeaders });
       }
       const id = url.pathname.split('/challenges/')[1];
-      await deleteChallenge(id, env);
+      const delLock = await withLock('lock:challenges-write', 10, env, () => deleteChallenge(id, env));
+      if (!delLock.ok) {
+        return new Response(JSON.stringify({ error: 'Challenge list is being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       return new Response(JSON.stringify({ deleted: id }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ===== ADMIN: list Trainerize appointment types =====
+    // GET /admin/trainerize-appointment-types — returns types available to
+    // this API key so Alex can pick the in-person ID and set
+    // TZ_INPERSON_APPOINTMENT_TYPE_ID in Cloudflare env. Admin-gated.
+    if (url.pathname === '/admin/trainerize-appointment-types' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN) {
+        return new Response('Not configured', { status: 503, headers: corsHeaders });
+      }
+      if ((request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      try {
+        const resp = await trainerizePost('/appointment/getAppointmentTypeList', {}, env);
+        const body = await resp.text();
+        return new Response(body, {
+          status: resp.status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // ===== EVENT LOGS =====
@@ -1857,11 +1962,32 @@ async function syncBookingToTrainerize(booking, env) {
       const tzStart = startAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
       const tzEnd = endAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
 
+      // Pick the right Trainerize appointment type. Previously ALL synced
+      // bookings used the virtual type because we couldn't resolve a location
+      // ID — which made Alex's calendar show "virtual" for every in-person
+      // session. Now: honor TZ_INPERSON_APPOINTMENT_TYPE_ID when set, fall
+      // back to virtual only when it's unset (with a log so the mis-config
+      // is visible).
+      const inPersonTypeId = getInPersonApptType(env);
+      const virtualTypeId = getVirtualApptType(env);
+      let chosenTypeId;
+      if (isVirtual) {
+        chosenTypeId = virtualTypeId;
+      } else if (inPersonTypeId) {
+        chosenTypeId = inPersonTypeId;
+      } else {
+        chosenTypeId = virtualTypeId;
+        await logEvent('error', 'tz-inperson-type-missing', {
+          bookingId: booking.id, squareLocationType: booking.location_type,
+          hint: 'Set TZ_INPERSON_APPOINTMENT_TYPE_ID in Cloudflare env. List IDs via GET /admin/trainerize-appointment-types.',
+        }, env);
+      }
+
       const resp = await trainerizePost('/appointment/add', {
         userID: getTrainerizeTrainerId(env),
         startDate: tzStart,
         endDate: tzEnd,
-        appointmentTypeID: TZ_SYNC_APPOINTMENT_TYPE,
+        appointmentTypeID: chosenTypeId,
         notes: `${duration}min ${isVirtual ? 'virtual' : 'in-person'} session (Square #${booking.id.slice(0, 8)})${!userId ? ` | Client: ${customer.given_name || ''} ${customer.family_name || ''} <${email}>` : ''}${isVirtual ? '' : ' | ' + STUDIO_ADDRESS}`,
         attendents: userId ? [{ userID: userId }] : [],
       }, env);

@@ -165,13 +165,17 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     }
 
     const label = mode === 'consultation' ? 'Free Consultation' : `${sessionDuration} Min Session`;
+    // Only include "Meet: <url>" when we actually have a link. When createMeetEvent
+    // fails, meetLink is '' — leaving the prefix in would render an ugly
+    // "Meet: \n…" in Square's customer_note.
+    const goalsPrefix = sessionType === 'virtual'
+      ? (meetLink ? `[Virtual][${label}] Meet: ${meetLink}` : `[Virtual][${label}]`)
+      : `[In-Studio][${label}]`;
     const result = await createBooking(coachId, selectedStartAt, sessionDuration, {
       name: bookingData.name,
       email: bookingData.email,
       phone: bookingData.phone,
-      goals: sessionType === 'virtual'
-        ? `[Virtual][${label}] Meet: ${meetLink}\n${bookingData.goals}`
-        : `[In-Studio][${label}] ${bookingData.goals}`,
+      goals: `${goalsPrefix}${bookingData.goals ? `\n${bookingData.goals}` : ''}`,
     });
 
     setIsSubmitting(false);

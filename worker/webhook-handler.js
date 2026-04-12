@@ -2070,11 +2070,13 @@ async function findSquareCustomerByName(firstName, lastName, env) {
     if (!resp.ok) return null;
     const data = await resp.json();
     const searchName = (lastName ? `${firstName} ${lastName}` : firstName).toLowerCase();
-    // Match by name from the results
+    // Match by name from the results. No fallback to the first result —
+    // the search is a fuzzy email match on firstName, so an unrelated customer
+    // whose email contains the name would be returned and invoiced.
     const match = (data.customers || []).find(c =>
       `${c.given_name || ''} ${c.family_name || ''}`.toLowerCase().trim() === searchName
     );
-    return match?.id || data.customers?.[0]?.id || null;
+    return match?.id || null;
   } catch {
     return null;
   }

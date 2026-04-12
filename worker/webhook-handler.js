@@ -2170,8 +2170,14 @@ async function deductCreditsForCompletedSessions(env) {
       const startMs = new Date(startStr.replace(' ', 'T') + 'Z').getTime();
       const durationMin = Math.round((endMs - startMs) / 60000) || 60;
 
+      // Track whether every attendee wound up with a per-attendee marker.
+      // Only then do we write the appointment-level `countedKey` — otherwise
+      // a skipped/failed attendee would never get retried because the outer
+      // check at line 2161 would short-circuit the whole appointment.
+      let allAttendeesHandled = true;
+
       for (const attendee of attendees) {
-        if (!attendee?.userID) continue;
+        if (!attendee?.userID) { allAttendeesHandled = false; continue; }
 
         // Per-attendee dedup key
         const attCountedKey = `session-counted:${apt.id}:${attendee.userID}`;
@@ -2191,6 +2197,8 @@ async function deductCreditsForCompletedSessions(env) {
           const invoiced = await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env, apt.id);
           if (invoiced) {
             await kvPut(attCountedKey, 'invoiced', { expirationTtl: 90 * 24 * 3600 }, env);
+          } else {
+            allAttendeesHandled = false; // retry this attendee next cron
           }
           continue;
         }
@@ -2220,8 +2228,12 @@ async function deductCreditsForCompletedSessions(env) {
         }
       }
 
-      // Mark appointment-level as counted
-      await kvPut(countedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
+      // Only mark appointment-level as counted if EVERY attendee got a marker.
+      // Otherwise leave the outer key unset so the next cron tick retries
+      // the outstanding attendees.
+      if (allAttendeesHandled) {
+        await kvPut(countedKey, new Date().toISOString(), { expirationTtl: 90 * 24 * 3600 }, env);
+      }
     }
   } catch (e) {
     console.error('Session credit deduction cron failed:', e);

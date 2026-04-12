@@ -48,9 +48,15 @@ interface TeamCache {
   fetchedAt: string;
 }
 
-interface AvailabilityCache {
-  data: Record<string, DayAvailability[]>; // keyed by "date_teamMemberId"
+interface AvailabilityCacheEntry {
+  slots: DayAvailability[];
   fetchedAt: string;
+}
+
+interface AvailabilityCache {
+  // Keyed by "date_teamMemberId". Each entry carries its own fetchedAt so
+  // caching one date doesn't refresh staleness for ALL dates.
+  data: Record<string, AvailabilityCacheEntry>;
 }
 
 // ===== FALLBACK DATA =====
@@ -262,35 +268,34 @@ export async function refreshTeamMembers(): Promise<TeamMember[]> {
 
 // ===== AVAILABILITY =====
 
-function isAvailabilityCacheFresh(key: string): boolean {
-  const raw = localStorage.getItem(AVAILABILITY_CACHE_KEY);
-  if (!raw) return false;
-  try {
-    const cache: AvailabilityCache = JSON.parse(raw);
-    if (!cache.data[key]) return false;
-    return (Date.now() - new Date(cache.fetchedAt).getTime()) < AVAILABILITY_CACHE_DURATION;
-  } catch { return false; }
-}
-
-function getCachedAvailability(key: string): DayAvailability[] | null {
+function readCache(): AvailabilityCache | null {
   const raw = localStorage.getItem(AVAILABILITY_CACHE_KEY);
   if (!raw) return null;
   try {
-    const cache: AvailabilityCache = JSON.parse(raw);
-    return cache.data[key] || null;
+    const parsed = JSON.parse(raw);
+    // Legacy shape (pre-per-key fetchedAt) — discard so it refetches fresh.
+    if (!parsed?.data || typeof parsed.data !== 'object') return null;
+    const first = Object.values(parsed.data)[0] as unknown;
+    if (first && Array.isArray(first)) return null;
+    return parsed as AvailabilityCache;
   } catch { return null; }
 }
 
+function isAvailabilityCacheFresh(key: string): boolean {
+  const cache = readCache();
+  const entry = cache?.data[key];
+  if (!entry) return false;
+  return (Date.now() - new Date(entry.fetchedAt).getTime()) < AVAILABILITY_CACHE_DURATION;
+}
+
+function getCachedAvailability(key: string): DayAvailability[] | null {
+  const cache = readCache();
+  return cache?.data[key]?.slots || null;
+}
+
 function cacheAvailability(key: string, data: DayAvailability[]) {
-  let cache: AvailabilityCache;
-  const raw = localStorage.getItem(AVAILABILITY_CACHE_KEY);
-  if (raw) {
-    cache = JSON.parse(raw);
-    cache.data[key] = data;
-    cache.fetchedAt = new Date().toISOString();
-  } else {
-    cache = { data: { [key]: data }, fetchedAt: new Date().toISOString() };
-  }
+  const cache: AvailabilityCache = readCache() || { data: {} };
+  cache.data[key] = { slots: data, fetchedAt: new Date().toISOString() };
   localStorage.setItem(AVAILABILITY_CACHE_KEY, JSON.stringify(cache));
 }
 

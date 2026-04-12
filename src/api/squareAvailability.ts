@@ -229,11 +229,13 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
   const squareTeam = await fetchTeamFromSquare();
 
   if (squareTeam.length > 0) {
-    // Square is source of truth — only show coaches active in Square
-    // Enrich with fallback data (images, specialties) where names match
+    // Square is source of truth — only show coaches active in Square.
+    // Enrich with fallback data (images, specialties) only on a FULL-name match.
+    // First-name substring matching caused wrong-coach enrichment: e.g.
+    // "Alex Thompson" would inherit "Alex Davis" image/role.
     const enriched = squareTeam.map(sq => {
       const fallback = FALLBACK_TEAM.find(f =>
-        f.name.toLowerCase().includes(sq.name.split(' ')[0].toLowerCase())
+        f.name.toLowerCase().trim() === sq.name.toLowerCase().trim()
       );
       if (fallback) {
         return { ...sq, image: fallback.image, specialties: fallback.specialties, role: fallback.role, title: fallback.title };

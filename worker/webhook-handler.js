@@ -1729,13 +1729,20 @@ async function handleCreditPurchaseOrder(order, env) {
   const existing = await kvGet(`credits:${userId}`, env);
   let creditData;
   if (existing) {
-    try { creditData = JSON.parse(existing); } catch { creditData = null; }
-    if (creditData) {
-      creditData.remaining += totalCredits;
-      creditData.total += totalCredits;
+    try {
+      creditData = JSON.parse(existing);
+    } catch (err) {
+      // Corrupted credit record — bail rather than overwrite and erase the
+      // user's prior balance. Surface loudly so it can be repaired manually.
+      await logEvent('error', 'credit-data-corrupt', {
+        userId, email, kvKey: `credits:${userId}`, rawLength: existing.length,
+      }, env);
+      console.error(`Credit JSON corrupt for user ${userId} — skipping to preserve balance`, err);
+      return;
     }
-  }
-  if (!creditData) {
+    creditData.remaining += totalCredits;
+    creditData.total += totalCredits;
+  } else {
     creditData = {
       userId, email, total: totalCredits, remaining: totalCredits,
       duration, planName: 'Square order',

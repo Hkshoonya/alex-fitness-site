@@ -487,20 +487,29 @@ export default {
 
       // Return 200 immediately so Square doesn't retry, then process in background
       const processingPromise = (async () => {
-        try {
-          // Event-level idempotency: skip if this exact event was already processed
-          // Prevents double-processing when Square retries, or when subscription.updated
-          // and payment.completed fire for the same renewal.
-          if (eventId) {
-            const processedKey = `webhook-event:${eventId}`;
-            const alreadyProcessed = await kvGet(processedKey, env);
-            if (alreadyProcessed) {
-              console.log(`Skipping duplicate event: ${eventId}`);
-              return;
-            }
-            await kvPut(processedKey, eventType, { expirationTtl: 7 * 24 * 3600 }, env);
+        // Two-phase idempotency:
+        //  1) At entry, check for a "done" marker (skip if prior success) or a
+        //     "processing" marker (skip if another invocation is in flight).
+        //     Write a short-lived "processing" marker so concurrent duplicates
+        //     collapse to a single run but a failed run expires quickly.
+        //  2) After all handlers complete WITHOUT throwing, promote to "done"
+        //     with a long TTL. On throw we leave the processing marker to
+        //     expire, letting Square retry the event.
+        const processedKey = eventId ? `webhook-event:${eventId}` : null;
+        if (processedKey) {
+          const state = await kvGet(processedKey, env);
+          if (state === 'done') {
+            console.log(`Skipping duplicate event: ${eventId}`);
+            return;
           }
+          if (state === 'processing') {
+            console.log(`Skipping in-flight duplicate event: ${eventId}`);
+            return;
+          }
+          await kvPut(processedKey, 'processing', { expirationTtl: 5 * 60 }, env);
+        }
 
+        try {
           // ---- BOOKING EVENTS → Trainerize calendar sync ----
           if (eventType === 'booking.created' || eventType === 'booking.updated') {
             const booking = event.data?.object?.booking;
@@ -516,33 +525,32 @@ export default {
           // ---- SUBSCRIPTION EVENTS ----
           if (eventType === 'subscription.updated') {
             const subscription = event.data?.object?.subscription;
-            if (!subscription) return;
-
-            const status = subscription.status;
-
-            if (status === 'ACTIVE') {
-              await handleSubscriptionRenewal(subscription, env);
-              await syncPaymentStatusToTrainerize(subscription.customer_id, 'paid', subscription, env);
-            } else if (status === 'CANCELED' || status === 'DEACTIVATED') {
-              await syncPaymentStatusToTrainerize(subscription.customer_id, 'canceled', subscription, env);
-            } else if (status === 'PAUSED' || status === 'SUSPENDED') {
-              await syncPaymentStatusToTrainerize(subscription.customer_id, 'paused', subscription, env);
-            } else if (status === 'PENDING') {
-              await syncPaymentStatusToTrainerize(subscription.customer_id, 'due', subscription, env);
+            if (subscription) {
+              const status = subscription.status;
+              if (status === 'ACTIVE') {
+                await handleSubscriptionRenewal(subscription, env);
+                await syncPaymentStatusToTrainerize(subscription.customer_id, 'paid', subscription, env);
+              } else if (status === 'CANCELED' || status === 'DEACTIVATED') {
+                await syncPaymentStatusToTrainerize(subscription.customer_id, 'canceled', subscription, env);
+              } else if (status === 'PAUSED' || status === 'SUSPENDED') {
+                await syncPaymentStatusToTrainerize(subscription.customer_id, 'paused', subscription, env);
+              } else if (status === 'PENDING') {
+                await syncPaymentStatusToTrainerize(subscription.customer_id, 'due', subscription, env);
+              }
             }
           }
 
           // ---- PAYMENT COMPLETED ----
           if (eventType === 'payment.completed') {
             const payment = event.data?.object?.payment;
-            if (!payment) return;
-
-            if (payment.subscription_id) {
-              await handleSubscriptionPayment(payment, env);
-            }
-            // Mark client as paid in Trainerize
-            if (payment.customer_id) {
-              await syncPaymentStatusToTrainerize(payment.customer_id, 'paid', payment, env);
+            if (payment) {
+              if (payment.subscription_id) {
+                await handleSubscriptionPayment(payment, env);
+              }
+              // Mark client as paid in Trainerize
+              if (payment.customer_id) {
+                await syncPaymentStatusToTrainerize(payment.customer_id, 'paid', payment, env);
+              }
             }
           }
 
@@ -599,6 +607,13 @@ export default {
                 await syncPaymentStatusToTrainerize(invoice.primary_recipient.customer_id, 'overdue', invoice, env);
               }
             }
+          }
+
+          // Promote to "done" only after every handler above finished without
+          // throwing. If any threw, the catch below logs and we let the
+          // short-lived "processing" marker expire so Square retries.
+          if (processedKey) {
+            await kvPut(processedKey, 'done', { expirationTtl: 7 * 24 * 3600 }, env);
           }
         } catch (error) {
           console.error('Webhook processing error:', error);

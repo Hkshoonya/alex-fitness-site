@@ -41,6 +41,18 @@ export function setAdminToken(token: string) {
   } catch { /* private mode */ }
 }
 
+/**
+ * Parse a 'YYYY-MM-DD' date string as local midnight instead of UTC midnight.
+ * `new Date('2026-04-15')` parses as UTC which renders as April 14 in US
+ * timezones — the date shown in the UI would be one day off from what the
+ * admin typed. This helper forces local interpretation.
+ */
+export function parseChallengeDate(iso: string): Date {
+  const match = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return new Date(iso);
+  return new Date(parseInt(match[1], 10), parseInt(match[2], 10) - 1, parseInt(match[3], 10));
+}
+
 function adminHeaders(): Record<string, string> {
   const token = getAdminToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };

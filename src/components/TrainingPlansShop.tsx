@@ -7,7 +7,7 @@ import {
   type TrainingPlan,
   type Trainer,
 } from '@/data/trainingPlans';
-import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus } from '@/api/squareCatalog';
+import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus, getLastCatalogError } from '@/api/squareCatalog';
 import { initializeAllPaymentMethods, createCardPayment, storePurchase, type PaymentMethods } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
 
@@ -42,6 +42,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastSynced, setLastSynced] = useState<string | null>(null);
+  const [catalogErrorMsg, setCatalogErrorMsg] = useState<string | null>(null);
   const [clientInfo, setClientInfo] = useState({ name: '', email: '', phone: '' });
 
   useEffect(() => {
@@ -68,6 +69,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     setPlans(data);
     const status = getCatalogCacheStatus();
     setLastSynced(status.lastFetched);
+    setCatalogErrorMsg(getLastCatalogError());
     setIsLoadingPlans(false);
   };
 
@@ -77,6 +79,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     setPlans(data);
     const status = getCatalogCacheStatus();
     setLastSynced(status.lastFetched);
+    setCatalogErrorMsg(getLastCatalogError());
     setIsRefreshing(false);
   };
 
@@ -358,6 +361,27 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                   Choose your plan based on the duration of commitment and number of sessions per week. More training time = more muscle adaptation and more calories burned!
                 </p>
               </div>
+
+              {/* Catalog error banner — surfaces when Square is unreachable
+                  so the coach/user knows the plans they're seeing are the
+                  hardcoded fallback, not live pricing. */}
+              {catalogErrorMsg && (
+                <div className="mb-6 bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-3 flex items-start gap-3">
+                  <div className="flex-1">
+                    <p className="text-amber-300 text-sm font-semibold">Live pricing unavailable</p>
+                    <p className="text-amber-200/70 text-xs mt-1">
+                      Couldn't reach Square to fetch the latest plan list. Showing cached/fallback plans — prices may be out of date.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleRefreshPlans}
+                    disabled={isRefreshing}
+                    className="text-amber-300 hover:text-amber-200 text-xs font-semibold disabled:opacity-50"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
 
               {/* Loading state */}
               {isLoadingPlans ? (

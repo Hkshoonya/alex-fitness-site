@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Trophy, Check, User, Mail, Phone, Loader2, CreditCard } from 'lucide-react';
-import { joinChallenge, type Challenge } from '@/api/challenges';
+import { joinChallenge, parseChallengeDate, type Challenge } from '@/api/challenges';
 import { initializeAllPaymentMethods, createGenericCardPayment } from '@/api/squarePayments';
 
 interface JoinChallengeModalProps {
@@ -162,7 +162,7 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
               </div>
               <p className="text-white font-semibold mb-1">Welcome to the challenge!</p>
               <p className="text-white/60 text-sm mb-4">
-                Alex will be in touch before {new Date(challenge.startDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })} with next steps.
+                Alex will be in touch before {parseChallengeDate(challenge.startDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })} with next steps.
               </p>
               {finalChallenge?.spotsLeft !== undefined && finalChallenge.spotsLeft !== null && (
                 <p className="text-xs text-white/40">{finalChallenge.spotsLeft} spots left for others</p>

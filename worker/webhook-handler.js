@@ -261,9 +261,12 @@ export default {
         /^refunds(\/|$)/,             // square: issue a refund
         /^payments\/[^/]+\/refund/,   // square: refund a specific payment
         /^bulk-/,                     // any bulk endpoint
-        /subscriptions\/.+\/(cancel|actions)/, // cancel/force subscription state
-        /^user\/(delete|remove)/,     // trainerize: delete client
-        /^account\/delete/,           // trainerize: delete account
+        /^subscriptions\/.+\/(cancel|actions)/, // cancel/force subscription state
+        // Trainerize: block user/delete and user/remove EXACTLY — not
+        // `user/deleteTag` or `user/removeTag` which the coach uses to manage
+        // client tags. Require end-of-path or slash after `delete`/`remove`.
+        /^user\/(delete|remove)(\/|$)/,
+        /^account\/delete(\/|$)/,     // trainerize: delete account
         // Square: block add/update/delete of coaches, but NOT /team-members/search
         // (which the frontend needs to populate the coach picker).
         /^team-members\/(?!search)[^/]+$/, // /team-members/{id} — mutation target
@@ -407,8 +410,10 @@ export default {
         endDate: data.endDate || data.end_date || '',
         duration: data.duration || '4 Weeks',
         prize: data.prize || null,
-        spots: data.spots || null,
-        spotsLeft: data.spots || null,
+        // Distinguish "zero spots" from "no spot limit" — `|| null` coerced
+        // a user-entered `0` into unlimited-mode, letting anyone join forever.
+        spots: typeof data.spots === 'number' ? data.spots : null,
+        spotsLeft: typeof data.spots === 'number' ? data.spots : null,
         price: data.price || 0,
         tags: data.tags || [],
         trainerizeId: data.trainerizeId || data.trainerize_id || null,
@@ -930,6 +935,20 @@ export default {
       const event = JSON.parse(body);
       const eventType = event.type;
       const eventId = event.event_id || '';
+      const createdAt = event.created_at;
+
+      // Replay-attack guard — even with valid HMAC, an attacker who
+      // captured a legit webhook could replay it after the 7-day event-id
+      // idempotency TTL expires. Reject anything older than 10 minutes.
+      if (createdAt) {
+        const skew = Date.now() - new Date(createdAt).getTime();
+        if (skew > 10 * 60 * 1000 || skew < -5 * 60 * 1000) {
+          await logEvent('error', 'webhook-stale-or-future', {
+            eventId, eventType, createdAt, skewMs: skew,
+          }, env);
+          return new Response('Stale webhook', { status: 400 });
+        }
+      }
 
       console.log(`Webhook received: ${eventType} (${eventId})`);
 
@@ -1234,19 +1253,49 @@ async function updateTrainerizeCredits(email, planName, credits, env) {
 
     const validUntil = getNextBillingDate();
 
-    // Store credits in KV (source of truth)
-    const creditData = {
-      userId,
-      email,
-      total: credits.sessions,
-      remaining: credits.sessions,
-      duration: credits.duration,
-      planName,
-      validUntil,
-      updatedAt: new Date().toISOString(),
-      deductions: [],
-    };
-    await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
+    // Take the credits lock so a concurrent cron deduction doesn't race
+    // with this renewal write.
+    const lockKey = `lock:credits:${userId}`;
+    if (await kvGet(lockKey, env)) {
+      console.log(`Credit renewal skipped (locked) for ${email} — will retry next renewal event`);
+      return;
+    }
+    await kvPut(lockKey, Date.now().toString(), { expirationTtl: 60 }, env);
+
+    try {
+      // Preserve deduction history across renewals — old code reset
+      // deductions: [] on every renewal, losing the audit trail AND
+      // allowing the 10-min reason-idempotency in deductSessionCredit to
+      // stop catching duplicates that straddled the renewal boundary.
+      let priorDeductions = [];
+      try {
+        const existingRaw = await kvGet(`credits:${userId}`, env);
+        if (existingRaw) {
+          const existing = JSON.parse(existingRaw);
+          if (Array.isArray(existing?.deductions)) {
+            // Only keep the last 100 entries — unbounded history would
+            // eventually blow past KV value size limits.
+            priorDeductions = existing.deductions.slice(-100);
+          }
+        }
+      } catch { /* best-effort history preservation */ }
+
+      const creditData = {
+        userId,
+        email,
+        total: credits.sessions,
+        remaining: credits.sessions,
+        duration: credits.duration,
+        planName,
+        validUntil,
+        updatedAt: new Date().toISOString(),
+        deductions: priorDeductions,
+        lastRenewalAt: new Date().toISOString(),
+      };
+      await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
+    } finally {
+      try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* best-effort */ }
+    }
 
     // Remove old credit tags, set new one
     await clearCreditTags(userId, env);

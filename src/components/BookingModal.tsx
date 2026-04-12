@@ -38,6 +38,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLoadingSlots, setIsLoadingSlots] = useState(false);
   const [meetDetails, setMeetDetails] = useState<MeetingDetails | null>(null);
+  const [meetFallbackMessage, setMeetFallbackMessage] = useState<string>('');
   const [bookingData, setBookingData] = useState({ name: '', email: '', phone: '', goals: '' });
   const [needsConfirmation, setNeedsConfirmation] = useState(false);
   const [bookingError, setBookingError] = useState<string | null>(null);
@@ -86,6 +87,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     setTimeSlots([]);
     setCurrentWeekOffset(0);
     setMeetDetails(null);
+    setMeetFallbackMessage('');
     setBookingData({ name: '', email: '', phone: '', goals: '' });
     setBookingError(null);
     setIsSubmitting(false);
@@ -124,7 +126,10 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     const requestId = ++slotsRequestIdRef.current;
     setIsLoadingSlots(true);
     const coachId = mode === 'consultation' ? DEFAULT_COACH : (selectedCoach?.id || DEFAULT_COACH);
-    const dateStr = date.toISOString().split('T')[0];
+    // Use LOCAL date components, not toISOString() (which converts to UTC).
+    // A US user clicking "Friday" late at night was sending Saturday's UTC
+    // date to the worker and getting the wrong day's slots.
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     try {
       const avail = await getAvailability(dateStr, coachId, sessionDuration);
       if (requestId !== slotsRequestIdRef.current) return;
@@ -176,6 +181,14 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
       if (meetResult.success && meetResult.meeting) {
         setMeetDetails(meetResult.meeting);
         meetLink = meetResult.meeting.meetLink;
+      } else {
+        // Google Meet generation failed (worker OAuth not yet configured,
+        // API error, etc.). Surface on the success screen so the user
+        // knows Alex will send a link manually instead of wondering
+        // where it is.
+        setMeetFallbackMessage(
+          "We couldn't auto-generate a Meet link — Alex will send one to your email before the session."
+        );
       }
     }
 
@@ -583,7 +596,12 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
               {sessionType === 'virtual' && meetDetails && meetDetails.meetLink && (
                 <p className="text-white/50 text-sm mb-2">Meeting link and calendar invite sent to your email.</p>
               )}
-              {sessionType === 'virtual' && (!meetDetails || !meetDetails.meetLink) && (
+              {sessionType === 'virtual' && meetFallbackMessage && (!meetDetails || !meetDetails.meetLink) && (
+                <p className="text-amber-300/80 text-sm mb-2 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+                  {meetFallbackMessage}
+                </p>
+              )}
+              {sessionType === 'virtual' && !meetFallbackMessage && (!meetDetails || !meetDetails.meetLink) && (
                 <p className="text-white/50 text-sm mb-2">Coach Alex will send you the meeting link via message.</p>
               )}
               {sessionType === 'in-studio' && (

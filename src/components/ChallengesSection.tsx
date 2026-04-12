@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Trophy, Calendar, Users, Tag, Clock, ChevronRight, Flame, Plus, X, Check, Lock } from 'lucide-react';
-import { getActiveChallenges, addChallenge, removeChallenge, seedDemoChallenges, setAdminToken, getAdminToken, type Challenge } from '@/api/challenges';
+import { getActiveChallenges, addChallenge, removeChallenge, seedDemoChallenges, setAdminToken, getAdminToken, parseChallengeDate, type Challenge } from '@/api/challenges';
 import { asset } from '@/lib/assets';
 import JoinChallengeModal from '@/components/JoinChallengeModal';
 
@@ -141,7 +141,7 @@ function ChallengeCard({ challenge, onJoin, showAdmin, onDelete }: {
   onDelete: () => void;
 }) {
   const isActive = challenge.status === 'active';
-  const daysUntilStart = Math.ceil((new Date(challenge.startDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  const daysUntilStart = Math.ceil((parseChallengeDate(challenge.startDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
 
   return (
     <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl overflow-hidden group hover:border-[#FF4D2E]/20 transition-all">
@@ -184,7 +184,7 @@ function ChallengeCard({ challenge, onJoin, showAdmin, onDelete }: {
             <Clock size={13} /> {challenge.duration}
           </span>
           <span className="flex items-center gap-1.5 text-white/40 text-xs">
-            <Calendar size={13} /> {new Date(challenge.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            <Calendar size={13} /> {parseChallengeDate(challenge.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
           </span>
           {challenge.spotsLeft !== undefined && (
             <span className={`flex items-center gap-1.5 text-xs ${

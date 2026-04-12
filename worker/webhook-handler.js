@@ -802,19 +802,35 @@ async function updateTrainerizeCredits(email, planName, credits, env) {
 async function deductSessionCredit(userId, reason, env) {
   const lockKey = `lock:credits:${userId}`;
   try {
-    // Simple KV lock to prevent concurrent read-modify-write race
+    // Cloudflare KV has no atomic CAS, so we use a short-held lock plus an
+    // idempotency check: if a deduction with THIS exact reason was already
+    // recorded in the last 10 minutes, assume a concurrent caller handled it
+    // and skip. This prevents double-decrement even if the lock races.
     const locked = await kvGet(lockKey, env);
     if (locked) {
       console.log(`Credit deduction skipped (locked) for user ${userId} — will retry next cron`);
       return;
     }
-    await kvPut(lockKey, Date.now().toString(), { expirationTtl: 15 }, env);
+    // 60s TTL gives headroom for slow KV writes. Lock is released earlier (before
+    // the Trainerize calls) so the hold time is short in practice.
+    await kvPut(lockKey, Date.now().toString(), { expirationTtl: 60 }, env);
 
     const raw = await kvGet(`credits:${userId}`, env);
     if (!raw) { await env.CHALLENGES_KV.delete(lockKey); return; }
 
     let creditData;
     try { creditData = JSON.parse(raw); } catch { await env.CHALLENGES_KV.delete(lockKey); return; }
+
+    // Idempotency: if this same reason was already recorded recently, skip.
+    const tenMinAgo = Date.now() - 10 * 60 * 1000;
+    const alreadyDeducted = (creditData.deductions || []).some(d =>
+      d.reason === reason && new Date(d.date).getTime() > tenMinAgo
+    );
+    if (alreadyDeducted) {
+      console.log(`Credit deduction skipped (already counted) for user ${userId}: ${reason}`);
+      await env.CHALLENGES_KV.delete(lockKey);
+      return;
+    }
 
     if (creditData.remaining <= 0) {
       console.log(`No credits remaining for user ${userId}`);

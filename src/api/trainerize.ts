@@ -96,7 +96,7 @@ function isDirectApiConfigured(): boolean {
   return !!(WORKER_URL || (TRAINERIZE_TRAINER_GROUP_ID && TRAINERIZE_API_TOKEN));
 }
 
-function apiHeaders() {
+function apiHeaders(): Record<string, string> {
   // When using the worker proxy, don't send Authorization — the worker adds it server-side.
   if (WORKER_URL) {
     return { 'Content-Type': 'application/json' };

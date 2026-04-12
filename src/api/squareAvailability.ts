@@ -88,20 +88,6 @@ const FALLBACK_TEAM: TeamMember[] = [
   },
 ];
 
-// Business hours for fallback
-// Business hours: 6:00 AM – 8:30 PM EST, every day (fallback only — worker is primary)
-const BUSINESS_HOURS: Record<number, { open: string; close: string } | null> = {
-  0: { open: '06:00', close: '20:30' }, // Sunday
-  1: { open: '06:00', close: '20:30' },
-  2: { open: '06:00', close: '20:30' },
-  3: { open: '06:00', close: '20:30' },
-  4: { open: '06:00', close: '20:30' },
-  5: { open: '06:00', close: '20:30' },
-  6: { open: '06:00', close: '20:30' }, // Saturday
-};
-
-const DEFAULT_SLOT_INTERVAL = 30; // generate slots every 30 min
-
 // Trainerize sync — imported lazily to avoid circular deps
 import { syncNewClient, syncBooking } from '@/api/trainerize';
 
@@ -374,7 +360,7 @@ async function fetchAvailabilityFromSquare(
 /**
  * Generate fallback availability (mock) for when Square isn't configured
  */
-function generateFallbackAvailability(date: string, teamMemberId: string, duration: number = 60): DayAvailability {
+function generateFallbackAvailability(date: string, teamMemberId: string, _duration: number = 60): DayAvailability {
   // Fallback when both worker and Square API are unavailable.
   // Returns empty slots — never show fake/random availability in production.
   // The UI will display "No availability — try another date" for empty slots.

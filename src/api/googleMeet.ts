@@ -59,7 +59,7 @@ export async function createMeetEvent(params: {
 /**
  * Mock meeting for demo mode
  */
-async function createMockMeeting(params: {
+async function createMockMeeting(_params: {
   startAt: string;
   attendeeEmail: string;
   attendeeName: string;

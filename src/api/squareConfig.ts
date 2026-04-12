@@ -60,7 +60,7 @@ export function getSquareConfig() {
   };
 }
 
-export function getSquareHeaders() {
+export function getSquareHeaders(): Record<string, string> {
   // When using the worker proxy, don't send Authorization — the worker adds it server-side.
   // This avoids exposing the access token to the browser and prevents CORS preflight issues.
   if (WORKER_URL) {

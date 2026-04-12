@@ -22,10 +22,14 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
       document.body.style.overflow = 'hidden';
     } else {
       document.body.style.overflow = 'unset';
-      // Reset on close so reopen is clean
+      // Reset ALL state on close — stale name/email/phone across opens would
+      // leak PII on shared devices. Match BookingModal's resetState pattern.
       setStep('form');
       setErrorMsg('');
       setFinalChallenge(null);
+      setName('');
+      setEmail('');
+      setPhone('');
     }
     return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);

@@ -207,19 +207,32 @@ export default {
     const origin = request.headers.get('Origin') || '';
     const referer = request.headers.get('Referer') || '';
 
-    // Allowed origins for API proxy access
+    // Allowed origins for API proxy access. When we cut over to the custom
+    // domain, add it here (see .planning / WORKER_SECRETS note).
     const ALLOWED_ORIGINS = [
       'https://hkshoonya.github.io',
+      'https://alexsfitness.com',
+      'https://www.alexsfitness.com',
       'http://localhost:5173',
       'http://localhost:5174',
       'http://localhost:3000',
     ];
-    const isAllowedOrigin = ALLOWED_ORIGINS.some(o => origin.startsWith(o) || referer.startsWith(o));
+    // Extract the origin from Referer (if present) so we're comparing full
+    // origins, not string prefixes. startsWith() would've matched a spoofed
+    // Origin: `https://hkshoonya.github.io.evil.com` — exact equality on the
+    // parsed origin kills that bypass.
+    let refererOrigin = '';
+    if (referer) {
+      try { refererOrigin = new URL(referer).origin; } catch { /* ignore */ }
+    }
+    const isAllowedOrigin = ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes(refererOrigin);
 
     const corsHeaders = {
+      // Reflect the client's origin ONLY if it's in the allowlist — never
+      // echo an attacker-controlled origin.
       'Access-Control-Allow-Origin': isAllowedOrigin ? origin : ALLOWED_ORIGINS[0],
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Square-Version',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Square-Version, X-Admin-Token',
     };
 
     // CORS preflight
@@ -425,10 +438,28 @@ export default {
       try { body = await request.json(); }
       catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }); }
 
-      const email = (body.email || '').trim().toLowerCase();
-      const name = (body.name || '').trim();
-      if (!email || !name) {
-        return new Response(JSON.stringify({ error: 'Name and email are required' }), {
+      // Coerce to string — attackers can POST `{"email": {}}` or arrays;
+      // `.trim()` on a non-string would throw uncaught inside the handler.
+      const rawEmail = typeof body.email === 'string' ? body.email : '';
+      const rawName = typeof body.name === 'string' ? body.name : '';
+      const rawPhone = typeof body.phone === 'string' ? body.phone : '';
+      const email = rawEmail.trim().toLowerCase();
+      const name = rawName.trim();
+      const phone = rawPhone.trim();
+
+      // Length caps: email per RFC 5321 (~320 total), but KV keys have their
+      // own limit and we prefix the email into the dedup key — so keep it
+      // well under the 512-byte KV key cap. Name limited so nobody pastes a
+      // novel into the deductions/join records.
+      if (!email || !name || email.length > 254 || name.length > 200 || phone.length > 40) {
+        return new Response(JSON.stringify({ error: 'Name and email are required (email ≤254 chars, name ≤200)' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // Very loose email shape check — we're not doing full RFC validation,
+      // just blocking obvious garbage that would pollute the dedup key.
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return new Response(JSON.stringify({ error: 'Invalid email format' }), {
           status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -467,7 +498,7 @@ export default {
       all[idx] = challenge;
       await kvPut('challenges', JSON.stringify(all), {}, env);
       await kvPut(joinKey, JSON.stringify({
-        email, name, phone: body.phone || '', joinedAt: new Date().toISOString(),
+        email, name, phone, joinedAt: new Date().toISOString(),
       }), { expirationTtl: 365 * 24 * 3600 }, env);
 
       // Best-effort: if the challenge has a Trainerize group link, tag the
@@ -1501,12 +1532,21 @@ async function syncBookingToTrainerize(booking, env) {
   const aptLinkKey = `tz-apt:${booking.id}`;
 
   if (status === 'ACCEPTED' || status === 'PENDING') {
+    // If a cancel already fired for this booking (CANCEL-before-CREATE race,
+    // or rapid book→cancel sequence), we wrote a 'deleted' sentinel. Respect
+    // it — don't resurrect a cancelled booking into Trainerize.
+    const existingAptId = await kvGet(aptLinkKey, env);
+    if (existingAptId === 'deleted') {
+      await logEvent('sync', 'booking-skip-resurrect', {
+        bookingId: booking.id, email, status,
+      }, env);
+      console.log(`Booking ${booking.id} has 'deleted' sentinel — skipping Trainerize create to avoid ghost apt`);
+      return;
+    }
     // If a prior Trainerize appt already exists for this Square booking
     // (e.g., booking.updated fires with a new start_at after a reschedule),
-    // delete it before creating the replacement. Skip if the value is the
-    // sentinel 'deleted' — means a cancel handler already removed it.
-    const existingAptId = await kvGet(aptLinkKey, env);
-    if (existingAptId && existingAptId !== 'deleted' && /^\d+$/.test(existingAptId)) {
+    // delete it before creating the replacement.
+    if (existingAptId && /^\d+$/.test(existingAptId)) {
       try {
         await trainerizePost('/appointment/delete', { id: Number(existingAptId) }, env);
         console.log(`Reschedule cleanup: deleted Trainerize apt ${existingAptId} for Square booking ${booking.id}`);
@@ -1587,10 +1627,13 @@ async function syncBookingToTrainerize(booking, env) {
       } catch (e) {
         console.error(`Failed to delete Trainerize apt ${linkedAptId} on cancel:`, e);
       }
-      // Sentinel: keeps repeat-cancel webhooks from calling /appointment/delete
-      // on a stale id. Expires after 7 days.
-      await kvPut(aptLinkKey, 'deleted', { expirationTtl: 7 * 24 * 3600 }, env);
     }
+    // ALWAYS write the 'deleted' sentinel on cancel — even if no linked
+    // apt existed yet. This handles the out-of-order case where CANCEL
+    // arrives before CREATE: without the sentinel, a subsequent CREATE
+    // would resurrect the cancelled booking as a ghost Trainerize appt.
+    // Short TTL so we don't leave orphan sentinels forever.
+    await kvPut(aptLinkKey, 'deleted', { expirationTtl: 7 * 24 * 3600 }, env);
     // Notify client of cancellation or decline
     if (userId) {
       const cancelledBy = status === 'CANCELLED_BY_CUSTOMER' ? 'you'

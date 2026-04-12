@@ -157,17 +157,38 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
       localStorage.setItem('bookings', JSON.stringify([...existing, ...newBookings]));
     } catch { /* quota / private mode */ }
 
-    // Decrement session credits against the purchase that matches THIS
-    // plan/trainer, not by array index. Prevents draining sessions from an
-    // unrelated prior purchase when the user has multiple active plans.
+    // Decrement ONE session credit per booking, draining each matching
+    // purchase in order (oldest first → burns down the nearest-expiring
+    // plan). Old code called useSession at most `matching.length` times
+    // regardless of how many bookings were made, silently leaking credits
+    // when selectedDates.length > matching.length.
     const purchases = getPurchases();
     const matching = purchases.filter((p: any) =>
       p.sessionsRemaining > 0 &&
       (!plan?.id || p.planId === plan.id) &&
       (!trainer?.id || p.trainerId === trainer.id)
     );
-    for (let i = 0; i < selectedDates.length && i < matching.length; i++) {
-      useSession(matching[i].id);
+    // Work with a mutable copy of sessionsRemaining so we walk through
+    // multi-session purchases correctly without re-reading localStorage
+    // after each useSession call.
+    let bookingIndex = 0;
+    for (const purchase of matching) {
+      let remaining = purchase.sessionsRemaining;
+      while (remaining > 0 && bookingIndex < selectedDates.length) {
+        useSession(purchase.id);
+        remaining--;
+        bookingIndex++;
+      }
+      if (bookingIndex >= selectedDates.length) break;
+    }
+    if (bookingIndex < selectedDates.length) {
+      // User booked more sessions than they have credits for. This
+      // shouldn't happen in the UI (the button should've been disabled),
+      // but log it so we notice if a path sneaks through.
+      console.warn(
+        `PostPurchaseBooking: ${selectedDates.length - bookingIndex} bookings submitted without matching credits`,
+        { plan: plan?.id, trainer: trainer?.id }
+      );
     }
 
     setIsSubmitting(false);

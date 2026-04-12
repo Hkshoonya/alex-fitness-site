@@ -233,9 +233,18 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
 
   if (!isOpen) return null;
 
+  // The useEffect on [isOpen] only resets mode/step on reopen — name, email,
+  // phone, goals, selected date/time/coach, and meet details all persist.
+  // Wrap the close handlers so they reset the form when the user dismisses
+  // the modal mid-flow (backdrop click, X button).
+  const handleClose = () => {
+    resetState();
+    onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={handleClose} />
 
       <div className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden">
         {/* Header */}
@@ -244,7 +253,7 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
             <h2 className="text-2xl font-display font-bold text-white">{getTitle()}</h2>
             {getSubtitle() && <p className="text-white/60 text-sm mt-1">{getSubtitle()}</p>}
           </div>
-          <button onClick={onClose} className="text-white/60 hover:text-white transition-colors">
+          <button onClick={handleClose} className="text-white/60 hover:text-white transition-colors">
             <X size={24} />
           </button>
         </div>

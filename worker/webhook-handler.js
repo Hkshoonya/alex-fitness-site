@@ -1791,7 +1791,7 @@ const SESSION_CATALOG = {
  * Create and send a Square invoice for a completed session.
  * Called by the cron when a past session has no credit balance.
  */
-async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, durationMin, env) {
+async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, durationMin, env, aptId) {
   const catalog = SESSION_CATALOG[durationMin] || SESSION_CATALOG[60];
   const locationId = 'LD0SGZXT6ZSSD';
 
@@ -1805,13 +1805,17 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
     return false;
   }
 
+  // Idempotency suffix must include the appointment ID so two sessions on the
+  // same day don't collide and share a single invoice.
+  const idemSuffix = aptId ? `${sessionDate}-${aptId}` : sessionDate;
+
   try {
     // 1. Create Square order
     const orderResp = await fetch(`${getSquareApiBase(env)}/orders`, {
       method: 'POST',
       headers: getSquareHeaders(env),
       body: JSON.stringify({
-        idempotency_key: `auto-invoice-${attendeeUserId}-${sessionDate}`,
+        idempotency_key: `auto-invoice-${attendeeUserId}-${idemSuffix}`,
         order: {
           location_id: locationId,
           customer_id: squareCustomerId,
@@ -1836,7 +1840,7 @@ async function createSessionInvoice(attendeeUserId, attendeeName, sessionDate, d
       method: 'POST',
       headers: getSquareHeaders(env),
       body: JSON.stringify({
-        idempotency_key: `inv-${attendeeUserId}-${sessionDate}`,
+        idempotency_key: `inv-${attendeeUserId}-${idemSuffix}`,
         invoice: {
           location_id: locationId,
           order_id: orderId,
@@ -2156,7 +2160,7 @@ async function deductCreditsForCompletedSessions(env) {
         if (!hasCredits) {
           // No credits → auto-invoice this session
           const attName = `${attendee.firstName || ''} ${attendee.lastName || ''}`.trim();
-          const invoiced = await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env);
+          const invoiced = await createSessionInvoice(attendee.userID, attName, sessionDate, durationMin, env, apt.id);
           if (invoiced) {
             await kvPut(attCountedKey, 'invoiced', { expirationTtl: 90 * 24 * 3600 }, env);
           }

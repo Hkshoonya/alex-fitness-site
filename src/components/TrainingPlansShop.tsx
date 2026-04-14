@@ -56,10 +56,23 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
 
-  // Initialize Square payment SDK when entering payment step (card-container must be in DOM)
+  // Initialize Square payment SDK when entering payment step; tear it down
+  // when leaving. Without the teardown, backing out of the payment step and
+  // returning unmounts+remounts the #card-container div while leaving the
+  // cached cardElement attached to the old (detached) node — the card field
+  // silently goes dead.
   useEffect(() => {
     if (step === 'payment' && !cardElement) {
       initializeSquareSdk();
+      return;
+    }
+    if (step !== 'payment' && cardElement) {
+      try { cardElement.destroy?.(); } catch { /* best-effort */ }
+      try { paymentMethods?.applePay?.destroy?.(); } catch { /* best-effort */ }
+      try { paymentMethods?.googlePay?.destroy?.(); } catch { /* best-effort */ }
+      try { paymentMethods?.cashAppPay?.destroy?.(); } catch { /* best-effort */ }
+      setCardElement(null);
+      setPaymentMethods(null);
     }
   }, [step]);
 
@@ -108,6 +121,18 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   };
 
   const resetState = () => {
+    // Tear down the Square Web Payments SDK elements. Without this,
+    // `cardElement` state survives close/reopen but points at a detached
+    // DOM node (the previous `#card-container` div). Next time the user
+    // reaches the payment step, the `!cardElement` guard in the useEffect
+    // below skips re-initialization and the card field appears dead.
+    // Also affects digital wallet buttons (Apple/Google/Cash App Pay).
+    try { cardElement?.destroy?.(); } catch { /* SDK may already be gone */ }
+    try { paymentMethods?.applePay?.destroy?.(); } catch { /* best-effort */ }
+    try { paymentMethods?.googlePay?.destroy?.(); } catch { /* best-effort */ }
+    try { paymentMethods?.cashAppPay?.destroy?.(); } catch { /* best-effort */ }
+    setCardElement(null);
+    setPaymentMethods(null);
     setSelectedPlan(null);
     setSelectedFrequency(0);
     setSelectedTrainer(trainers[0]);

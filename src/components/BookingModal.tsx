@@ -163,55 +163,66 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     if (!selectedStartAt) return;
     setIsSubmitting(true);
 
-    const coachId = mode === 'consultation' ? DEFAULT_COACH : (selectedCoach?.id || DEFAULT_COACH);
-    let meetLink = '';
+    try {
+      const coachId = mode === 'consultation' ? DEFAULT_COACH : (selectedCoach?.id || DEFAULT_COACH);
+      let meetLink = '';
 
-    if (sessionType === 'virtual') {
-      const title = mode === 'consultation'
-        ? `Free Consultation — ${bookingData.name}`
-        : `${sessionDuration} Min Session — ${bookingData.name}`;
-      const meetResult = await createMeetEvent({
-        title,
-        startAt: selectedStartAt,
-        durationMinutes: sessionDuration,
-        attendeeEmail: bookingData.email,
-        attendeeName: bookingData.name,
-        description: `${mode === 'consultation' ? 'Free consultation' : 'Training session'} with Alex Davis Fitness\n\nGoals: ${bookingData.goals || 'Not specified'}`,
-      });
-      if (meetResult.success && meetResult.meeting) {
-        setMeetDetails(meetResult.meeting);
-        meetLink = meetResult.meeting.meetLink;
-      } else {
-        // Google Meet generation failed (worker OAuth not yet configured,
-        // API error, etc.). Surface on the success screen so the user
-        // knows Alex will send a link manually instead of wondering
-        // where it is.
-        setMeetFallbackMessage(
-          "We couldn't auto-generate a Meet link — Alex will send one to your email before the session."
-        );
+      if (sessionType === 'virtual') {
+        const title = mode === 'consultation'
+          ? `Free Consultation — ${bookingData.name}`
+          : `${sessionDuration} Min Session — ${bookingData.name}`;
+        const meetResult = await createMeetEvent({
+          title,
+          startAt: selectedStartAt,
+          durationMinutes: sessionDuration,
+          attendeeEmail: bookingData.email,
+          attendeeName: bookingData.name,
+          description: `${mode === 'consultation' ? 'Free consultation' : 'Training session'} with Alex Davis Fitness\n\nGoals: ${bookingData.goals || 'Not specified'}`,
+        });
+        if (meetResult.success && meetResult.meeting) {
+          setMeetDetails(meetResult.meeting);
+          meetLink = meetResult.meeting.meetLink;
+        } else {
+          // Google Meet generation failed (worker OAuth not yet configured,
+          // API error, etc.). Surface on the success screen so the user
+          // knows Alex will send a link manually instead of wondering
+          // where it is.
+          setMeetFallbackMessage(
+            "We couldn't auto-generate a Meet link — Alex will send one to your email before the session."
+          );
+        }
       }
-    }
 
-    const label = mode === 'consultation' ? 'Free Consultation' : `${sessionDuration} Min Session`;
-    // Only include "Meet: <url>" when we actually have a link. When createMeetEvent
-    // fails, meetLink is '' — leaving the prefix in would render an ugly
-    // "Meet: \n…" in Square's customer_note.
-    const goalsPrefix = sessionType === 'virtual'
-      ? (meetLink ? `[Virtual][${label}] Meet: ${meetLink}` : `[Virtual][${label}]`)
-      : `[In-Studio][${label}]`;
-    const result = await createBooking(coachId, selectedStartAt, sessionDuration, {
-      name: bookingData.name,
-      email: bookingData.email,
-      phone: bookingData.phone,
-      goals: `${goalsPrefix}${bookingData.goals ? `\n${bookingData.goals}` : ''}`,
-    });
+      const label = mode === 'consultation' ? 'Free Consultation' : `${sessionDuration} Min Session`;
+      // Only include "Meet: <url>" when we actually have a link. When createMeetEvent
+      // fails, meetLink is '' — leaving the prefix in would render an ugly
+      // "Meet: \n…" in Square's customer_note.
+      const goalsPrefix = sessionType === 'virtual'
+        ? (meetLink ? `[Virtual][${label}] Meet: ${meetLink}` : `[Virtual][${label}]`)
+        : `[In-Studio][${label}]`;
+      const result = await createBooking(coachId, selectedStartAt, sessionDuration, {
+        name: bookingData.name,
+        email: bookingData.email,
+        phone: bookingData.phone,
+        goals: `${goalsPrefix}${bookingData.goals ? `\n${bookingData.goals}` : ''}`,
+      });
 
-    setIsSubmitting(false);
-    if (result.success) {
-      setBookingError(null);
-      setStep('success');
-    } else {
-      setBookingError(result.error || 'Booking failed. Please try again or contact us directly.');
+      if (result.success) {
+        setBookingError(null);
+        setStep('success');
+      } else {
+        setBookingError(result.error || 'Booking failed. Please try again or contact us directly.');
+      }
+    } catch (err) {
+      // Unexpected throw (network failure, CORS, malformed response). Without
+      // this catch the outer await bubbles uncaught, isSubmitting stays true,
+      // and the user sees a locked submit button forever.
+      console.error('Booking submit failed:', err);
+      setBookingError(
+        err instanceof Error ? err.message : 'Booking failed. Please try again or contact us directly.'
+      );
+    } finally {
+      setIsSubmitting(false);
     }
   };
 

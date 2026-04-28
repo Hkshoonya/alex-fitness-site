@@ -466,16 +466,16 @@ export async function getWeekAvailability(
 }
 
 /**
- * Upsert a Square Customer by email. Returns the customer_id.
- * Square Bookings require an existing customer record — without one, the
- * Bookings API rejects with {detail:"not found", field:"customer_id"}.
+ * Upsert a Square Customer by email.
+ * Returns { customerId, isNew } so the booking flow can mark new vs
+ * returning clients in the customer_note (visible to coach in Square UI).
  *
  * Search first (no side effects). Create only if not found. Both calls go
  * through the worker proxy which holds the Square access token.
  */
 async function upsertSquareCustomer(info: {
   name: string; email: string; phone?: string;
-}): Promise<string> {
+}): Promise<{ customerId: string; isNew: boolean }> {
   // 1. Search by email
   const searchResp = await fetch(`${SQUARE_API_BASE}/customers/search`, {
     method: 'POST',
@@ -488,7 +488,7 @@ async function upsertSquareCustomer(info: {
   if (searchResp.ok) {
     const sd = await searchResp.json();
     const found = sd.customers?.[0]?.id;
-    if (found) return found;
+    if (found) return { customerId: found, isNew: false };
   }
 
   // 2. Create
@@ -513,7 +513,7 @@ async function upsertSquareCustomer(info: {
   const cd = await createResp.json();
   const customerId = cd.customer?.id;
   if (!customerId) throw new Error('Customer created but no id returned');
-  return customerId;
+  return { customerId, isNew: true };
 }
 
 // Module-level cache so repeated bookings don't re-fetch the same catalog
@@ -597,7 +597,9 @@ export async function createBooking(
     // the booking object). Upsert by email FIRST — search, create-if-missing,
     // then use that customerId. Without this step Square rejects with
     // {detail: "not found", field: "customer_id"}.
-    const customerId = await upsertSquareCustomer(customerInfo);
+    // isNew tells us whether this is a brand-new client or a returning one,
+    // surfaced into the customer_note so the coach sees it in Square's UI.
+    const { customerId, isNew: isNewClient } = await upsertSquareCustomer(customerInfo);
 
     // Square also requires service_variation_version on each appointment
     // segment (optimistic concurrency check against the catalog). Fetch the
@@ -611,6 +613,17 @@ export async function createBooking(
 
     // Idempotency key prevents duplicate bookings from double-clicks or retries
     const idempotencyKey = `booking-${startAt}-${customerInfo.email}-${duration}`;
+
+    // Customer-status marker — first line of the note so it's the first
+    // thing Alex sees on his Square calendar / mobile booking view.
+    const clientStatusTag = isNewClient ? '[NEW CLIENT]' : '[RETURNING CLIENT]';
+    const customerNote = [
+      clientStatusTag,
+      `Name: ${customerInfo.name}`,
+      `Email: ${customerInfo.email}`,
+      `Phone: ${customerInfo.phone}`,
+      `Goals: ${customerInfo.goals || 'Not specified'}`,
+    ].join('\n');
 
     const response = await fetch(`${SQUARE_API_BASE}/bookings`, {
       method: 'POST',
@@ -627,7 +640,10 @@ export async function createBooking(
             service_variation_id: finalServiceVariationId || undefined,
             service_variation_version: serviceVariationVersion,
           }],
-          customer_note: `Name: ${customerInfo.name}\nEmail: ${customerInfo.email}\nPhone: ${customerInfo.phone}\nGoals: ${customerInfo.goals || 'Not specified'}`,
+          customer_note: customerNote,
+          // seller_note is also visible to Alex but not the customer — use it
+          // for an at-a-glance flag on the booking card itself.
+          seller_note: clientStatusTag,
         },
       }),
     });

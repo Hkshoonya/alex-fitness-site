@@ -1622,30 +1622,43 @@ export default {
             }
           }
 
-          // ---- PAYMENT COMPLETED ----
-          if (eventType === 'payment.completed') {
+          // ---- PAYMENT EVENTS ----
+          // Modern Square API consolidates payment lifecycle into payment.created
+          // (first emit) and payment.updated (status transitions). The legacy
+          // payment.completed / payment.failed events were retired but the
+          // handlers below cover both names defensively. Branch on
+          // payment.status to decide whether it's a success or failure.
+          if (
+            eventType === 'payment.completed' ||
+            eventType === 'payment.failed' ||
+            eventType === 'payment.created' ||
+            eventType === 'payment.updated'
+          ) {
             const payment = event.data?.object?.payment;
-            if (payment) {
+            const status = payment?.status; // COMPLETED | APPROVED | FAILED | CANCELED | PENDING
+            if (payment && (status === 'COMPLETED' || status === 'APPROVED')) {
               if (payment.subscription_id) {
                 await handleSubscriptionPayment(payment, env);
               }
-              // Mark client as paid in Trainerize
               if (payment.customer_id) {
                 await syncPaymentStatusToTrainerize(payment.customer_id, 'paid', payment, env);
               }
-            }
-          }
-
-          // ---- PAYMENT FAILED ----
-          if (eventType === 'payment.failed') {
-            const payment = event.data?.object?.payment;
-            if (payment?.customer_id) {
-              await syncPaymentStatusToTrainerize(payment.customer_id, 'unpaid', payment, env);
+            } else if (payment && (status === 'FAILED' || status === 'CANCELED')) {
+              if (payment.customer_id) {
+                await syncPaymentStatusToTrainerize(payment.customer_id, 'unpaid', payment, env);
+              }
             }
           }
 
           // ---- ORDER COMPLETED → credit assignment for session credit purchases ----
-          if (eventType === 'order.fulfilled' || eventType === 'order.updated') {
+          // Modern: order.fulfillment.updated fires when fulfillment state changes.
+          // order.updated fires for general order changes (incl. state -> COMPLETED).
+          // Legacy order.fulfilled is kept for back-compat if Square ever resurrects it.
+          if (
+            eventType === 'order.fulfilled' ||
+            eventType === 'order.updated' ||
+            eventType === 'order.fulfillment.updated'
+          ) {
             const order = event.data?.object?.order;
             if (order?.state === 'COMPLETED' && order?.customer_id) {
               await handleCreditPurchaseOrder(order, env);
@@ -1687,7 +1700,14 @@ export default {
             }
           }
 
-          if (eventType === 'invoice.payment_failed' || eventType === 'invoice.updated') {
+          // Modern Square uses `invoice.scheduled_charge_failed` for auto-charge
+          // failures; legacy `invoice.payment_failed` was retired. invoice.updated
+          // catches status transitions (UNPAID, PAYMENT_PENDING, OVERDUE).
+          if (
+            eventType === 'invoice.payment_failed' ||
+            eventType === 'invoice.scheduled_charge_failed' ||
+            eventType === 'invoice.updated'
+          ) {
             const invoice = event.data?.object?.invoice;
             if (invoice?.primary_recipient?.customer_id && isTrainingInvoice(invoice)) {
               const invStatus = invoice.status;

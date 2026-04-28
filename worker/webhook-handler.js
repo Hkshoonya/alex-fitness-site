@@ -3736,7 +3736,15 @@ async function createGoogleMeetEvent(params, env) {
   const clientId = env.GOOGLE_CLIENT_ID;
   const clientSecret = env.GOOGLE_CLIENT_SECRET;
   const refreshToken = env.GOOGLE_REFRESH_TOKEN;
-  const calendarId = env.GOOGLE_CALENDAR_ID || 'primary';
+  // GOOGLE_CALENDAR_ID may be a single ID or comma-separated list. The
+  // Calendar API only supports creating an event in ONE calendar; the
+  // remaining calendars get added as attendees so the event surfaces on
+  // each of them via Google's standard attendee-invite flow.
+  const rawCalendarIds = (env.GOOGLE_CALENDAR_ID || 'primary')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const hostCalendarId = rawCalendarIds[0] || 'primary';
+  const additionalCalendarAttendees = rawCalendarIds.slice(1)
+    .filter(id => id !== 'primary'); // 'primary' isn't an email, can't be an attendee
 
   if (!clientId || !clientSecret || !refreshToken) {
     return { success: false, error: 'Google Calendar not configured' };
@@ -3761,8 +3769,17 @@ async function createGoogleMeetEvent(params, env) {
   const startTime = new Date(params.startAt);
   const endTime = new Date(startTime.getTime() + (params.durationMinutes || 60) * 60000);
 
+  // Build attendee list: client's email + any additional configured
+  // calendar IDs (each one gets a Google invite, so the event appears on
+  // their calendar with RSVP options).
+  const attendees = [];
+  if (params.attendeeEmail) attendees.push({ email: params.attendeeEmail });
+  for (const calId of additionalCalendarAttendees) {
+    attendees.push({ email: calId });
+  }
+
   const eventResp = await fetch(
-    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?conferenceDataVersion=1`,
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(hostCalendarId)}/events?conferenceDataVersion=1&sendUpdates=all`,
     {
       method: 'POST',
       headers: {
@@ -3774,7 +3791,7 @@ async function createGoogleMeetEvent(params, env) {
         description: params.description || '',
         start: { dateTime: startTime.toISOString(), timeZone: TIMEZONE },
         end: { dateTime: endTime.toISOString(), timeZone: TIMEZONE },
-        attendees: params.attendeeEmail ? [{ email: params.attendeeEmail }] : [],
+        attendees,
         conferenceData: {
           createRequest: { requestId: `meet-${Date.now()}`, conferenceSolutionKey: { type: 'hangoutsMeet' } },
         },

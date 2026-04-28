@@ -412,33 +412,82 @@ export default {
       });
     }
 
-    // ===== PROXY PATH BLOCKLIST =====
-    // Origin check alone is bypassable (Origin header is spoofable by non-browser
-    // clients). Even if an attacker forges the header, they still can't reach
-    // the most destructive upstream endpoints because we refuse to relay them.
-    // Anything the frontend legitimately needs should NOT appear here.
+    // ===== PROXY PATH ALLOWLIST (C-01 FIX) =====
+    // Origin checks are bypassable from non-browser clients (curl can forge
+    // any Origin header). The previous defense was a blocklist of "obviously
+    // destructive" paths — but it left wide-open routes for PII enumeration:
+    //   - GET /api/square/customers (list ALL customers)
+    //   - POST /api/trainerize/user/list (full client roster)
+    //   - GET /api/square/payments (all payment history)
+    // C-01 fix: replace blocklist with allowlist. Only the exact (path,method)
+    // combinations the frontend legitimately uses pass through. Square IDs
+    // are alphanumeric uppercase (with optional hyphens) — the [A-Z0-9_-]+
+    // pattern keeps them tight.
     if (isProxyRoute) {
-      const proxyPath = url.pathname.replace(/^\/api\/(square|trainerize)\//, '').toLowerCase();
+      // Match {service: 'square'|'trainerize', subpath: '...'} from the URL.
+      const m = url.pathname.match(/^\/api\/(square|trainerize)\/(.+)$/);
+      if (!m) {
+        return new Response(JSON.stringify({ error: 'Bad proxy path' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const service = m[1];
+      const subpath = m[2];
       const method = request.method.toUpperCase();
-      const dangerousPatterns = [
-        /^refunds(\/|$)/,             // square: issue a refund
-        /^payments\/[^/]+\/refund/,   // square: refund a specific payment
-        /^bulk-/,                     // any bulk endpoint
-        /^subscriptions\/.+\/(cancel|actions)/, // cancel/force subscription state
-        // Trainerize: block user/delete and user/remove EXACTLY — not
-        // `user/deleteTag` or `user/removeTag` which the coach uses to manage
-        // client tags. Require end-of-path or slash after `delete`/`remove`.
-        /^user\/(delete|remove)(\/|$)/,
-        /^account\/delete(\/|$)/,     // trainerize: delete account
-        // Square: block add/update/delete of coaches, but NOT /team-members/search
-        // (which the frontend needs to populate the coach picker).
-        /^team-members\/(?!search)[^/]+$/, // /team-members/{id} — mutation target
+
+      // Allowlist entries: [pattern, allowedMethods...].
+      // ANYTHING that doesn't match exactly here will 403.
+      const SQUARE_ALLOW = [
+        // Bookings
+        [/^bookings$/,                              ['GET', 'POST']],
+        [/^bookings\/[A-Za-z0-9_-]+$/,              ['GET', 'PUT', 'DELETE']],
+        [/^bookings\/availability\/search$/,        ['POST']],
+        // Cards (save card to customer)
+        [/^cards$/,                                 ['POST']],
+        // Catalog (read-only — list + single object)
+        [/^catalog\/list$/,                         ['GET']],
+        [/^catalog\/object\/[A-Za-z0-9_-]+$/,       ['GET']],
+        // Customers — POST only on /customers (create), no GET (would enumerate)
+        [/^customers$/,                             ['POST']],
+        [/^customers\/[A-Za-z0-9_-]+$/,             ['GET', 'PUT']],
+        [/^customers\/search$/,                     ['POST']],
+        // Locations — GET only (gym info display)
+        [/^locations$/,                             ['GET']],
+        [/^locations\/[A-Za-z0-9_-]+$/,             ['GET']],
+        // Payments — POST one-off; GET single by ID for receipt verification
+        [/^payments$/,                              ['POST']],
+        [/^payments\/[A-Za-z0-9_-]+$/,              ['GET']],
+        // Subscriptions
+        [/^subscriptions$/,                         ['POST']],
+        [/^subscriptions\/[A-Za-z0-9_-]+$/,         ['GET', 'POST']],
+        // Team members (coach picker uses search; never list everyone)
+        [/^team-members\/search$/,                  ['POST']],
       ];
-      const isDangerous = dangerousPatterns.some(re => re.test(proxyPath));
-      // Only block mutating methods so read-only lookups (e.g. GET) still work.
-      if (isDangerous && method !== 'GET' && method !== 'OPTIONS') {
-        console.error(`Blocked proxy call to dangerous path: ${method} ${proxyPath}`);
-        return new Response(JSON.stringify({ error: 'Endpoint not permitted via proxy' }), {
+      const TRAINERIZE_ALLOW = [
+        [/^appointment\/add$/,         ['POST']],
+        [/^appointment\/getAppointmentTypeList$/, ['POST']], // admin-only via /admin/* but allow for diagnostics
+        [/^program\/copyToUser$/,      ['POST']],
+        [/^program\/getList$/,         ['POST']],
+        [/^trainerNote\/add$/,         ['POST']],
+        [/^user\/add$/,                ['POST']],
+        [/^user\/addTag$/,             ['POST']],
+        [/^user\/find$/,               ['POST']],
+        [/^user\/setProfile$/,         ['POST']],
+      ];
+      const allowlist = service === 'square' ? SQUARE_ALLOW : TRAINERIZE_ALLOW;
+
+      // OPTIONS preflights are always allowed (handled by CORS earlier).
+      const allowed = method === 'OPTIONS' || allowlist.some(
+        ([re, methods]) => re.test(subpath) && methods.includes(method)
+      );
+      if (!allowed) {
+        await logEvent('error', 'proxy-path-not-allowed', {
+          service, subpath, method,
+        }, env);
+        return new Response(JSON.stringify({
+          error: 'Endpoint not permitted via proxy',
+          hint: 'Only specific frontend-required paths are exposed. Server-to-server work uses dedicated worker endpoints.',
+        }), {
           status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }

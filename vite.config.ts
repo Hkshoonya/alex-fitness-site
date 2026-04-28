@@ -4,12 +4,16 @@ import { defineConfig } from "vite"
 import { inspectAttr } from 'kimi-plugin-inspect-react'
 
 // https://vite.dev/config/
-export default defineConfig({
+// inspectAttr() injects code-path="src/Foo.tsx:LL:CC" attributes into the
+// rendered DOM for in-page inspection. Useful in dev, but in production it
+// leaks file paths to every visitor and signals the build is unfinished. M-04
+// fix: dev-only by gating on the vite command (serve = dev, build = prod).
+export default defineConfig(({ command }) => ({
   base: '/alex-fitness-site/',
-  plugins: [inspectAttr(), react()],
+  plugins: command === 'serve' ? [inspectAttr(), react()] : [react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
   },
-});
+}));

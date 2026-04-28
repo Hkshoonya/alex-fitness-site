@@ -24,10 +24,13 @@ export default function ChallengesSection({ onBooking: _onBooking }: ChallengesS
     const params = new URLSearchParams(window.location.search);
     if (params.get('admin') === 'challenges') setShowAdmin(true);
 
-    // Seed demo challenges on first load (local cache only — real
-    // challenges live in the worker and only appear here when added via
-    // the admin form).
-    seedDemoChallenges();
+    // Demo seeding is dev-only. M-05 fix: in production, never inject
+    // synthetic challenges — if the worker is unreachable, the section just
+    // stays empty rather than showing fake data. Real challenges always
+    // come from the admin-gated worker endpoint.
+    if (import.meta.env.DEV) {
+      seedDemoChallenges();
+    }
     loadChallenges();
   }, []);
 

@@ -466,13 +466,97 @@ export async function getWeekAvailability(
 }
 
 /**
+ * Upsert a Square Customer by email. Returns the customer_id.
+ * Square Bookings require an existing customer record — without one, the
+ * Bookings API rejects with {detail:"not found", field:"customer_id"}.
+ *
+ * Search first (no side effects). Create only if not found. Both calls go
+ * through the worker proxy which holds the Square access token.
+ */
+async function upsertSquareCustomer(info: {
+  name: string; email: string; phone?: string;
+}): Promise<string> {
+  // 1. Search by email
+  const searchResp = await fetch(`${SQUARE_API_BASE}/customers/search`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      query: { filter: { email_address: { exact: info.email } } },
+      limit: 1,
+    }),
+  });
+  if (searchResp.ok) {
+    const sd = await searchResp.json();
+    const found = sd.customers?.[0]?.id;
+    if (found) return found;
+  }
+
+  // 2. Create
+  const nameParts = info.name.trim().split(/\s+/);
+  const firstName = nameParts[0] || '';
+  const lastName = nameParts.slice(1).join(' ');
+  const createResp = await fetch(`${SQUARE_API_BASE}/customers`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      idempotency_key: `cust-${info.email.slice(0, 40)}-${Date.now()}`,
+      given_name: firstName || undefined,
+      family_name: lastName || undefined,
+      email_address: info.email,
+      phone_number: info.phone || undefined,
+    }),
+  });
+  if (!createResp.ok) {
+    const err = await createResp.json().catch(() => ({}));
+    throw new Error(err.errors?.[0]?.detail || 'Could not create Square customer');
+  }
+  const cd = await createResp.json();
+  const customerId = cd.customer?.id;
+  if (!customerId) throw new Error('Customer created but no id returned');
+  return customerId;
+}
+
+// Module-level cache so repeated bookings don't re-fetch the same catalog
+// version. Versions only change when Alex edits the catalog item in Square.
+const catalogVersionCache = new Map<string, number>();
+
+/**
+ * Fetch the current Square catalog version for a service variation. Required
+ * by the Bookings API on each appointment segment (optimistic concurrency
+ * check). Cached in memory for the session.
+ */
+async function getCatalogVersion(serviceVariationId: string): Promise<number | undefined> {
+  if (catalogVersionCache.has(serviceVariationId)) {
+    return catalogVersionCache.get(serviceVariationId);
+  }
+  try {
+    const resp = await fetch(`${SQUARE_API_BASE}/catalog/object/${serviceVariationId}`, {
+      headers: headers(),
+    });
+    if (!resp.ok) return undefined;
+    const data = await resp.json();
+    const version = Number(data.object?.version);
+    if (!Number.isFinite(version)) return undefined;
+    catalogVersionCache.set(serviceVariationId, version);
+    return version;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Create a booking via Square Bookings API
  */
 export async function createBooking(
   teamMemberId: string,
   startAt: string,
   duration: number,
-  customerInfo: { name: string; email: string; phone: string; goals?: string }
+  customerInfo: { name: string; email: string; phone: string; goals?: string },
+  // Optional explicit service variation ID. When set (e.g. for the free
+  // consultation flow), overrides the duration-based getServiceId() lookup
+  // — needed because a 30-min consultation maps to a different catalog
+  // service than a paid 30-min PT session.
+  serviceVariationId?: string,
 ): Promise<{ success: boolean; bookingId?: string; error?: string }> {
 
   if (!isConfigured()) {
@@ -509,6 +593,22 @@ export async function createBooking(
   }
 
   try {
+    // Square Bookings require an existing Square Customer (customer_id on
+    // the booking object). Upsert by email FIRST — search, create-if-missing,
+    // then use that customerId. Without this step Square rejects with
+    // {detail: "not found", field: "customer_id"}.
+    const customerId = await upsertSquareCustomer(customerInfo);
+
+    // Square also requires service_variation_version on each appointment
+    // segment (optimistic concurrency check against the catalog). Fetch the
+    // current version of the service variation before posting the booking.
+    // Without this Square rejects with {detail:"Missing required parameter.",
+    // field:"...service_variation_version"}.
+    const finalServiceVariationId = serviceVariationId || getServiceId(duration);
+    const serviceVariationVersion = finalServiceVariationId
+      ? await getCatalogVersion(finalServiceVariationId)
+      : undefined;
+
     // Idempotency key prevents duplicate bookings from double-clicks or retries
     const idempotencyKey = `booking-${startAt}-${customerInfo.email}-${duration}`;
 
@@ -519,11 +619,13 @@ export async function createBooking(
         idempotency_key: idempotencyKey,
         booking: {
           location_id: SQUARE_LOCATION_ID,
+          customer_id: customerId,
           start_at: startAt,
           appointment_segments: [{
             duration_minutes: duration,
             team_member_id: teamMemberId,
-            service_variation_id: getServiceId(duration) || undefined,
+            service_variation_id: finalServiceVariationId || undefined,
+            service_variation_version: serviceVariationVersion,
           }],
           customer_note: `Name: ${customerInfo.name}\nEmail: ${customerInfo.email}\nPhone: ${customerInfo.phone}\nGoals: ${customerInfo.goals || 'Not specified'}`,
         },

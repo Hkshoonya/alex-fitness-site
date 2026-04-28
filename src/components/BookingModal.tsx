@@ -3,6 +3,7 @@ import { X, ChevronLeft, ChevronRight, Clock, Calendar, Check, Phone, Mail, User
 import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date-fns';
 import { getAvailability, getTeamMembers, createBooking, CANCEL_NOTICE_HOURS, type TimeSlot, type TeamMember } from '@/api/squareAvailability';
 import { createMeetEvent, type MeetingDetails } from '@/api/googleMeet';
+import { DEFAULT_TEAM_MEMBER_ID, getConsultationServiceId, getServiceId } from '@/api/squareConfig';
 // Trainerize sync handled automatically inside createBooking
 
 interface BookingModalProps {
@@ -14,7 +15,11 @@ interface BookingModalProps {
 type BookingMode = null | 'session' | 'consultation';
 type SessionType = 'in-studio' | 'virtual';
 
-const DEFAULT_COACH = 'alex-davis';
+// Real Square Team Member ID for Alex Davis. Used as the fallback when the
+// consultation flow doesn't surface a coach picker. The previous string
+// 'alex-davis' was a placeholder that would have made Square reject the
+// booking with an "invalid team_member_id" error.
+const DEFAULT_COACH = DEFAULT_TEAM_MEMBER_ID;
 
 export default function BookingModal({ isOpen, onClose, showChoice = false }: BookingModalProps) {
   // Flow state
@@ -200,12 +205,19 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
       const goalsPrefix = sessionType === 'virtual'
         ? (meetLink ? `[Virtual][${label}] Meet: ${meetLink}` : `[Virtual][${label}]`)
         : `[In-Studio][${label}]`;
+      // Pick the right Square service variation. Consultation maps to the
+      // free 30-min consultation item; paid sessions use the duration-based
+      // PT service. Without this, both flows would book the same paid PT
+      // service variation — wrong product on the Square side.
+      const serviceVariationId = mode === 'consultation'
+        ? getConsultationServiceId()
+        : getServiceId(sessionDuration);
       const result = await createBooking(coachId, selectedStartAt, sessionDuration, {
         name: bookingData.name,
         email: bookingData.email,
         phone: bookingData.phone,
         goals: `${goalsPrefix}${bookingData.goals ? `\n${bookingData.goals}` : ''}`,
-      });
+      }, serviceVariationId);
 
       if (result.success) {
         setBookingError(null);

@@ -11,12 +11,19 @@ const SQUARE_LOCATION_ID = import.meta.env.VITE_SQUARE_LOCATION_ID || '';
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
 // Service variation IDs — one per session type. Non-secret — these are
-// visible in any Square booking URL.
+// visible in any Square booking URL. Hardcoded fallbacks so the booking
+// flow works without build-time env vars; can still be overridden via
+// VITE_SQUARE_SERVICE_* if the Square catalog gets re-keyed.
 const SERVICE_IDS = {
-  consultation: import.meta.env.VITE_SQUARE_SERVICE_CONSULTATION || '',
-  session30: import.meta.env.VITE_SQUARE_SERVICE_30MIN || '',
-  session60: import.meta.env.VITE_SQUARE_SERVICE_60MIN || '',
+  consultation: import.meta.env.VITE_SQUARE_SERVICE_CONSULTATION || 'UTPNPXXQA2R3WTKRQWXE6CBG', // Fitness Consultation Call (30min)
+  session30: import.meta.env.VITE_SQUARE_SERVICE_30MIN || '66QDZG33XW3F62HR63P6VF5G',           // PT - 30 Minute Session
+  session60: import.meta.env.VITE_SQUARE_SERVICE_60MIN || 'DFDGPQ56NTEWU4TX2WQBU7TR',           // PT - 60 Minute Session
+  session90: import.meta.env.VITE_SQUARE_SERVICE_90MIN || 'EFAXK3SOJJPNK2G3XK3MHXZI',           // PT - 90 Minute
 };
+
+// Default team member (Alex). Used when the consultation flow doesn't let
+// the user pick a coach. Square Team Member ID — from /team-members/search.
+export const DEFAULT_TEAM_MEMBER_ID = 'TMr0PTR22KYH_0QK';
 
 export const IS_SANDBOX = SQUARE_APPLICATION_ID.startsWith('sandbox-');
 
@@ -31,12 +38,14 @@ export const SQUARE_WEB_SDK_URL = IS_SANDBOX
   : 'https://web.squarecdn.com/v1/square.js';
 
 /**
- * Get the right service ID based on session duration
+ * Get the right service ID based on session duration. For consultation
+ * bookings, use getConsultationServiceId() instead — this function picks
+ * a paid PT service variation, not the free consultation.
  */
 export function getServiceId(duration: number): string {
   if (duration <= 30) return SERVICE_IDS.session30 || SERVICE_IDS.consultation;
   if (duration <= 60) return SERVICE_IDS.session60;
-  return SERVICE_IDS.session60; // 90 min uses 60 min service
+  return SERVICE_IDS.session90 || SERVICE_IDS.session60;
 }
 
 /**

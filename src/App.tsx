@@ -42,6 +42,20 @@ function App() {
   const [purchasedPlan, setPurchasedPlan] = useState<TrainingPlan | undefined>();
   const [selectedTrainer, setSelectedTrainer] = useState<Trainer | undefined>();
   const [purchaseClient, setPurchaseClient] = useState<{ name: string; email: string; phone: string } | undefined>();
+  // Map embed URL fetched from worker so the API key stays in worker secrets,
+  // not in the bundled JS source. Falls back to the static map image while
+  // loading or if the worker is unreachable.
+  const [mapEmbedUrl, setMapEmbedUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const workerUrl = import.meta.env.VITE_WORKER_URL || '';
+    if (!workerUrl) return;
+    fetch(`${workerUrl}/api/google/maps-embed-url`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.src) setMapEmbedUrl(d.src); })
+      .catch(() => { /* silent — fall back to static image */ });
+  }, []);
+
   const heroRef = useRef<HTMLDivElement>(null);
   const valueRef = useRef<HTMLDivElement>(null);
   const plansRef = useRef<HTMLDivElement>(null);
@@ -649,11 +663,25 @@ function App() {
             {/* Map & Address */}
             <div>
               <div className="bg-white/10 rounded-lg overflow-hidden mb-6">
-                <img 
-                  src={asset("/images/map-static.jpg")}
-                  alt="Location map" 
-                  className="w-full h-64 object-cover"
-                />
+                {mapEmbedUrl ? (
+                  <iframe
+                    src={mapEmbedUrl}
+                    width="100%"
+                    height="256"
+                    style={{ border: 0 }}
+                    loading="lazy"
+                    referrerPolicy="no-referrer-when-downgrade"
+                    allowFullScreen
+                    title="Alex Davis Fitness location map"
+                    className="w-full h-64"
+                  />
+                ) : (
+                  <img
+                    src={asset("/images/map-static.jpg")}
+                    alt="Location map"
+                    className="w-full h-64 object-cover"
+                  />
+                )}
               </div>
               <div className="space-y-4">
                 <div className="flex items-start gap-3">

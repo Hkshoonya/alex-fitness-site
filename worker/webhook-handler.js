@@ -518,6 +518,37 @@ export default {
       }
     }
 
+    // ===== GOOGLE MAPS EMBED — returns iframe src URL =====
+    // The Maps Embed API serves an interactive map iframe given a place ID.
+    // We hold the API key server-side; frontend GETs this endpoint on mount
+    // and uses the returned URL as the iframe src. The key still ends up in
+    // the iframe `src` attribute (visible in the DOM) — that's unavoidable
+    // for browser-rendered maps, and the HTTP referrer restriction on the
+    // key in Google Cloud Console is the real security boundary.
+    if (url.pathname === '/api/google/maps-embed-url' && request.method === 'GET') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 403, headers: corsHeaders,
+        });
+      }
+      if (!await checkRateLimit(request, 'google-maps-embed', 60, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const key = env.GOOGLE_MAPS_JAVASCRIPT_API_KEY;
+      const placeId = env.GOOGLE_PLACE_ID;
+      if (!key || !placeId) {
+        return new Response(JSON.stringify({ error: 'Maps not configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const src = `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(key)}&q=place_id:${encodeURIComponent(placeId)}&zoom=15`;
+      return new Response(JSON.stringify({ src }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== GOOGLE PLACES (NEW) REVIEWS — server-side proxy =====
     // Live reviews from Google Places API. Browser-origin requests to Places
     // are CORS-blocked anyway, so this endpoint exists. Cached in KV for 6h

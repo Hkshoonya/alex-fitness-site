@@ -1431,6 +1431,95 @@ export default {
       }
     }
 
+    // ===== ADMIN: list challenge signups with client status =====
+    // GET /admin/challenge-signups?challengeId=ch_xxx — returns each person
+    // who joined the challenge along with their client status:
+    //   "non-client"     = no Square Customer record on file
+    //   "current-client" = has active session credits in worker KV
+    //   "past-client"    = has Square Customer but no active credits
+    // Admin-token gated. Alex sees this on the website's admin UI.
+    if (url.pathname === '/admin/challenge-signups' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN) {
+        return new Response('Not configured', { status: 503, headers: corsHeaders });
+      }
+      if ((request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const challengeId = url.searchParams.get('challengeId') || '';
+      if (!challengeId) {
+        return new Response(JSON.stringify({ error: 'challengeId query param required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      try {
+        // KV list with prefix to find all join records for this challenge.
+        const listResult = await env.CHALLENGES_KV.list({
+          prefix: `challenge-join:${challengeId}:`,
+          limit: 200,
+        });
+        const signups = [];
+        for (const k of listResult.keys) {
+          const raw = await kvGet(k.name, env);
+          if (!raw) continue;
+          let entry; try { entry = JSON.parse(raw); } catch { continue; }
+          // Enrich with client status. Square Customer search by email.
+          let clientStatus = 'non-client';
+          let squareCustomerId = null;
+          let trainerizeUserId = null;
+          let hasActiveCredits = false;
+          try {
+            const searchResp = await fetch(`${getSquareApiBase(env)}/customers/search`, {
+              method: 'POST', headers: getSquareHeaders(env),
+              body: JSON.stringify({
+                query: { filter: { email_address: { exact: entry.email } } }, limit: 1,
+              }),
+            });
+            if (searchResp.ok) {
+              const sd = await searchResp.json();
+              squareCustomerId = sd.customers?.[0]?.id || null;
+            }
+          } catch { /* ignore */ }
+          // Find Trainerize user by email and check their credits record.
+          if (squareCustomerId && isTrainerizeConfigured(env)) {
+            try {
+              trainerizeUserId = await findTrainerizeUserByEmail(entry.email, env);
+              if (trainerizeUserId) {
+                const credRaw = await kvGet(`credits:${trainerizeUserId}`, env);
+                if (credRaw) {
+                  const cred = JSON.parse(credRaw);
+                  if ((cred.remaining || 0) > 0) hasActiveCredits = true;
+                }
+              }
+            } catch { /* ignore */ }
+          }
+          if (squareCustomerId && hasActiveCredits) clientStatus = 'current-client';
+          else if (squareCustomerId) clientStatus = 'past-client';
+
+          signups.push({
+            name: entry.name,
+            email: entry.email,
+            phone: entry.phone || '',
+            joinedAt: entry.joinedAt,
+            paid: !!entry.paymentId,
+            paymentId: entry.paymentId || null,
+            squareCustomerId,
+            trainerizeUserId,
+            clientStatus,
+          });
+        }
+        // Sort by joinedAt desc (newest first).
+        signups.sort((a, b) => (b.joinedAt || '').localeCompare(a.joinedAt || ''));
+        return new Response(JSON.stringify({ challengeId, signups, count: signups.length }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        await logEvent('error', 'admin-challenge-signups-failed', { challengeId, err: e?.message }, env);
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     // ===== EVENT LOGS =====
     // GET /logs?category=credit&limit=20 — query recent events
     // Auth: requires X-Admin-Token header matching env.ADMIN_LOG_TOKEN.

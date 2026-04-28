@@ -16,6 +16,11 @@ interface ReviewCache {
   reviews: GoogleReview[];
   fetchedAt: string;
   placeId: string;
+  // Set to true when the cached reviews came from the worker's Places proxy
+  // (vs FALLBACK_REVIEWS). Restored on cache hit so returning visitors keep
+  // the correct Google-vs-Testimonials UI without re-fetching.
+  isLive?: boolean;
+  googleMapsUrl?: string;
 }
 
 // Configuration
@@ -24,7 +29,9 @@ interface ReviewCache {
 // response in KV for 6 hours. Browser-origin requests to Places (New) are
 // CORS-blocked, so this proxy is the only way to read them from the client.
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
-const CACHE_KEY = 'alex_fitness_reviews';
+// Bump this when the cache shape changes. Old browsers with the v1 key will
+// see a stale localStorage entry that the new code ignores → forced refresh.
+const CACHE_KEY = 'alex_fitness_reviews_v2';
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 // Live state — fetchFromGoogle() updates googleMapsUrl with the canonical
 // short URL returned by Places API; otherwise the search-query fallback runs.
@@ -126,7 +133,10 @@ function isCacheFresh(): boolean {
 }
 
 /**
- * Get cached reviews
+ * Get cached reviews. Restores REVIEW_LINKS state (haveLiveData,
+ * googleMapsUrl) so a returning visitor with a fresh cache shows the same
+ * Google-vs-Testimonials UI as the original fetch — without re-hitting the
+ * worker.
  */
 function getCachedReviews(): GoogleReview[] | null {
   const raw = localStorage.getItem(CACHE_KEY);
@@ -134,6 +144,8 @@ function getCachedReviews(): GoogleReview[] | null {
 
   try {
     const cache: ReviewCache = JSON.parse(raw);
+    if (cache.isLive) REVIEW_LINKS.haveLiveData = true;
+    if (cache.googleMapsUrl) REVIEW_LINKS.googleMapsUrl = cache.googleMapsUrl;
     return cache.reviews;
   } catch {
     return null;
@@ -141,13 +153,16 @@ function getCachedReviews(): GoogleReview[] | null {
 }
 
 /**
- * Save reviews to cache
+ * Save reviews to cache. Includes the current isLive + googleMapsUrl so
+ * we can restore them on the next page load without re-fetching.
  */
 function cacheReviews(reviews: GoogleReview[]): void {
   const cache: ReviewCache = {
     reviews,
     fetchedAt: new Date().toISOString(),
     placeId: 'worker-proxy',
+    isLive: REVIEW_LINKS.haveLiveData,
+    googleMapsUrl: REVIEW_LINKS.googleMapsUrl,
   };
   localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
 }
@@ -193,17 +208,20 @@ export async function getReviews(): Promise<GoogleReview[]> {
     }
   }
 
-  // Try fetching from Google
+  // Try fetching from Google. fetchFromGoogle() sets REVIEW_LINKS.haveLiveData
+  // when it gets at least one real review back.
   const googleReviews = await fetchFromGoogle();
 
   if (googleReviews.length > 0) {
-    // Merge with any existing fallback/manual reviews
-    const merged = mergeReviews(googleReviews, FALLBACK_REVIEWS);
-    cacheReviews(merged);
-    return filterFiveStars(merged);
+    // We have real Google reviews — show ONLY those, never mix with fallback
+    // testimonials. Mixing produces a list that's part-real / part-curated
+    // but rendered identically, which is what the H-03 audit flagged.
+    cacheReviews(googleReviews);
+    return filterFiveStars(googleReviews);
   }
 
-  // Fall back to hardcoded reviews
+  // No live data — show fallback testimonials. UI renders them as
+  // "Testimonials" rather than Google reviews because haveLiveData is false.
   cacheReviews(FALLBACK_REVIEWS);
   return filterFiveStars(FALLBACK_REVIEWS);
 }
@@ -221,34 +239,6 @@ export async function refreshReviews(): Promise<GoogleReview[]> {
  */
 function filterFiveStars(reviews: GoogleReview[]): GoogleReview[] {
   return reviews.filter((r) => r.rating === 5);
-}
-
-/**
- * Merge Google reviews with manual/fallback reviews, dedup by name+text
- */
-function mergeReviews(google: GoogleReview[], fallback: GoogleReview[]): GoogleReview[] {
-  const seen = new Set<string>();
-  const merged: GoogleReview[] = [];
-
-  // Google reviews take priority
-  for (const r of google) {
-    const key = `${r.name.toLowerCase()}_${r.text.slice(0, 50).toLowerCase()}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(r);
-    }
-  }
-
-  // Add fallbacks that don't duplicate
-  for (const r of fallback) {
-    const key = `${r.name.toLowerCase()}_${r.text.slice(0, 50).toLowerCase()}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(r);
-    }
-  }
-
-  return merged;
 }
 
 /**

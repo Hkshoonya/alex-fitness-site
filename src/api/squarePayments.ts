@@ -2,7 +2,6 @@
 // Supports: Card, Apple Pay, Google Pay, Cash App Pay
 // Auto-detects device and shows available payment methods
 
-import type { TrainingPlan } from '@/data/trainingPlans';
 import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE, SQUARE_WEB_SDK_URL } from '@/api/squareConfig';
 
 const { applicationId: SQUARE_APPLICATION_ID, locationId: SQUARE_LOCATION_ID } = getSquareConfig();
@@ -160,16 +159,37 @@ export const createGenericCardPayment = async (params: {
   }
 };
 
-// Plan purchases route through the worker's /checkout/charge endpoint so
-// the card is saved to a Square Customer on the same round trip as the
-// charge. Without that, auto-invoice CARD_ON_FILE at credit exhaustion has
-// nothing to charge and falls back to emailing a pay-link.
-export const createCardPayment = async (
-  plan: TrainingPlan,
-  trainerId: 'alex1' | 'alex2',
-  cardToken: string,
-  client: { email: string; name: string; phone?: string }
-): Promise<{ success: boolean; paymentId?: string; customerId?: string; cardId?: string; error?: string }> => {
+// Plan purchases route through the worker's /checkout/charge endpoint. We
+// send only IDENTIFIERS (planId, frequencyIndex, trainerId) — never the
+// amount. The worker derives amountCents from its server-side PLAN_CATALOG.
+// This is the C-02 fix: previously the browser sent amountCents and the
+// worker trusted it, so a user who selected the 5x/week + alex2 trainer
+// option saw $2880 in the UI but only got charged $720 (the base plan.price).
+//
+// Saving the card on the same round-trip is what enables auto-invoice
+// CARD_ON_FILE at credit exhaustion to actually charge — without a saved
+// card, published invoices required manual client payment.
+export const createCardPayment = async (params: {
+  planId: string;
+  // null for flat-price plans (app-only, online-monthly, online-3month)
+  frequencyIndex: number | null;
+  trainerId: 'alex1' | 'alex2';
+  cardToken: string;
+  client: { email: string; name: string; phone?: string };
+}): Promise<{
+  success: boolean;
+  paymentId?: string;
+  customerId?: string;
+  cardId?: string;
+  // Server-resolved values — use these for the localStorage purchase record
+  // so it agrees with what was actually charged + granted.
+  amountCents?: number;
+  sessions?: number;
+  duration?: number;
+  planName?: string;
+  validUntil?: string;
+  error?: string;
+}> => {
   if (!SQUARE_APPLICATION_ID) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     return { success: true, paymentId: `mock_payment_${Date.now()}` };
@@ -177,7 +197,7 @@ export const createCardPayment = async (
   const workerUrl = import.meta.env.VITE_WORKER_URL || '';
   if (!workerUrl) return { success: false, error: 'Worker URL not configured' };
 
-  const nameParts = client.name.trim().split(/\s+/);
+  const nameParts = params.client.name.trim().split(/\s+/);
   const firstName = nameParts[0] || '';
   const lastName = nameParts.slice(1).join(' ');
 
@@ -186,13 +206,13 @@ export const createCardPayment = async (
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        cardToken,
-        email: client.email,
+        cardToken: params.cardToken,
+        email: params.client.email,
         firstName, lastName,
-        phone: client.phone || '',
-        amountCents: Math.round(plan.price * 100),
-        referenceId: plan.id,
-        note: `${plan.name} - ${trainerId}`,
+        phone: params.client.phone || '',
+        planId: params.planId,
+        frequencyIndex: params.frequencyIndex,
+        trainerId: params.trainerId,
       }),
     });
     const data = await response.json();
@@ -204,6 +224,11 @@ export const createCardPayment = async (
       paymentId: data.paymentId,
       customerId: data.customerId,
       cardId: data.cardId,
+      amountCents: data.amountCents,
+      sessions: data.sessions,
+      duration: data.duration,
+      planName: data.planName,
+      validUntil: data.validUntil,
     };
   } catch (error) {
     console.error('Payment error:', error);

@@ -75,6 +75,142 @@ const PLAN_CREDITS = {
   '12 Week Plan - 90 Min Sessions': { sessions: 12, duration: 90 },
 };
 
+// ===== AUTHORITATIVE PLAN CATALOG =====
+// Server-side source of truth for plan pricing and session counts. The browser
+// sends only { planId, frequencyIndex, trainerId } at checkout — the worker
+// derives amountCents and session count from this catalog. NEVER trust
+// client-supplied amounts or session counts; that was the C-02 exploit fixed
+// here (browser could display $2880 but charge $720 base).
+//
+// Mirror of src/data/trainingPlans.ts. If you change one, change both.
+const PLAN_CATALOG = {
+  '4week-30min': {
+    name: '4 Week Plan - 30 Min Sessions', duration: 30, planWeeks: 4,
+    frequency: [
+      { perWeek: 1, totalSessions: 4,  totalPrice: 160 },
+      { perWeek: 2, totalSessions: 8,  totalPrice: 320 },
+      { perWeek: 3, totalSessions: 12, totalPrice: 480 },
+      { perWeek: 4, totalSessions: 16, totalPrice: 640 },
+      { perWeek: 5, totalSessions: 20, totalPrice: 800 },
+    ],
+  },
+  '4week-60min': {
+    name: '4 Week Plan - 60 Min Sessions', duration: 60, planWeeks: 4,
+    frequency: [
+      { perWeek: 1, totalSessions: 4,  totalPrice: 280 },
+      { perWeek: 2, totalSessions: 8,  totalPrice: 560 },
+      { perWeek: 3, totalSessions: 12, totalPrice: 840 },
+      { perWeek: 4, totalSessions: 16, totalPrice: 1120 },
+      { perWeek: 5, totalSessions: 20, totalPrice: 1400 },
+    ],
+  },
+  '4week-90min': {
+    name: '4 Week Plan - 90 Min Sessions', duration: 90, planWeeks: 4,
+    frequency: [
+      { perWeek: 1, totalSessions: 4,  totalPrice: 400 },
+      { perWeek: 2, totalSessions: 8,  totalPrice: 800 },
+      { perWeek: 3, totalSessions: 12, totalPrice: 1200 },
+      { perWeek: 4, totalSessions: 16, totalPrice: 1600 },
+      { perWeek: 5, totalSessions: 20, totalPrice: 2000 },
+    ],
+  },
+  '12week-30min': {
+    name: '12 Week Plan - 30 Min Sessions', duration: 30, planWeeks: 12,
+    frequency: [
+      { perWeek: 1, totalSessions: 12, totalPrice: 420 },
+      { perWeek: 2, totalSessions: 24, totalPrice: 840 },
+      { perWeek: 3, totalSessions: 36, totalPrice: 1260 },
+      { perWeek: 4, totalSessions: 48, totalPrice: 1680 },
+      { perWeek: 5, totalSessions: 60, totalPrice: 2100 },
+    ],
+  },
+  '12week-60min': {
+    name: '12 Week Plan - 60 Min Sessions', duration: 60, planWeeks: 12,
+    frequency: [
+      { perWeek: 1, totalSessions: 12, totalPrice: 720 },
+      { perWeek: 2, totalSessions: 24, totalPrice: 1440 },
+      { perWeek: 3, totalSessions: 36, totalPrice: 2160 },
+      { perWeek: 4, totalSessions: 48, totalPrice: 2880 },
+      { perWeek: 5, totalSessions: 60, totalPrice: 3600 },
+    ],
+  },
+  '12week-90min': {
+    name: '12 Week Plan - 90 Min Sessions', duration: 90, planWeeks: 12,
+    frequency: [
+      { perWeek: 1, totalSessions: 12, totalPrice: 1080 },
+      { perWeek: 2, totalSessions: 24, totalPrice: 2160 },
+      { perWeek: 3, totalSessions: 36, totalPrice: 3240 },
+      { perWeek: 4, totalSessions: 48, totalPrice: 4320 },
+      { perWeek: 5, totalSessions: 60, totalPrice: 5400 },
+    ],
+  },
+  // Flat-price plans — no frequency variants, no trainer multiplier (no
+  // in-person sessions granted). The frontend may still POST these through
+  // /checkout/charge for the card-on-file save, but no Trainerize credits flow.
+  'app-only': {
+    name: 'Fitness App (No Coaching)', duration: 0, planWeeks: 4,
+    flatPrice: 10, sessionsGranted: 0,
+  },
+  'online-monthly': {
+    name: 'Custom Online Training - Monthly', duration: 0, planWeeks: 4,
+    flatPrice: 100, sessionsGranted: 0,
+  },
+  'online-3month': {
+    name: 'Custom Online Training - 3 Months', duration: 0, planWeeks: 12,
+    flatPrice: 250, sessionsGranted: 0,
+  },
+};
+
+const TRAINER_MULTIPLIERS = { alex1: 1.0, alex2: 0.8 };
+
+/**
+ * Resolve a {planId, frequencyIndex, trainerId} tuple to the authoritative
+ * amount, session count, and metadata. Returns { ok: false, error } for any
+ * unknown ID or out-of-range frequency. Used by /checkout/charge and
+ * /credit-grant — both endpoints derive money/credits from the same source so
+ * they cannot disagree.
+ */
+function resolvePurchase({ planId, frequencyIndex, trainerId }) {
+  const plan = PLAN_CATALOG[planId];
+  if (!plan) return { ok: false, error: `Unknown planId: ${planId}` };
+  const multiplier = TRAINER_MULTIPLIERS[trainerId];
+  if (multiplier === undefined) {
+    return { ok: false, error: `Unknown trainerId: ${trainerId}` };
+  }
+
+  // Flat-price plans (app-only, online-*) ignore frequencyIndex and trainer.
+  if (plan.flatPrice !== undefined) {
+    return {
+      ok: true,
+      planName: plan.name,
+      duration: plan.duration,
+      planWeeks: plan.planWeeks,
+      sessions: plan.sessionsGranted,
+      amountCents: plan.flatPrice * 100,
+      isFlat: true,
+    };
+  }
+
+  // Frequency-based plans require a valid index into the frequency array.
+  const idx = Number(frequencyIndex);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= plan.frequency.length) {
+    return {
+      ok: false,
+      error: `Invalid frequencyIndex ${frequencyIndex} for plan ${planId}`,
+    };
+  }
+  const freq = plan.frequency[idx];
+  return {
+    ok: true,
+    planName: plan.name,
+    duration: plan.duration,
+    planWeeks: plan.planWeeks,
+    sessions: freq.totalSessions,
+    amountCents: Math.round(freq.totalPrice * multiplier * 100),
+    isFlat: false,
+  };
+}
+
 // ===== TRAINERIZE API HELPERS =====
 
 const TRAINERIZE_API_BASE = 'https://api.trainerize.com/v03';
@@ -479,16 +615,17 @@ export default {
     }
 
     // POST /checkout/charge — single atomic operation at checkout:
-    //   1. Upsert Square Customer by email (create if missing)
-    //   2. Save the tokenized card to that customer as a Card entity
-    //   3. Charge the saved card via /v2/payments
-    // Returns { paymentId, customerId, cardId }.
-    //
-    // This replaces the one-off /v2/payments call from the frontend. The
-    // saved card + customerId are what lets the auto-invoice cron (at
-    // webhook-handler.js ~2700, uses `automatic_payment_source: CARD_ON_FILE`)
-    // actually auto-charge when credits deplete — previously no card was
-    // saved, so published invoices required manual client payment.
+    //   1. Resolve plan price server-side via PLAN_CATALOG (browser CANNOT
+    //      supply amountCents — fixes C-02 pricing-trust exploit)
+    //   2. Upsert Square Customer by email (create if missing)
+    //   3. Save the tokenized card to that customer as a Card entity
+    //   4. Charge the saved card via /v2/payments — note field carries the
+    //      JSON-encoded plan claim so /credit-grant can verify the claim
+    //      server-side (closes the secondary "claim a different plan after
+    //      paying" attack at price-collision points like $800).
+    // Returns { paymentId, customerId, cardId, amountCents, sessions,
+    //           planName, validUntil } — frontend uses server-resolved values
+    //           for the localStorage purchase record.
     if (url.pathname === '/checkout/charge' && request.method === 'POST') {
       if (!isAllowedOrigin) {
         return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
@@ -509,20 +646,45 @@ export default {
       const firstName = typeof body.firstName === 'string' ? body.firstName.trim().slice(0, 80) : '';
       const lastName = typeof body.lastName === 'string' ? body.lastName.trim().slice(0, 80) : '';
       const phone = typeof body.phone === 'string' ? body.phone.trim().slice(0, 40) : '';
-      const amountCents = Math.round(Number(body.amountCents) || 0);
-      const referenceId = typeof body.referenceId === 'string' ? body.referenceId.slice(0, 40) : '';
-      const note = typeof body.note === 'string' ? body.note.slice(0, 500) : '';
+      const planId = typeof body.planId === 'string' ? body.planId.trim().slice(0, 40) : '';
+      const trainerId = typeof body.trainerId === 'string' ? body.trainerId.trim().slice(0, 40) : '';
+      // frequencyIndex is null for flat-price plans (app/online); a number for
+      // frequency-variant plans (4-week / 12-week trainer plans).
+      const frequencyIndex = body.frequencyIndex;
 
-      if (!cardToken || !email || !Number.isFinite(amountCents) || amountCents <= 0 || amountCents > 2_000_000) {
-        return new Response(JSON.stringify({ error: 'cardToken, email, and amountCents (1..2_000_000) required' }), {
-          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+      if (!cardToken || !email || !planId || !trainerId) {
+        return new Response(JSON.stringify({
+          error: 'cardToken, email, planId, and trainerId are required',
+        }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return new Response(JSON.stringify({ error: 'Invalid email format' }), {
           status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+
+      // Resolve price + sessions from the authoritative catalog. NEVER trust
+      // a client-supplied amount.
+      const purchase = resolvePurchase({ planId, frequencyIndex, trainerId });
+      if (!purchase.ok) {
+        await logEvent('error', 'checkout-resolve-failed', {
+          email, planId, frequencyIndex, trainerId, err: purchase.error,
+        }, env);
+        return new Response(JSON.stringify({ error: purchase.error }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const { amountCents, planName, sessions, duration, planWeeks } = purchase;
+      const validUntil = new Date(
+        Date.now() + (planWeeks || 12) * 7 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+
+      // Plan claim baked into Square payment.note as JSON. /credit-grant
+      // re-fetches the payment and parses this back to authorize the credit
+      // grant — the client never gets to retell the plan story after paying.
+      const planClaim = JSON.stringify({
+        planId, frequencyIndex: frequencyIndex ?? null, trainerId, email,
+      });
 
       try {
         // 1. Upsert Square Customer by email
@@ -592,7 +754,9 @@ export default {
           });
         }
 
-        // 3. Charge the saved card
+        // 3. Charge the saved card. note=planClaim is what /credit-grant uses
+        // to verify the plan claim later. reference_id is human-readable for
+        // the Square dashboard.
         const payResp = await fetch(`${getSquareApiBase(env)}/payments`, {
           method: 'POST', headers: getSquareHeaders(env),
           body: JSON.stringify({
@@ -601,8 +765,8 @@ export default {
             customer_id: customerId,
             amount_money: { amount: amountCents, currency: 'USD' },
             location_id: env.SQUARE_LOCATION_ID,
-            reference_id: referenceId || undefined,
-            note: note || undefined,
+            reference_id: `${planId}|${trainerId}`.slice(0, 40),
+            note: planClaim,
             autocomplete: true,
           }),
         });
@@ -616,12 +780,16 @@ export default {
         const pd = await payResp.json();
         const paymentId = pd.payment?.id;
 
-        await logEvent('payment', `Checkout success: ${email} → $${amountCents / 100}`, {
-          paymentId, customerId, cardId, amountCents, email,
+        await logEvent('payment', `Checkout success: ${email} → $${amountCents / 100} (${planName})`, {
+          paymentId, customerId, cardId, amountCents, email, planId, trainerId, frequencyIndex,
         }, env);
 
         return new Response(JSON.stringify({
-          success: true, paymentId, customerId, cardId,
+          success: true,
+          paymentId, customerId, cardId,
+          // Server-resolved values — frontend uses these for storePurchase()
+          // so localStorage agrees with what was actually charged.
+          amountCents, sessions, duration, planName, validUntil,
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (e) {
         await logEvent('error', 'checkout-charge-unexpected', { email, err: e?.message }, env);
@@ -632,11 +800,13 @@ export default {
     }
 
     // POST /credit-grant — frontend calls this after a successful
-    // createCardPayment to register the purchase's sessions in worker KV.
-    // Without this the cron sees no credits for a client who legitimately
-    // paid, and fires auto-invoices for every completed session (double
-    // billing). We verify the paymentId against Square to ensure the
-    // caller actually paid — random visitors can't forge free credits.
+    // /checkout/charge to register the purchase's sessions in worker KV.
+    // Body shape: { paymentId, email, [squareCustomerId], [squareCardId] }.
+    // The plan claim (planId, frequencyIndex, trainerId) is read from the
+    // Square payment's note field — it was baked in at /checkout/charge time
+    // and the client cannot edit it after the fact. The amount paid is also
+    // re-verified against the catalog so a doctored client can't claim a
+    // bigger session count than they actually paid for.
     if (url.pathname === '/credit-grant' && request.method === 'POST') {
       if (!isAllowedOrigin) {
         return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
@@ -655,18 +825,14 @@ export default {
 
       const paymentId = typeof body.paymentId === 'string' ? body.paymentId.trim() : '';
       const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-      const sessions = Number(body.sessions);
-      const duration = Number(body.duration) || 60;
-      const planName = typeof body.planName === 'string' ? body.planName.slice(0, 200) : 'Purchase';
-      const validUntilInput = typeof body.validUntil === 'string' ? body.validUntil : '';
       // Optional — when the caller used /checkout/charge these let the
       // auto-invoice path auto-charge the saved card instead of fuzzy-matching
       // the customer at invoice time.
       const squareCustomerId = typeof body.squareCustomerId === 'string' ? body.squareCustomerId.trim().slice(0, 80) : '';
       const squareCardId = typeof body.squareCardId === 'string' ? body.squareCardId.trim().slice(0, 80) : '';
 
-      if (!paymentId || !email || !Number.isFinite(sessions) || sessions <= 0 || sessions > 52) {
-        return new Response(JSON.stringify({ error: 'paymentId, email, and sessions (1-52) are required' }), {
+      if (!paymentId || !email) {
+        return new Response(JSON.stringify({ error: 'paymentId and email are required' }), {
           status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -686,9 +852,11 @@ export default {
         });
       }
 
-      // Verify the payment actually exists in Square AND was completed.
-      // Without this check, an attacker could forge a random string and
-      // mint themselves free session credits.
+      // Fetch the payment from Square. We need three things from it:
+      //   1. Status COMPLETED/APPROVED — proves they paid
+      //   2. amount_money.amount — the authoritative paid amount
+      //   3. note — JSON-encoded plan claim baked in at /checkout/charge
+      let paymentData;
       try {
         const verifyResp = await fetch(`${getSquareApiBase(env)}/payments/${encodeURIComponent(paymentId)}`, {
           headers: getSquareHeaders(env),
@@ -701,7 +869,7 @@ export default {
             status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
-        const paymentData = await verifyResp.json();
+        paymentData = await verifyResp.json();
         const paymentStatus = paymentData.payment?.status;
         if (paymentStatus !== 'COMPLETED' && paymentStatus !== 'APPROVED') {
           return new Response(JSON.stringify({ error: `Payment status is ${paymentStatus}, must be COMPLETED` }), {
@@ -715,6 +883,85 @@ export default {
         return new Response(JSON.stringify({ error: 'Could not verify payment with Square' }), {
           status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
+      }
+
+      // Parse the plan claim out of payment.note. /checkout/charge embeds
+      // { planId, frequencyIndex, trainerId, email } as JSON here. If the
+      // payment didn't come through /checkout/charge (legacy or manual)
+      // there's no way to authoritatively credit it — reject and let support
+      // handle it manually.
+      const noteRaw = paymentData.payment?.note || '';
+      let claim;
+      try { claim = JSON.parse(noteRaw); }
+      catch {
+        await logEvent('error', 'credit-grant-no-plan-claim', { paymentId, email, noteRaw: noteRaw.slice(0, 200) }, env);
+        return new Response(JSON.stringify({
+          error: 'Payment is missing plan metadata — contact support to apply credits manually',
+        }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // The email in the claim must match the requesting email — prevents
+      // user A from harvesting credits attached to user B's payment.
+      const claimEmail = typeof claim.email === 'string' ? claim.email.toLowerCase() : '';
+      if (claimEmail && claimEmail !== email) {
+        await logEvent('error', 'credit-grant-email-mismatch', { paymentId, requestEmail: email, claimEmail }, env);
+        return new Response(JSON.stringify({ error: 'Payment belongs to a different account' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Re-derive the authoritative amount + sessions from the catalog using
+      // the planId baked into the payment note. This is the C-02 fix: the
+      // session count comes from server-side data, NOT from the request body.
+      const purchase = resolvePurchase({
+        planId: claim.planId,
+        frequencyIndex: claim.frequencyIndex,
+        trainerId: claim.trainerId,
+      });
+      if (!purchase.ok) {
+        await logEvent('error', 'credit-grant-resolve-failed', { paymentId, email, claim, err: purchase.error }, env);
+        return new Response(JSON.stringify({ error: `Could not resolve plan: ${purchase.error}` }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Verify the actual amount paid matches the catalog amount. This catches
+      // any case where the catalog or Square data has drifted between the two
+      // endpoints — a hard guarantee that "credits granted" can never exceed
+      // "money paid". Currency is also pinned to USD.
+      const paidAmount = Number(paymentData.payment?.amount_money?.amount);
+      const paidCurrency = paymentData.payment?.amount_money?.currency;
+      if (paidCurrency !== 'USD' || paidAmount !== purchase.amountCents) {
+        await logEvent('error', 'credit-grant-amount-mismatch', {
+          paymentId, email, claim,
+          expectedCents: purchase.amountCents, paidCents: paidAmount, paidCurrency,
+        }, env);
+        return new Response(JSON.stringify({
+          error: 'Payment amount does not match plan price — credits not granted',
+        }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      const sessions = purchase.sessions;
+      const duration = purchase.duration || 60;
+      const planName = purchase.planName;
+      const validUntilInput = new Date(
+        Date.now() + (purchase.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+
+      // Flat-price plans (app-only / online) don't grant trainer-session
+      // credits. Mark the payment as granted (so retries short-circuit) and
+      // return early — no Trainerize lookup, no KV credit record.
+      if (purchase.isFlat || sessions === 0) {
+        await kvPut(grantKey, JSON.stringify({
+          paymentId, email, planName, flat: true,
+          grantedAt: new Date().toISOString(),
+        }), { expirationTtl: 90 * 24 * 3600 }, env);
+        await logEvent('credit', `Flat-price purchase recorded for ${email}: ${planName}`, {
+          paymentId, email, planName,
+        }, env);
+        return new Response(JSON.stringify({
+          ok: true, flat: true, message: 'Flat-price plan recorded (no session credits)',
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
       // Find Trainerize user ID — the credits KV key is keyed by it.

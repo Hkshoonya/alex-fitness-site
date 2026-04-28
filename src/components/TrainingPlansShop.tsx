@@ -199,39 +199,56 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
       let squareCustomerId: string | undefined;
       let squareCardId: string | undefined;
       let cardToken: string | null = null;
+      // Server-resolved purchase metadata. Defaults are used only on the
+      // mock-payment path (when Square isn't configured); on the real path
+      // these are filled in from the /checkout/charge response.
+      let serverAmount = getCurrentPrice();
+      let serverSessions = selectedPlan.frequency[selectedFrequency]?.totalSessions || 1;
+      let serverPlanName = selectedPlan.name;
+      let serverValidUntil = new Date(
+        Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000,
+      ).toISOString();
 
       if (cardElement) {
         const result = await cardElement.tokenize();
         if (result.status !== 'OK') throw new Error('Card tokenization failed');
         cardToken = result.token;
-        const paymentResult = await createCardPayment(
-          selectedPlan, selectedTrainer.id, cardToken!,
-          { email: clientInfo.email, name: clientInfo.name, phone: clientInfo.phone },
-        );
+        // C-02 fix: send IDs only — the worker derives amount + sessions
+        // from its own server-side catalog. We CANNOT send amountCents from
+        // the browser; that path is now rejected.
+        const paymentResult = await createCardPayment({
+          planId: selectedPlan.id,
+          frequencyIndex: selectedPlan.frequency.length > 0 ? selectedFrequency : null,
+          trainerId: selectedTrainer.id,
+          cardToken: cardToken!,
+          client: { email: clientInfo.email, name: clientInfo.name, phone: clientInfo.phone },
+        });
         if (!paymentResult.success) throw new Error(paymentResult.error || 'Payment failed');
         paymentId = paymentResult.paymentId!;
         squareCustomerId = paymentResult.customerId;
         squareCardId = paymentResult.cardId;
+        // Use the server's resolved values so localStorage agrees with what
+        // was actually charged + granted in Trainerize.
+        if (paymentResult.amountCents != null) serverAmount = paymentResult.amountCents / 100;
+        if (paymentResult.sessions != null) serverSessions = paymentResult.sessions;
+        if (paymentResult.planName) serverPlanName = paymentResult.planName;
+        if (paymentResult.validUntil) serverValidUntil = paymentResult.validUntil;
       } else {
         await new Promise(resolve => setTimeout(resolve, 2000));
         paymentId = `mock_payment_${Date.now()}`;
       }
 
-      const freq = selectedPlan.frequency[selectedFrequency];
-      const sessionsGranted = freq?.totalSessions || 1;
-      const validUntil = new Date(Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000).toISOString();
-
       storePurchase({
         planId: selectedPlan.id,
         trainerId: selectedTrainer.id,
         paymentId,
-        amount: getCurrentPrice(),
+        amount: serverAmount,
         purchaseDate: new Date().toISOString(),
-        sessionsRemaining: sessionsGranted,
+        sessionsRemaining: serverSessions,
         // Default to 12 weeks when planWeeks is 0/missing (single sessions,
         // classes) — otherwise validUntil=now and the purchase is filtered
         // out as expired immediately.
-        validUntil,
+        validUntil: serverValidUntil,
         // Carry the client details through so PostPurchaseBooking can write
         // real bookings instead of "Client Name" / "client@example.com".
         clientName: clientInfo.name,
@@ -239,12 +256,11 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         clientPhone: clientInfo.phone,
       });
 
-      // Register the purchase's sessions in worker KV so the cron doesn't
-      // auto-invoice the client for sessions they already paid for.
-      // Payment ID is verified server-side against Square — attacker can't
-      // forge free credits by POSTing to this endpoint. Fire-and-forget
-      // because the user's purchase should succeed even if KV is briefly
-      // unavailable; worker will re-reconcile when possible.
+      // Register the purchase in worker KV. We send only paymentId + email
+      // + (optionally) the saved card IDs. The worker re-fetches the Square
+      // payment, parses the plan claim from its note field, and re-derives
+      // sessions from the same authoritative catalog used at /checkout/charge.
+      // Fire-and-forget — purchase already succeeded; KV reconciles on retry.
       if (WORKER_URL && paymentId && !paymentId.startsWith('mock_')) {
         fetch(`${WORKER_URL}/credit-grant`, {
           method: 'POST',
@@ -252,13 +268,6 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
           body: JSON.stringify({
             paymentId,
             email: clientInfo.email,
-            sessions: sessionsGranted,
-            duration: selectedPlan.duration,
-            planName: selectedPlan.name,
-            validUntil,
-            // Forward the IDs so the credit record knows which Square
-            // customer + saved card to auto-charge when the plan's credits
-            // run out.
             squareCustomerId,
             squareCardId,
           }),
@@ -291,22 +300,19 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         selectedPlan.name,
         {
           clientEmail: clientInfo.email,
-          amount: getCurrentPrice(),
+          amount: serverAmount,
           currency: 'USD',
-          planName: selectedPlan.name,
+          planName: serverPlanName,
           paymentId,
           date: new Date().toISOString(),
         },
         {
           clientEmail: clientInfo.email,
-          planName: selectedPlan.name,
-          totalSessions: freq?.totalSessions || 1,
+          planName: serverPlanName,
+          totalSessions: serverSessions,
           sessionsUsed: 0,
-          sessionsRemaining: freq?.totalSessions || 1,
-          // Default to 12 weeks when planWeeks is 0/missing (single sessions,
-        // classes) — otherwise validUntil=now and the purchase is filtered
-        // out as expired immediately.
-        validUntil: new Date(Date.now() + (selectedPlan.planWeeks || 12) * 7 * 24 * 60 * 60 * 1000).toISOString(),
+          sessionsRemaining: serverSessions,
+          validUntil: serverValidUntil,
         }
       );
     } catch (err) {

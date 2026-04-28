@@ -19,16 +19,24 @@ export async function sendMessageToAlex(params: {
   }
 
   try {
-    // Normalize phone for more reliable customer dedup — Square stores in a
-    // specific format and `(813) 421-0633` vs `8134210633` would otherwise
-    // create two records for the same person.
-    const normalizedPhone = params.senderPhone.replace(/\D/g, '').slice(-10);
+    // Square requires E.164 format (`+18134210633`) for phone-number search
+    // — raw 10-digit strings get rejected with INVALID_VALUE. We strip
+    // formatting first, take the last 10 digits (handles inputs that
+    // include +1 / 1 / leading parens / dashes), then re-prefix with +1
+    // for the US phone numbers this site collects.
+    const tenDigits = params.senderPhone.replace(/\D/g, '').slice(-10);
+    const e164 = tenDigits.length === 10 ? `+1${tenDigits}` : '';
+    if (!e164) {
+      // Square will reject anything else as INVALID_VALUE — fail fast with a
+      // useful message instead of pretending to search.
+      throw new Error('Phone number must be 10 digits (US)');
+    }
 
     const customerResponse = await fetch(`${SQUARE_API_BASE}/customers/search`, {
       method: 'POST',
       headers: getSquareHeaders(),
       body: JSON.stringify({
-        query: { filter: { phone_number: { exact: normalizedPhone } } },
+        query: { filter: { phone_number: { exact: e164 } } },
       }),
     });
 
@@ -47,16 +55,28 @@ export async function sendMessageToAlex(params: {
           body: JSON.stringify({
             given_name: params.senderName.split(' ')[0],
             family_name: params.senderName.split(' ').slice(1).join(' ') || '',
-            phone_number: normalizedPhone,
+            phone_number: e164,
           }),
         });
 
-        if (!createResponse.ok) throw new Error('Failed to create customer');
+        if (!createResponse.ok) {
+          // Square does phone-realism validation (Twilio-style — 555 numbers
+          // and obvious test patterns get rejected as INVALID_PHONE_NUMBER).
+          // Surface the upstream detail so the user knows to enter a real
+          // phone number, not a generic "failed to create".
+          const errBody = await createResponse.json().catch(() => ({}));
+          const detail = errBody.errors?.[0]?.detail || 'Failed to create customer';
+          if (errBody.errors?.[0]?.code === 'INVALID_PHONE_NUMBER') {
+            throw new Error('Please enter a valid US phone number');
+          }
+          throw new Error(detail);
+        }
         const createData = await createResponse.json();
         customerId = createData.customer.id;
       }
     } else {
-      throw new Error('Customer search failed');
+      const errBody = await customerResponse.json().catch(() => ({}));
+      throw new Error(errBody.errors?.[0]?.detail || 'Customer search failed');
     }
 
     // APPEND to the existing note rather than overwrite — Square's PUT

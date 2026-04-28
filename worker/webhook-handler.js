@@ -469,6 +469,56 @@ export default {
       }
     }
 
+    // ===== GOOGLE PLACES (NEW) REVIEWS — server-side proxy =====
+    // Live reviews from Google Places API. Browser-origin requests to Places
+    // are CORS-blocked anyway, so this endpoint exists. Cached in KV for 6h
+    // because Places quota is metered per request and reviews change slowly.
+    // Fixes H-03 from the launch audit (page no longer presents hardcoded
+    // testimonials as live Google reviews).
+    if (url.pathname === '/api/google/places/reviews' && request.method === 'GET') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 403, headers: corsHeaders,
+        });
+      }
+      if (!await checkRateLimit(request, 'google-places', 60, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Cache hit — serve immediately. KV TTL handles staleness.
+      const cacheKey = 'places:reviews:v1';
+      try {
+        const cached = await kvGet(cacheKey, env);
+        if (cached) {
+          return new Response(cached, {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'X-Cache': 'HIT',
+            },
+          });
+        }
+      } catch { /* fall through to fresh fetch */ }
+
+      const result = await fetchGooglePlaceReviews(env);
+      if (!result.ok) {
+        await logEvent('error', 'google-places-fetch-failed', { error: result.error }, env);
+        // Return 200 with empty reviews so the frontend can fall back gracefully
+        // without surfacing a CORS-style failure.
+        return new Response(JSON.stringify({ reviews: [], error: result.error }), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json', 'X-Cache': 'MISS' },
+        });
+      }
+      const body = JSON.stringify(result);
+      await kvPut(cacheKey, body, { expirationTtl: 6 * 60 * 60 }, env);
+      return new Response(body, {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json', 'X-Cache': 'MISS' },
+      });
+    }
+
     // ===== SQUARE API PROXY =====
     // ANY /api/square/* → forwards to Square Connect API with server-side auth
     if (url.pathname.startsWith('/api/square/')) {
@@ -3627,6 +3677,69 @@ async function createGoogleMeetEvent(params, env) {
       eventId: event.id,
       calendarLink: event.htmlLink,
     },
+  };
+}
+
+// ===== GOOGLE PLACES (NEW) — REVIEWS FETCH =====
+
+/**
+ * Fetch live reviews for the configured Google Place via Places API (New).
+ * Returns at most 5 reviews per Google's standard response. The shape is
+ * normalized to match the frontend's GoogleReview interface.
+ *
+ * Requires env.GOOGLE_PLACES_API_KEY and env.GOOGLE_PLACE_ID. The key needs
+ * the "Places API (New)" scope enabled in the Google Cloud project.
+ */
+async function fetchGooglePlaceReviews(env) {
+  const apiKey = env.GOOGLE_PLACES_API_KEY;
+  const placeId = env.GOOGLE_PLACE_ID;
+  if (!apiKey || !placeId) {
+    return { ok: false, error: 'Places API not configured' };
+  }
+  // Field mask is REQUIRED for Places API (New). Without it, you get a 400.
+  // See: https://developers.google.com/maps/documentation/places/web-service/place-details#fieldmask
+  const fieldMask = 'id,displayName,rating,userRatingCount,reviews,googleMapsUri';
+  let resp;
+  try {
+    resp = await fetch(
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
+      {
+        headers: {
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': fieldMask,
+        },
+      }
+    );
+  } catch (e) {
+    return { ok: false, error: `Network error: ${e?.message}` };
+  }
+  if (!resp.ok) {
+    const errText = await resp.text();
+    return { ok: false, error: `Places API ${resp.status}: ${errText.slice(0, 300)}` };
+  }
+  const data = await resp.json();
+  const reviews = (data.reviews || []).map((r, idx) => {
+    // Google's review IDs are unstable across fetches, so synthesize one from
+    // publishTime + index. Stable enough for React keys.
+    const stableId = `g_${idx}_${(r.publishTime || '').replace(/[^0-9]/g, '').slice(0, 14)}`;
+    return {
+      id: stableId,
+      name: r.authorAttribution?.displayName || 'Anonymous',
+      rating: typeof r.rating === 'number' ? r.rating : 5,
+      date: r.publishTime ? r.publishTime.split('T')[0] : '',
+      relativeTime: r.relativePublishTimeDescription || '',
+      text: r.text?.text || r.originalText?.text || '',
+      profilePhoto: r.authorAttribution?.photoUri || undefined,
+      source: 'google',
+    };
+  });
+  return {
+    ok: true,
+    reviews,
+    rating: typeof data.rating === 'number' ? data.rating : null,
+    totalRatings: data.userRatingCount || null,
+    googleMapsUri: data.googleMapsUri || null,
+    fetchedAt: new Date().toISOString(),
   };
 }
 

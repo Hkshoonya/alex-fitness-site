@@ -19,16 +19,19 @@ interface ReviewCache {
 }
 
 // Configuration
-// Google Places API calls used to happen directly from the browser, but they
-// (a) require a key that would be baked into the public JS bundle, and
-// (b) are CORS-blocked by Google for browser-origin requests anyway. Dropping
-// that path entirely — the site now always renders FALLBACK_REVIEWS. If we
-// want live reviews in the future, wire a /api/google/places/details endpoint
-// into the worker and proxy the call there.
-const GOOGLE_PLACE_ID = '';
+// Live Google reviews come from the worker proxy at /api/google/places/reviews
+// — Places API key + place ID stay server-side, and the worker caches the
+// response in KV for 6 hours. Browser-origin requests to Places (New) are
+// CORS-blocked, so this proxy is the only way to read them from the client.
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 const CACHE_KEY = 'alex_fitness_reviews';
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
-const GOOGLE_MAPS_URL = 'https://www.google.com/maps/place/Alex+Davis+Fitness/';
+// Live state — fetchFromGoogle() updates googleMapsUrl with the canonical
+// short URL returned by Places API; otherwise the search-query fallback runs.
+const REVIEW_LINKS = {
+  googleMapsUrl: 'https://www.google.com/maps/place/Alex+Davis+Fitness/',
+  haveLiveData: false,
+};
 
 // Fallback reviews — used when API is not configured
 const FALLBACK_REVIEWS: GoogleReview[] = [
@@ -144,18 +147,34 @@ function cacheReviews(reviews: GoogleReview[]): void {
   const cache: ReviewCache = {
     reviews,
     fetchedAt: new Date().toISOString(),
-    placeId: GOOGLE_PLACE_ID,
+    placeId: 'worker-proxy',
   };
   localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
 }
 
 /**
- * Placeholder — live Google reviews fetching was removed when we stopped
- * shipping the Google API key in the browser bundle. Returns [] so the
- * caller falls back to FALLBACK_REVIEWS.
+ * Fetch live reviews via the worker's Places (New) proxy. The worker
+ * handles the API key, the field mask, and 6-hour KV caching. Returns []
+ * on any error so getReviews() can fall back to FALLBACK_REVIEWS.
  */
 async function fetchFromGoogle(): Promise<GoogleReview[]> {
-  return [];
+  if (!WORKER_URL) return [];
+  try {
+    const resp = await fetch(`${WORKER_URL}/api/google/places/reviews`);
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    if (data.googleMapsUri && typeof data.googleMapsUri === 'string') {
+      REVIEW_LINKS.googleMapsUrl = data.googleMapsUri;
+    }
+    if (Array.isArray(data.reviews) && data.reviews.length > 0) {
+      REVIEW_LINKS.haveLiveData = true;
+      return data.reviews;
+    }
+    return [];
+  } catch (e) {
+    console.error('Places proxy fetch failed:', e);
+    return [];
+  }
 }
 
 /**
@@ -253,16 +272,26 @@ export function getReviewCacheStatus(): { lastFetched: string | null; reviewCoun
 }
 
 /**
- * Google Maps review URL — for "See all reviews" link
+ * Google Maps review URL — for "See all reviews" link.
+ * After a successful Places fetch this is replaced with the canonical
+ * googleMapsUri from the API response; before that, it's a search query.
  */
 export function getGoogleReviewsUrl(): string {
-  return GOOGLE_MAPS_URL;
+  return REVIEW_LINKS.googleMapsUrl;
 }
 
 /**
- * Check if Google API is configured
+ * True only when the last Places fetch returned at least one live review —
+ * GoogleReviews.tsx uses this to decide whether the Google "G" branding +
+ * "See all on Google Maps" CTA are honest to display.
+ */
+export function hasLiveGoogleReviews(): boolean {
+  return REVIEW_LINKS.haveLiveData;
+}
+
+/**
+ * Check if Google API is configured (worker proxy URL is set).
  */
 export function isGoogleApiConfigured(): boolean {
-  // Live Google fetch is disabled; see fetchFromGoogle notes.
-  return false;
+  return !!WORKER_URL;
 }

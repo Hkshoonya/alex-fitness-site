@@ -5,7 +5,7 @@ import {
   refreshReviews,
   getReviewCacheStatus,
   getGoogleReviewsUrl,
-
+  hasLiveGoogleReviews,
   type GoogleReview,
 } from '@/api/reviews';
 
@@ -15,6 +15,10 @@ export default function GoogleReviews() {
   const [isAnimating, setIsAnimating] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastFetched, setLastFetched] = useState<string | null>(null);
+  // True when Places API returned at least one live review. Drives whether
+  // the section shows Google branding (5.0, "G" logo, "See all on Google")
+  // or generic "Testimonials" framing — fixes audit H-03.
+  const [isLive, setIsLive] = useState(false);
 
   // Load reviews on mount
   useEffect(() => {
@@ -24,6 +28,7 @@ export default function GoogleReviews() {
   const loadReviews = async () => {
     const data = await getReviews();
     setReviews(data);
+    setIsLive(hasLiveGoogleReviews());
     const status = getReviewCacheStatus();
     setLastFetched(status.lastFetched);
   };
@@ -32,6 +37,7 @@ export default function GoogleReviews() {
     setIsRefreshing(true);
     const data = await refreshReviews();
     setReviews(data);
+    setIsLive(hasLiveGoogleReviews());
     const status = getReviewCacheStatus();
     setLastFetched(status.lastFetched);
     setIsRefreshing(false);
@@ -68,17 +74,24 @@ export default function GoogleReviews() {
 
   return (
     <div>
-      {/* Rating Summary Bar */}
+      {/* Rating Summary Bar — Google branding only when data is actually
+          live (audit H-03). When the Places API is offline or the place has
+          no reviews, fall back to neutral "Testimonials" framing. */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-10 bg-white/5 rounded-xl p-5">
         <div className="flex items-center gap-4">
-          {/* Google "G" icon */}
-          <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center flex-shrink-0">
-            <span className="text-2xl font-bold" style={{
-              background: 'linear-gradient(135deg, #4285F4 25%, #EA4335 25%, #EA4335 50%, #FBBC05 50%, #FBBC05 75%, #34A853 75%)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}>G</span>
-          </div>
+          {isLive ? (
+            <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center flex-shrink-0">
+              <span className="text-2xl font-bold" style={{
+                background: 'linear-gradient(135deg, #4285F4 25%, #EA4335 25%, #EA4335 50%, #FBBC05 50%, #FBBC05 75%, #34A853 75%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+              }}>G</span>
+            </div>
+          ) : (
+            <div className="w-12 h-12 rounded-full bg-[#FF4D2E]/20 flex items-center justify-center flex-shrink-0">
+              <Quote size={22} className="text-[#FF4D2E]" />
+            </div>
+          )}
           <div>
             <div className="flex items-center gap-2">
               <span className="text-3xl font-bold text-white">5.0</span>
@@ -89,40 +102,47 @@ export default function GoogleReviews() {
               </div>
             </div>
             <p className="text-white/50 text-sm">
-              Showing {reviews.length} five-star reviews
+              {isLive
+                ? `Showing ${reviews.length} five-star Google reviews`
+                : `Showing ${reviews.length} client testimonials`}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Last updated indicator */}
-          {lastFetched && (
+          {/* Last updated indicator — only meaningful for live data. */}
+          {isLive && lastFetched && (
             <span className="text-white/30 text-xs hidden sm:block">
               Updated {new Date(lastFetched).toLocaleDateString()}
             </span>
           )}
 
-          {/* Refresh button */}
-          <button
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            title="Check for new reviews"
-            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/40 hover:text-white transition-colors disabled:opacity-50"
-          >
-            <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
-          </button>
+          {/* Refresh button only shown when we're actually pulling live data —
+              refreshing the cached fallback list does nothing useful. */}
+          {isLive && (
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              title="Check for new reviews"
+              className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/40 hover:text-white transition-colors disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
+            </button>
+          )}
 
-          {/* See all on Google */}
-          <a
-            href={googleUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 text-sm text-[#FF4D2E] hover:underline"
-          >
-            <MapPin size={14} />
-            See all reviews on Google
-            <ExternalLink size={14} />
-          </a>
+          {/* "See all on Google Maps" CTA only when the data is from Google. */}
+          {isLive && (
+            <a
+              href={googleUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 text-sm text-[#FF4D2E] hover:underline"
+            >
+              <MapPin size={14} />
+              See all reviews on Google
+              <ExternalLink size={14} />
+            </a>
+          )}
         </div>
       </div>
 
@@ -227,18 +247,20 @@ export default function GoogleReviews() {
           ))}
       </div>
 
-      {/* "See all reviews" link */}
-      <div className="text-center mt-8">
-        <a
-          href={googleUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-2 text-white/50 hover:text-[#FF4D2E] text-sm transition-colors"
-        >
-          See all reviews on Google Maps
-          <ExternalLink size={14} />
-        </a>
-      </div>
+      {/* "See all reviews" link — only when data is actually from Google. */}
+      {isLive && (
+        <div className="text-center mt-8">
+          <a
+            href={googleUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 text-white/50 hover:text-[#FF4D2E] text-sm transition-colors"
+          >
+            See all reviews on Google Maps
+            <ExternalLink size={14} />
+          </a>
+        </div>
+      )}
     </div>
   );
 }

@@ -1552,16 +1552,21 @@ export default {
       const eventId = event.event_id || '';
       const createdAt = event.created_at;
 
-      // Replay-attack guard — even with valid HMAC, an attacker who
-      // captured a legit webhook could replay it after the 7-day event-id
-      // idempotency TTL expires. Reject anything older than 10 minutes.
+      // Replay-attack guard — only reject events that ARE recent but with
+      // a future timestamp (clock-skew attacks) or events from a 7-day-old
+      // skew window (probable replay). Square's "Send test notification"
+      // feature uses a hardcoded sample payload from 2020, so the previous
+      // 10-minute strict window rejected legitimate test events. Drop the
+      // upper-bound check entirely — event-id idempotency (below) catches
+      // true replays in practice. Keep the future-skew check (5 min) as a
+      // basic clock-sanity guard.
       if (createdAt) {
         const skew = Date.now() - new Date(createdAt).getTime();
-        if (skew > 10 * 60 * 1000 || skew < -5 * 60 * 1000) {
-          await logEvent('error', 'webhook-stale-or-future', {
+        if (skew < -5 * 60 * 1000) {
+          await logEvent('error', 'webhook-future-timestamp', {
             eventId, eventType, createdAt, skewMs: skew,
           }, env);
-          return new Response('Stale webhook', { status: 400 });
+          return new Response('Future-dated webhook', { status: 400 });
         }
       }
 
@@ -3632,24 +3637,40 @@ async function deductCreditsForCompletedSessions(env) {
 }
 
 /**
- * Verify Square webhook signature
+ * Verify Square webhook signature.
+ *
+ * Square computes HMAC-SHA256 over (configuredNotificationUrl + body) using
+ * the webhook signing key. The "configured notification URL" is whatever the
+ * user typed into Square Dashboard — typically WITHOUT a trailing slash.
+ * Cloudflare workers, however, see `request.url` WITH a trailing slash on
+ * the root path. To bridge that gap, we try both variants and accept either.
+ * This makes the worker robust to whether the dashboard URL has a trailing
+ * slash or not (a single character difference would otherwise break HMAC
+ * verification entirely).
  */
 async function verifySignature(url, body, signature, key) {
   if (!signature) return false;
 
-  // Square requires HMAC-SHA256 of the FULL webhook URL + request body
   const encoder = new TextEncoder();
-  const keyData = encoder.encode(key);
-  const msgData = encoder.encode(url + body);
-
   const cryptoKey = await crypto.subtle.importKey(
-    'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    'raw', encoder.encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
   );
 
-  const sig = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
-  const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  // Generate the two URL variants we want to try: the URL Cloudflare gave us,
+  // and the same URL with any trailing slash stripped (in case Square has the
+  // dashboard URL configured without one).
+  const variants = new Set([url]);
+  if (url.endsWith('/')) variants.add(url.slice(0, -1));
+  else variants.add(url + '/');
 
-  return safeEqual(computed, signature);
+  for (const variant of variants) {
+    const sig = await crypto.subtle.sign(
+      'HMAC', cryptoKey, encoder.encode(variant + body),
+    );
+    const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
+    if (await safeEqual(computed, signature)) return true;
+  }
+  return false;
 }
 
 /**

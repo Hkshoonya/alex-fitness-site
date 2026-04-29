@@ -1584,51 +1584,75 @@ export default {
       const apiBase = getSquareApiBase(env);
       const headers = getSquareHeaders(env);
 
-      // Look up customer in Square by email.
-      let customer = null;
+      // Look up customer in Square by email. Use `fuzzy` filter — `exact` is
+      // case-sensitive and customers commonly have mixed-case email records
+      // that won't match a lowercased input. We post-validate by comparing
+      // the returned email_address to our normalized input.
+      const emailLower = tokenData.email.toLowerCase();
+      const matchedCustomers = [];
       try {
         const sr = await fetch(`${apiBase}/customers/search`, {
           method: 'POST',
           headers,
           body: JSON.stringify({
-            query: { filter: { email_address: { exact: tokenData.email } } },
+            query: { filter: { email_address: { fuzzy: tokenData.email } } },
+            limit: 20,
           }),
         });
         if (sr.ok) {
           const sd = await sr.json();
-          customer = sd.customers?.[0] || null;
+          for (const c of sd.customers || []) {
+            const emailField = (c.email_address || '').toLowerCase().trim();
+            if (emailField === emailLower) matchedCustomers.push(c);
+          }
+        } else {
+          const errBody = await sr.text().catch(() => '');
+          await logEvent('error', 'portal-customer-search-non-ok', {
+            email: emailLower, status: sr.status, body: errBody.slice(0, 200),
+          }, env);
         }
       } catch (e) {
-        await logEvent('error', 'portal-customer-search-failed', { err: e?.message }, env);
+        await logEvent('error', 'portal-customer-search-failed', { email: emailLower, err: e?.message }, env);
       }
 
+      const primary = matchedCustomers[0] || null;
+
       // Issue a session token (separate from magic-link). Bound to the
-      // customer record so cancel actions can verify ownership.
+      // primary customer record (first match) for cancel ownership checks.
       const sessionToken = crypto.randomUUID().replace(/-/g, '');
       await kvPut(`portal-session:${sessionToken}`, JSON.stringify({
         email: tokenData.email,
-        customerId: customer?.id || null,
+        customerId: primary?.id || null,
+        // Save all matched customer IDs so cancel can verify against any of
+        // them when a person has multiple Square records.
+        customerIds: matchedCustomers.map(c => c.id),
         createdAt: Date.now(),
       }), { expirationTtl: 30 * 60 }, env); // 30 min
 
+      // Fetch bookings for EACH matched customer record and combine.
+      // Square sometimes creates duplicate customer entries for the same
+      // person (e.g., one from in-studio booking, one from website). Pulling
+      // bookings for each ensures none are missed.
       let bookings = [];
-      if (customer) {
+      let rawTotal = 0;
+      for (const c of matchedCustomers) {
         try {
           const br = await fetch(
-            `${apiBase}/bookings?customer_id=${encodeURIComponent(customer.id)}&location_id=${encodeURIComponent('LD0SGZXT6ZSSD')}&limit=50`,
+            `${apiBase}/bookings?customer_id=${encodeURIComponent(c.id)}&location_id=${encodeURIComponent('LD0SGZXT6ZSSD')}&limit=50`,
             { headers },
           );
           if (br.ok) {
             const bd = await br.json();
+            const items = bd.bookings || [];
+            rawTotal += items.length;
             const now = Date.now();
-            bookings = (bd.bookings || [])
+            const filtered = items
               .filter(b => {
                 if (!b.start_at || !b.status) return false;
                 const dead = ['CANCELLED_BY_SELLER', 'CANCELLED_BY_CUSTOMER', 'DECLINED', 'NO_SHOW'];
                 if (dead.includes(b.status)) return false;
                 return new Date(b.start_at).getTime() > now;
               })
-              .sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
               .map(b => ({
                 id: b.id,
                 startAt: b.start_at,
@@ -1637,11 +1661,32 @@ export default {
                 teamMemberId: b.appointment_segments?.[0]?.team_member_id,
                 serviceVariationId: b.appointment_segments?.[0]?.service_variation_id,
               }));
+            bookings.push(...filtered);
+          } else {
+            const errBody = await br.text().catch(() => '');
+            await logEvent('error', 'portal-bookings-fetch-non-ok', {
+              email: emailLower, customerId: c.id, status: br.status, body: errBody.slice(0, 200),
+            }, env);
           }
         } catch (e) {
-          await logEvent('error', 'portal-bookings-fetch-failed', { customerId: customer.id, err: e?.message }, env);
+          await logEvent('error', 'portal-bookings-fetch-failed', { customerId: c.id, err: e?.message }, env);
         }
       }
+      // Dedupe by id (in case a booking surfaces under multiple customer
+      // records) and re-sort by start time.
+      const seen = new Set();
+      bookings = bookings
+        .filter(b => seen.has(b.id) ? false : (seen.add(b.id), true))
+        .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+
+      // Always log the verify outcome — invaluable for debugging "why no
+      // bookings?" Bug reports without this, we have nothing to go on.
+      await logEvent('info', 'portal-verify-result', {
+        email: emailLower,
+        customersMatched: matchedCustomers.length,
+        rawBookings: rawTotal,
+        upcomingBookings: bookings.length,
+      }, env);
 
       return new Response(JSON.stringify({
         success: true,

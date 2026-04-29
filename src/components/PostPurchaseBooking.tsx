@@ -155,6 +155,21 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
     const coachId = DEFAULT_SQUARE_COACH;
     const results: Array<{ slot: BookingSlot; success: boolean; error?: string }> = [];
 
+    // Phase B: bookings need a purchaseToken so the worker can verify the
+    // payment and decrement credits server-side. Find the matching purchase
+    // for this plan/trainer combo with the most sessions remaining. We pick
+    // ONE purchase for the whole batch — if the user has multiple purchases
+    // and the batch spans them, the worker will reject overflow with
+    // "no-credits" and the user can re-book against the second purchase.
+    const allPurchases = getPurchases();
+    const matchingPurchases = allPurchases
+      .filter((p: any) => p.sessionsRemaining > 0)
+      .filter((p: any) => !plan?.id || p.planId === plan.id)
+      .filter((p: any) => !trainer?.id || p.trainerId === trainer.id)
+      // Skip mock-payment IDs — those will fail at the worker anyway.
+      .filter((p: any) => p.paymentId && !String(p.paymentId).startsWith('mock_'));
+    const purchaseToken = matchingPurchases[0]?.paymentId;
+
     for (const slot of selectedDates) {
       const startAt = slotToIsoStart(slot.date, slot.time);
       if (!startAt) {
@@ -167,7 +182,7 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
         email: clientEmail,
         phone: clientPhone,
         goals: goalsNote,
-      });
+      }, undefined, purchaseToken);
       results.push({
         slot,
         success: result.success,

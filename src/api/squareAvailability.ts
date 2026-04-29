@@ -467,85 +467,10 @@ export async function getWeekAvailability(
 
 /**
  * Upsert a Square Customer by email.
- * Returns { customerId, isNew } so the booking flow can mark new vs
- * returning clients in the customer_note (visible to coach in Square UI).
- *
- * Search first (no side effects). Create only if not found. Both calls go
- * through the worker proxy which holds the Square access token.
- */
-async function upsertSquareCustomer(info: {
-  name: string; email: string; phone?: string;
-}): Promise<{ customerId: string; isNew: boolean }> {
-  // 1. Search by email
-  const searchResp = await fetch(`${SQUARE_API_BASE}/customers/search`, {
-    method: 'POST',
-    headers: headers(),
-    body: JSON.stringify({
-      query: { filter: { email_address: { exact: info.email } } },
-      limit: 1,
-    }),
-  });
-  if (searchResp.ok) {
-    const sd = await searchResp.json();
-    const found = sd.customers?.[0]?.id;
-    if (found) return { customerId: found, isNew: false };
-  }
-
-  // 2. Create
-  const nameParts = info.name.trim().split(/\s+/);
-  const firstName = nameParts[0] || '';
-  const lastName = nameParts.slice(1).join(' ');
-  const createResp = await fetch(`${SQUARE_API_BASE}/customers`, {
-    method: 'POST',
-    headers: headers(),
-    body: JSON.stringify({
-      idempotency_key: `cust-${info.email.slice(0, 40)}-${Date.now()}`,
-      given_name: firstName || undefined,
-      family_name: lastName || undefined,
-      email_address: info.email,
-      phone_number: info.phone || undefined,
-    }),
-  });
-  if (!createResp.ok) {
-    const err = await createResp.json().catch(() => ({}));
-    throw new Error(err.errors?.[0]?.detail || 'Could not create Square customer');
-  }
-  const cd = await createResp.json();
-  const customerId = cd.customer?.id;
-  if (!customerId) throw new Error('Customer created but no id returned');
-  return { customerId, isNew: true };
-}
-
-// Module-level cache so repeated bookings don't re-fetch the same catalog
-// version. Versions only change when Alex edits the catalog item in Square.
-const catalogVersionCache = new Map<string, number>();
-
 /**
- * Fetch the current Square catalog version for a service variation. Required
- * by the Bookings API on each appointment segment (optimistic concurrency
- * check). Cached in memory for the session.
- */
-async function getCatalogVersion(serviceVariationId: string): Promise<number | undefined> {
-  if (catalogVersionCache.has(serviceVariationId)) {
-    return catalogVersionCache.get(serviceVariationId);
-  }
-  try {
-    const resp = await fetch(`${SQUARE_API_BASE}/catalog/object/${serviceVariationId}`, {
-      headers: headers(),
-    });
-    if (!resp.ok) return undefined;
-    const data = await resp.json();
-    const version = Number(data.object?.version);
-    if (!Number.isFinite(version)) return undefined;
-    catalogVersionCache.set(serviceVariationId, version);
-    return version;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Create a booking via Square Bookings API
+ * Create a booking — routes through the worker which handles customer
+ * upsert, catalog version lookup, and credit gating. Frontend never touches
+ * Square's /v2/bookings directly anymore (Phase B).
  */
 export async function createBooking(
   teamMemberId: string,
@@ -557,6 +482,12 @@ export async function createBooking(
   // — needed because a 30-min consultation maps to a different catalog
   // service than a paid 30-min PT session.
   serviceVariationId?: string,
+  // Phase B: paymentId from a prior /credit-grant. When provided, the call
+  // routes to /book-session (credit-gated). When omitted (or empty) it
+  // routes to /book-consultation (free, rate-limited only). The frontend
+  // never creates Square bookings directly anymore — the worker is the
+  // only path that touches Square's /v2/bookings.
+  purchaseToken?: string,
 ): Promise<{ success: boolean; bookingId?: string; error?: string }> {
 
   if (!isConfigured()) {
@@ -592,73 +523,67 @@ export async function createBooking(
     return { success: true, bookingId };
   }
 
+  // Phase B: bookings always go through the worker. Direct calls to Square's
+  // /v2/bookings POST are no longer permitted via the proxy — the worker
+  // gates paid bookings on a verified credit-grant record before forwarding
+  // to Square. Two endpoints:
+  //   purchaseToken set → /book-session (verifies credits, atomically
+  //                                       decrements, creates booking)
+  //   purchaseToken unset → /book-consultation (free, rate-limited only)
+  if (!WORKER_URL) {
+    return {
+      success: false,
+      error: 'Booking is not configured (worker URL missing). Please contact support.',
+    };
+  }
+
+  const endpoint = purchaseToken ? '/book-session' : '/book-consultation';
+  const finalServiceVariationId = serviceVariationId || getServiceId(duration);
+
   try {
-    // Square Bookings require an existing Square Customer (customer_id on
-    // the booking object). Upsert by email FIRST — search, create-if-missing,
-    // then use that customerId. Without this step Square rejects with
-    // {detail: "not found", field: "customer_id"}.
-    // isNew tells us whether this is a brand-new client or a returning one,
-    // surfaced into the customer_note so the coach sees it in Square's UI.
-    const { customerId, isNew: isNewClient } = await upsertSquareCustomer(customerInfo);
-
-    // Square also requires service_variation_version on each appointment
-    // segment (optimistic concurrency check against the catalog). Fetch the
-    // current version of the service variation before posting the booking.
-    // Without this Square rejects with {detail:"Missing required parameter.",
-    // field:"...service_variation_version"}.
-    const finalServiceVariationId = serviceVariationId || getServiceId(duration);
-    const serviceVariationVersion = finalServiceVariationId
-      ? await getCatalogVersion(finalServiceVariationId)
-      : undefined;
-
-    // Idempotency key prevents duplicate bookings from double-clicks or retries
-    const idempotencyKey = `booking-${startAt}-${customerInfo.email}-${duration}`;
-
-    // Customer-status marker — first line of the note so it's the first
-    // thing Alex sees on his Square calendar / mobile booking view.
-    const clientStatusTag = isNewClient ? '[NEW CLIENT]' : '[RETURNING CLIENT]';
-    const customerNote = [
-      clientStatusTag,
-      `Name: ${customerInfo.name}`,
-      `Email: ${customerInfo.email}`,
-      `Phone: ${customerInfo.phone}`,
-      `Goals: ${customerInfo.goals || 'Not specified'}`,
-    ].join('\n');
-
-    const response = await fetch(`${SQUARE_API_BASE}/bookings`, {
+    const response = await fetch(`${WORKER_URL}${endpoint}`, {
       method: 'POST',
-      headers: headers(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        idempotency_key: idempotencyKey,
-        booking: {
-          location_id: SQUARE_LOCATION_ID,
-          customer_id: customerId,
-          start_at: startAt,
-          appointment_segments: [{
-            duration_minutes: duration,
-            team_member_id: teamMemberId,
-            service_variation_id: finalServiceVariationId || undefined,
-            service_variation_version: serviceVariationVersion,
-          }],
-          customer_note: customerNote,
-          // seller_note is also visible to Alex but not the customer — use it
-          // for an at-a-glance flag on the booking card itself.
-          seller_note: clientStatusTag,
-        },
+        name: customerInfo.name,
+        email: customerInfo.email,
+        phone: customerInfo.phone,
+        goals: customerInfo.goals || '',
+        startAt,
+        duration,
+        teamMemberId,
+        serviceVariationId: finalServiceVariationId,
+        ...(purchaseToken ? { purchaseToken } : {}),
       }),
     });
 
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.errors?.[0]?.detail || 'Booking failed');
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || !data.success) {
+      // Map worker reason codes to user-friendly messages so the UI
+      // doesn't surface raw "no-credits" / "invalid-purchase" tags.
+      const reasonMessages: Record<string, string> = {
+        'missing-fields': 'Some required information is missing — please refresh and try again.',
+        'invalid-purchase': 'We could not verify your purchase. If you just bought a plan, give it 30 seconds and retry.',
+        'email-mismatch':  'This payment is registered under a different email address.',
+        'no-credits':       'You have no remaining sessions on this plan. Buy more sessions to continue.',
+        'flat-plan-no-sessions': 'Your plan does not include in-person sessions.',
+        'locked-retry':     'Another booking is being processed for this account — retry in a moment.',
+        'square-error':     data.detail ? `Booking failed: ${String(data.detail).slice(0, 200)}` : 'Could not create the booking. Please try again or contact us.',
+        'fetch-failed':     'Could not reach the booking service. Please try again in a moment.',
+        'corrupt-grant':    'Your purchase record is corrupted — please contact support.',
+        'invalid-json':     'Bad request format.',
+      };
+      const reason = data.reason || (response.ok ? 'unknown' : `http-${response.status}`);
+      try { localStorage.removeItem(AVAILABILITY_CACHE_KEY); } catch { /* private mode */ }
+      return { success: false, error: reasonMessages[reason] || `Booking failed (${reason}).` };
     }
 
-    const data = await response.json();
-
-    // Also store locally
+    // Update the local cache so a coach refresh sees the new booking even
+    // before the next Square availability fetch lands.
     const startDate = new Date(startAt);
     const booking = {
-      id: data.booking.id,
+      id: data.bookingId,
       date: startDate.toISOString().split('T')[0],
       time: formatTime(startDate.getHours(), startDate.getMinutes()),
       name: customerInfo.name,
@@ -668,28 +593,23 @@ export async function createBooking(
       duration,
       trainerId: teamMemberId,
       status: 'confirmed',
-      squareAppointmentId: data.booking.id,
+      squareAppointmentId: data.bookingId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
-    const existing = JSON.parse(localStorage.getItem('bookings') || '[]');
-    existing.push(booking);
-    localStorage.setItem('bookings', JSON.stringify(existing));
-    localStorage.removeItem(AVAILABILITY_CACHE_KEY);
+    try {
+      const existing = JSON.parse(localStorage.getItem('bookings') || '[]');
+      existing.push(booking);
+      localStorage.setItem('bookings', JSON.stringify(existing));
+      localStorage.removeItem(AVAILABILITY_CACHE_KEY);
+    } catch { /* quota / private mode */ }
 
-    // Sync to Trainerize — only when worker is NOT configured.
-    // When worker is active, the Square booking.created webhook handles the sync,
-    // so we skip here to avoid creating duplicate Trainerize appointments.
-    if (!WORKER_URL) {
-      syncToTrainerize(customerInfo, startAt, duration, teamMemberId);
-    }
+    // Trainerize sync still happens server-side via the Square
+    // booking.created webhook — no need to fire from the browser.
 
-    return { success: true, bookingId: data.booking.id };
+    return { success: true, bookingId: data.bookingId };
   } catch (error) {
-    // Bust the cache even on failure — if two users raced for the same slot,
-    // the loser's next attempt would otherwise read the same stale "available"
-    // slot from cache until the 15-min TTL.
     try { localStorage.removeItem(AVAILABILITY_CACHE_KEY); } catch { /* private mode */ }
     return {
       success: false,

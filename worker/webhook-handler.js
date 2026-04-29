@@ -438,8 +438,12 @@ export default {
       // Allowlist entries: [pattern, allowedMethods...].
       // ANYTHING that doesn't match exactly here will 403.
       const SQUARE_ALLOW = [
-        // Bookings
-        [/^bookings$/,                              ['GET', 'POST']],
+        // Bookings — POST removed Phase B (now via dedicated /book-session
+        // and /book-consultation endpoints with credit gating). GET stays
+        // for the calendar view; PUT/DELETE on individual bookings stay
+        // for reschedule/cancel flows that already pass through the
+        // signed-origin check.
+        [/^bookings$/,                              ['GET']],
         [/^bookings\/[A-Za-z0-9_-]+$/,              ['GET', 'PUT', 'DELETE']],
         [/^bookings\/availability\/search$/,        ['POST']],
         // Cards (save card to customer)
@@ -1197,6 +1201,217 @@ export default {
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } finally {
         try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* best-effort */ }
+      }
+    }
+
+    // ===== BOOKING CREATION (server-side, credit-gated) =====
+    //
+    // Phase B fix: previously the frontend created Square bookings directly
+    // via /api/square/bookings POST. Anyone with a forged Origin header could
+    // hit that and create unauthorized bookings. The mock-payment branch in
+    // TrainingPlansShop also let a localStorage-only "purchase" turn into
+    // real Square bookings without server verification.
+    //
+    // These two endpoints replace the proxy path:
+    //   POST /book-consultation   — free 15-min calls; rate-limit only
+    //   POST /book-session        — paid sessions; verifies credit-grant
+    //                                record and atomically decrements credit
+    //                                before creating the Square booking.
+    // The bookings POST proxy is also removed from SQUARE_ALLOW.
+
+    if (url.pathname === '/book-consultation' && request.method === 'POST') {
+      if (!isAllowedOrigin) return new Response(JSON.stringify({ error: 'Unauthorized origin' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+      if (!await checkRateLimit(request, 'book-consultation', 20, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const { name = '', email = '', phone = '', goals = '', startAt, duration, teamMemberId, serviceVariationId } = body || {};
+      if (!email || !startAt || !duration || !teamMemberId) {
+        return new Response(JSON.stringify({ success: false, reason: 'missing-fields' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const idempotencyKey = `cons-${startAt}-${email.toLowerCase()}-${duration}`;
+      const cached = await kvGet(`booking-idem:${idempotencyKey}`, env);
+      if (cached) {
+        return new Response(cached, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      try {
+        const { customerId, isNew } = await upsertCustomerForBooking(env, { name, email, phone });
+        const result = await createSquareBookingDirect(env, {
+          customerInfo: { name, email, phone, goals },
+          customerId, isNewClient: isNew,
+          startAt, duration, teamMemberId, serviceVariationId, idempotencyKey,
+        });
+        const responseBody = JSON.stringify(result.success
+          ? { success: true, bookingId: result.bookingId }
+          : { success: false, reason: 'square-error', status: result.status, detail: (result.error || '').slice(0, 300) });
+        if (result.success) {
+          await kvPut(`booking-idem:${idempotencyKey}`, responseBody, { expirationTtl: 600 }, env);
+          await logEvent('booking', `Consultation booked: ${email}`, { email, bookingId: result.bookingId }, env);
+        }
+        return new Response(responseBody, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (e) {
+        await logEvent('error', 'book-consultation-failed', { email, err: e?.message }, env);
+        return new Response(JSON.stringify({ success: false, reason: 'fetch-failed', error: e.message }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    if (url.pathname === '/book-session' && request.method === 'POST') {
+      if (!isAllowedOrigin) return new Response(JSON.stringify({ error: 'Unauthorized origin' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+      if (!await checkRateLimit(request, 'book-session', 30, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const { name = '', email = '', phone = '', goals = '', startAt, duration, teamMemberId, serviceVariationId, purchaseToken } = body || {};
+      if (!email || !startAt || !duration || !teamMemberId || !purchaseToken) {
+        return new Response(JSON.stringify({ success: false, reason: 'missing-fields' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Step 1: purchase verification. credit-grant:{paymentId} is written
+      // by /credit-grant for every successful purchase (including deferred
+      // ones where Trainerize provisioning is pending).
+      const grantRaw = await kvGet(`credit-grant:${purchaseToken}`, env);
+      if (!grantRaw) {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-purchase' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let grant;
+      try { grant = JSON.parse(grantRaw); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'corrupt-grant' }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // Bind grant to email — prevents booking on someone else's payment.
+      if (grant.email && String(grant.email).toLowerCase() !== email.toLowerCase()) {
+        return new Response(JSON.stringify({ success: false, reason: 'email-mismatch' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // Flat-price (online-only) plans don't grant in-person session credits.
+      if (grant.flat) {
+        return new Response(JSON.stringify({ success: false, reason: 'flat-plan-no-sessions' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const idempotencyKey = `sess-${startAt}-${email.toLowerCase()}-${duration}`;
+      const cached = await kvGet(`booking-idem:${idempotencyKey}`, env);
+      if (cached) {
+        return new Response(cached, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Step 2: resolve Trainerize userId (may be null in deferred case).
+      let userId = null;
+      try {
+        if (isTrainerizeConfigured(env)) {
+          userId = await findTrainerizeUserByEmail(email, env);
+        }
+      } catch { /* ignore — fall back to grant-counter source */ }
+
+      // Step 3: choose credit source.
+      //   - credits:{userId} when Trainerize user exists AND credits already
+      //     materialized (the normal post-first-booking state).
+      //   - credit-grant:{token} bookingsCreated counter when credits don't
+      //     yet exist (deferred case for first booking after purchase).
+      let creditsSource = 'grant';
+      let creditData = null;
+      if (userId) {
+        const creditsRaw = await kvGet(`credits:${userId}`, env);
+        if (creditsRaw) {
+          try { creditData = JSON.parse(creditsRaw); creditsSource = 'credits'; } catch { /* fall back */ }
+        }
+      }
+
+      const lockKey = creditsSource === 'credits' ? `lock:credits:${userId}` : `lock:grant:${purchaseToken}`;
+      const locked = await kvGet(lockKey, env);
+      if (locked) {
+        return new Response(JSON.stringify({ success: false, reason: 'locked-retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      await kvPut(lockKey, Date.now().toString(), { expirationTtl: 60 }, env);
+
+      try {
+        // Re-read inside lock to avoid TOCTOU on concurrent calls.
+        let available;
+        if (creditsSource === 'credits') {
+          const recheck = await kvGet(`credits:${userId}`, env);
+          if (recheck) { try { creditData = JSON.parse(recheck); } catch { /* keep prev */ } }
+          available = creditData?.remaining || 0;
+        } else {
+          const recheck = await kvGet(`credit-grant:${purchaseToken}`, env);
+          if (recheck) { try { grant = JSON.parse(recheck); } catch { /* keep prev */ } }
+          available = (grant.sessions || 0) - (grant.bookingsCreated || 0);
+        }
+        if (available <= 0) {
+          await env.CHALLENGES_KV.delete(lockKey);
+          return new Response(JSON.stringify({ success: false, reason: 'no-credits' }), {
+            status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const { customerId, isNew } = await upsertCustomerForBooking(env, { name, email, phone });
+        const result = await createSquareBookingDirect(env, {
+          customerInfo: { name, email, phone, goals },
+          customerId, isNewClient: isNew,
+          startAt, duration, teamMemberId, serviceVariationId, idempotencyKey,
+        });
+
+        if (!result.success) {
+          // Don't decrement on Square failure — credit stays intact.
+          await env.CHALLENGES_KV.delete(lockKey);
+          return new Response(JSON.stringify({
+            success: false, reason: 'square-error', status: result.status,
+            detail: (result.error || '').slice(0, 300),
+          }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // Decrement now that the booking is real.
+        let remainingAfter;
+        if (creditsSource === 'credits') {
+          creditData.remaining = Math.max(0, (creditData.remaining || 0) - 1);
+          creditData.deductions = creditData.deductions || [];
+          creditData.deductions.push({
+            date: new Date().toISOString(),
+            reason: `Booking ${result.bookingId} (${startAt})`,
+          });
+          creditData.updatedAt = new Date().toISOString();
+          await kvPut(`credits:${userId}`, JSON.stringify(creditData), {}, env);
+          remainingAfter = creditData.remaining;
+        } else {
+          grant.bookingsCreated = (grant.bookingsCreated || 0) + 1;
+          grant.lastBookingAt = new Date().toISOString();
+          // Match the original credit-grant TTL so the deferred state survives
+          // long enough for cron reconciliation.
+          await kvPut(`credit-grant:${purchaseToken}`, JSON.stringify(grant), { expirationTtl: 90 * 24 * 3600 }, env);
+          remainingAfter = (grant.sessions || 0) - grant.bookingsCreated;
+        }
+
+        await env.CHALLENGES_KV.delete(lockKey);
+
+        const responseBody = JSON.stringify({
+          success: true, bookingId: result.bookingId, remainingCredits: remainingAfter, source: creditsSource,
+        });
+        await kvPut(`booking-idem:${idempotencyKey}`, responseBody, { expirationTtl: 600 }, env);
+        await logEvent('booking', `Session booked: ${email} → ${result.bookingId}`, {
+          email, bookingId: result.bookingId, remainingAfter, source: creditsSource,
+        }, env);
+
+        return new Response(responseBody, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (e) {
+        try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* cleanup */ }
+        await logEvent('error', 'book-session-failed', { email, purchaseToken, err: e?.message }, env);
+        return new Response(JSON.stringify({ success: false, reason: 'fetch-failed', error: e.message }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
       }
     }
 
@@ -4244,4 +4459,121 @@ async function updateChallenge(id, updates, env) {
   all[idx] = merged;
   await kvPut('challenges', JSON.stringify(all), {}, env);
   return merged;
+}
+
+/**
+ * Upsert a Square customer by email — used by /book-session and
+ * /book-consultation. Returns {customerId, isNew}. Mirrors the inline
+ * upsert in /checkout/charge so both paths agree on customer matching.
+ */
+async function upsertCustomerForBooking(env, info) {
+  const { name = '', email, phone = '' } = info;
+  const trimmedName = String(name).trim();
+  const [firstName, ...rest] = trimmedName.split(/\s+/);
+  const lastName = rest.join(' ');
+
+  let customerId = null;
+  try {
+    const searchResp = await fetch(`${getSquareApiBase(env)}/customers/search`, {
+      method: 'POST',
+      headers: getSquareHeaders(env),
+      body: JSON.stringify({
+        query: { filter: { email_address: { exact: email } } },
+        limit: 1,
+      }),
+    });
+    if (searchResp.ok) {
+      const sd = await searchResp.json();
+      customerId = sd.customers?.[0]?.id || null;
+    }
+  } catch { /* fall through to create */ }
+
+  if (customerId) return { customerId, isNew: false };
+
+  const createResp = await fetch(`${getSquareApiBase(env)}/customers`, {
+    method: 'POST',
+    headers: getSquareHeaders(env),
+    body: JSON.stringify({
+      idempotency_key: `cust-${String(email).slice(0, 40)}-${Date.now()}`,
+      given_name: firstName || undefined,
+      family_name: lastName || undefined,
+      email_address: email,
+      phone_number: phone || undefined,
+    }),
+  });
+  if (!createResp.ok) {
+    const errText = await createResp.text();
+    throw new Error(`Customer creation failed: ${errText.slice(0, 200)}`);
+  }
+  const cd = await createResp.json();
+  const newId = cd.customer?.id;
+  if (!newId) throw new Error('Customer created but no id returned');
+  return { customerId: newId, isNew: true };
+}
+
+/**
+ * Create a Square booking directly via the Square API. Server-side mirror
+ * of squareAvailability.ts:createBooking. Returns {success, bookingId, ...}.
+ * Looks up service_variation_version on the fly (Square requires it for
+ * optimistic concurrency on the catalog).
+ */
+async function createSquareBookingDirect(env, params) {
+  const {
+    customerInfo, customerId, isNewClient,
+    startAt, duration, teamMemberId, serviceVariationId, idempotencyKey,
+  } = params;
+
+  // Fetch the current catalog version for the service variation. Square
+  // rejects bookings with a missing service_variation_version when the
+  // variation is provided.
+  let serviceVariationVersion;
+  if (serviceVariationId) {
+    try {
+      const catResp = await fetch(`${getSquareApiBase(env)}/catalog/object/${serviceVariationId}`, {
+        headers: getSquareHeaders(env),
+      });
+      if (catResp.ok) {
+        const cat = await catResp.json();
+        serviceVariationVersion = cat.object?.version;
+      }
+    } catch { /* missing version field — Square may still accept the booking for non-versioned vars */ }
+  }
+
+  const clientStatusTag = isNewClient ? '[NEW CLIENT]' : '[RETURNING CLIENT]';
+  const customerNote = [
+    clientStatusTag,
+    `Name: ${customerInfo.name}`,
+    `Email: ${customerInfo.email}`,
+    `Phone: ${customerInfo.phone}`,
+    `Goals: ${customerInfo.goals || 'Not specified'}`,
+  ].join('\n');
+
+  const bookingResp = await fetch(`${getSquareApiBase(env)}/bookings`, {
+    method: 'POST',
+    headers: getSquareHeaders(env),
+    body: JSON.stringify({
+      idempotency_key: idempotencyKey,
+      booking: {
+        location_id: env.SQUARE_LOCATION_ID,
+        customer_id: customerId,
+        start_at: startAt,
+        appointment_segments: [{
+          duration_minutes: duration,
+          team_member_id: teamMemberId,
+          service_variation_id: serviceVariationId,
+          ...(serviceVariationVersion != null ? { service_variation_version: serviceVariationVersion } : {}),
+        }],
+        customer_note: customerNote,
+        seller_note: clientStatusTag,
+      },
+    }),
+  });
+
+  if (!bookingResp.ok) {
+    const errText = await bookingResp.text();
+    return { success: false, status: bookingResp.status, error: errText };
+  }
+
+  const data = await bookingResp.json();
+  return { success: true, bookingId: data.booking?.id, booking: data.booking };
 }

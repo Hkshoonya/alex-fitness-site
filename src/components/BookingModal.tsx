@@ -4,6 +4,7 @@ import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date
 import { getAvailability, getTeamMembers, createBooking, CANCEL_NOTICE_HOURS, type TimeSlot, type TeamMember } from '@/api/squareAvailability';
 import { createMeetEvent, type MeetingDetails } from '@/api/googleMeet';
 import { DEFAULT_TEAM_MEMBER_ID, getConsultationServiceId, getServiceId } from '@/api/squareConfig';
+import { getPurchases } from '@/api/squarePayments';
 // Trainerize sync handled automatically inside createBooking
 
 interface BookingModalProps {
@@ -212,12 +213,32 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
       const serviceVariationId = mode === 'consultation'
         ? getConsultationServiceId()
         : getServiceId(sessionDuration);
+      // Phase B: paid sessions need a purchaseToken so the worker can
+      // verify the payment server-side and decrement credits before
+      // creating the Square booking. Find the user's most recent valid
+      // (non-mock) purchase with sessions remaining. If none exists, the
+      // worker will return "invalid-purchase" — the user needs to buy a
+      // plan first. Consultations stay free, no token.
+      let purchaseToken: string | undefined;
+      if (mode === 'session') {
+        const candidate = getPurchases()
+          .filter((p: any) => p.sessionsRemaining > 0)
+          .filter((p: any) => p.paymentId && !String(p.paymentId).startsWith('mock_'))
+          .filter((p: any) => p.clientEmail?.toLowerCase() === bookingData.email.toLowerCase())
+          .sort((a: any, b: any) => (b.purchaseDate || '').localeCompare(a.purchaseDate || ''))[0];
+        purchaseToken = candidate?.paymentId;
+        if (!purchaseToken) {
+          setBookingError('No active session credits found for this email. Please purchase a plan first, then book.');
+          setIsSubmitting(false);
+          return;
+        }
+      }
       const result = await createBooking(coachId, selectedStartAt, sessionDuration, {
         name: bookingData.name,
         email: bookingData.email,
         phone: bookingData.phone,
         goals: `${goalsPrefix}${bookingData.goals ? `\n${bookingData.goals}` : ''}`,
-      }, serviceVariationId);
+      }, serviceVariationId, purchaseToken);
 
       if (result.success) {
         setBookingError(null);

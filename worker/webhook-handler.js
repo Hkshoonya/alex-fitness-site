@@ -1520,6 +1520,154 @@ export default {
       }
     }
 
+    // ===== ADMIN: verify token =====
+    // GET /admin/verify — returns 200 if X-Admin-Token matches, 401 otherwise.
+    // Used by the admin login screen to validate the token BEFORE saving it
+    // to localStorage, so users get an immediate "wrong token" error instead
+    // of saving a bad token and getting opaque 401s on every action later.
+    if (url.pathname === '/admin/verify' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN) {
+        return new Response(JSON.stringify({ ok: false, reason: 'not-configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if ((request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response(JSON.stringify({ ok: false, reason: 'invalid-token' }), {
+          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // ===== ADMIN: list Trainerize master programs =====
+    // GET /admin/trainerize-programs — returns the list of master programs Alex
+    // can assign to clients. Used by the admin signup viewer to populate the
+    // "Assign Program" dropdown. Gracefully degrades when Trainerize auth fails
+    // (returns {configured:false}) so the UI can show a friendly fallback
+    // instead of a hard error — matters during the window where Alex's API key
+    // is requested but not yet activated.
+    if (url.pathname === '/admin/trainerize-programs' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN) {
+        return new Response(JSON.stringify({ configured: false, reason: 'admin-not-configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if ((request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      if (!isTrainerizeConfigured(env)) {
+        return new Response(JSON.stringify({ configured: false, reason: 'trainerize-not-configured', programs: [] }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      try {
+        const resp = await trainerizePost('/program/getList', {}, env);
+        const body = await resp.text();
+        if (!resp.ok) {
+          // Trainerize rejected the call — surface the reason so the UI can
+          // distinguish "auth-denied" (waiting on key) from "rate-limited"
+          // (transient) without showing a generic error.
+          let reason = 'trainerize-error';
+          try {
+            const parsed = JSON.parse(body);
+            if (parsed?.Message?.includes('Authorization')) reason = 'trainerize-auth-denied';
+          } catch { /* keep default */ }
+          return new Response(JSON.stringify({ configured: false, reason, programs: [], status: resp.status }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        // Normalize the response — Trainerize sometimes returns programs at
+        // top level, sometimes under .programs or .result depending on the
+        // endpoint version. UI only needs id+name so we shape it here.
+        let raw;
+        try { raw = JSON.parse(body); } catch { raw = {}; }
+        const programs = (raw.programs || raw.result || raw || [])
+          .filter(p => p && (p.id || p.programID))
+          .map(p => ({
+            id: p.id ?? p.programID,
+            name: p.name || p.title || `Program ${p.id ?? p.programID}`,
+            durationDays: p.durationDays || p.duration || null,
+            type: p.type || null,
+          }));
+        return new Response(JSON.stringify({ configured: true, programs }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        await logEvent('error', 'admin-trainerize-programs-failed', { err: e?.message }, env);
+        return new Response(JSON.stringify({ configured: false, reason: 'fetch-failed', error: e.message, programs: [] }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // ===== ADMIN: assign Trainerize program to a client =====
+    // POST /admin/trainerize-assign-program
+    // Body: { trainerizeUserId: number, programId: number, startDate?: string }
+    // 1-click action from the signup viewer's "Assign Program" button.
+    // Returns explicit success/failure shape so the UI can show a clear toast.
+    if (url.pathname === '/admin/trainerize-assign-program' && request.method === 'POST') {
+      if (!env.ADMIN_LOG_TOKEN) {
+        return new Response(JSON.stringify({ success: false, reason: 'admin-not-configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if ((request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      if (!isTrainerizeConfigured(env)) {
+        return new Response(JSON.stringify({ success: false, reason: 'trainerize-not-configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let payload;
+      try { payload = await request.json(); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const trainerizeUserId = parseInt(payload.trainerizeUserId);
+      const programId = parseInt(payload.programId);
+      if (!trainerizeUserId || !programId) {
+        return new Response(JSON.stringify({ success: false, reason: 'missing-ids', got: payload }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const startDate = (payload.startDate && /^\d{4}-\d{2}-\d{2}$/.test(payload.startDate))
+        ? payload.startDate
+        : new Date().toISOString().split('T')[0];
+      try {
+        const resp = await trainerizePost('/program/copyToUser', {
+          id: programId,
+          userID: trainerizeUserId,
+          startDate,
+          forceMerge: false,
+        }, env);
+        const body = await resp.text();
+        if (!resp.ok) {
+          let reason = 'trainerize-error';
+          try {
+            const parsed = JSON.parse(body);
+            if (parsed?.Message?.includes('Authorization')) reason = 'trainerize-auth-denied';
+          } catch { /* keep default */ }
+          await logEvent('error', 'admin-program-assign-failed', { trainerizeUserId, programId, status: resp.status, body: body.slice(0, 200) }, env);
+          return new Response(JSON.stringify({ success: false, reason, status: resp.status }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        await logEvent('admin', 'program-assigned', { trainerizeUserId, programId, startDate }, env);
+        return new Response(JSON.stringify({ success: true, trainerizeUserId, programId, startDate }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        await logEvent('error', 'admin-program-assign-failed', { trainerizeUserId, programId, err: e?.message }, env);
+        return new Response(JSON.stringify({ success: false, reason: 'fetch-failed', error: e.message }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     // ===== EVENT LOGS =====
     // GET /logs?category=credit&limit=20 — query recent events
     // Auth: requires X-Admin-Token header matching env.ADMIN_LOG_TOKEN.

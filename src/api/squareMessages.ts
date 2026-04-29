@@ -1,12 +1,71 @@
 // Square Messages Integration
-// Sends direct text messages to Alex via Square Messages API
-
-import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE } from '@/api/squareConfig';
+// Sends messages to Alex via Square's "external inbound" messenger endpoint —
+// the same backend pipe Alex's main site (alexsfitness.com) uses for its
+// Square Messages chat widget. Messages here land in his Square Messages
+// inbox and trigger push notifications on the Square POS app on his phone.
+//
+// (The previous implementation wrote to Alex's Square *customer note* —
+// passive storage that never triggered any notification, so messages went
+// undelivered.)
 
 const ALEX_PHONE = '8134210633';
+const ALEX_SELLER_KEY = 'LD0SGZXT6ZSSD';
+const BUSINESS_NAME = "Alex's Fitness Training";
+const MESSENGER_API = 'https://api.squareup.com/messenger/inbound/external';
+
+// Square's public reCAPTCHA v3 site key, embedded in their messages-plugin
+// JS bundle. The key isn't domain-locked, so we can re-use it from our
+// origin too. Spam protection is enforced server-side by Square — Google
+// scores the request and Square rejects low-confidence ones.
+const RECAPTCHA_SITE_KEY = '6LdIjoYhAAAAANT4Xy0LaHGw4_e_1FKcwveKCxY6';
+
+// Lazy-load reCAPTCHA on first use to keep the third-party script off the
+// critical path. Idempotent — repeat calls return the same promise.
+let recaptchaPromise: Promise<unknown> | null = null;
+function loadRecaptcha(): Promise<unknown> {
+  if (recaptchaPromise) return recaptchaPromise;
+  recaptchaPromise = new Promise((resolve, reject) => {
+    const w = window as unknown as { grecaptcha?: { ready: (cb: () => void) => void; execute: (key: string, opts: { action: string }) => Promise<string> } };
+    if (w.grecaptcha?.execute) {
+      resolve(w.grecaptcha);
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = `https://www.google.com/recaptcha/api.js?render=${RECAPTCHA_SITE_KEY}`;
+    s.async = true;
+    s.defer = true;
+    s.onload = () => {
+      // grecaptcha.ready may not be available immediately on script load.
+      const tick = () => {
+        if (w.grecaptcha?.ready) {
+          w.grecaptcha.ready(() => resolve(w.grecaptcha!));
+        } else {
+          setTimeout(tick, 50);
+        }
+      };
+      tick();
+    };
+    s.onerror = () => reject(new Error('recaptcha script failed to load'));
+    document.head.appendChild(s);
+  });
+  return recaptchaPromise;
+}
+
+async function getRecaptchaToken(): Promise<string> {
+  try {
+    const grecaptcha = (await loadRecaptcha()) as { execute: (key: string, opts: { action: string }) => Promise<string> };
+    return await grecaptcha.execute(RECAPTCHA_SITE_KEY, { action: 'submit' });
+  } catch {
+    // Soft-fail. Empty token still goes through Square's first validation
+    // layer (phone-number realism check), so the message can succeed even
+    // without a captcha. Better deliver-without-bot-protection than fail-
+    // closed and lose the lead.
+    return '';
+  }
+}
 
 /**
- * Send a message to Alex via Square
+ * Send a message to Alex via Square's messages-plugin backend.
  */
 export async function sendMessageToAlex(params: {
   senderName: string;
@@ -14,107 +73,61 @@ export async function sendMessageToAlex(params: {
   message: string;
 }): Promise<{ success: boolean; error?: string }> {
 
-  if (!getSquareConfig().isConfigured) {
-    return sendMockMessage(params);
+  // Square requires E.164 format (`+18134210633`). Strip formatting,
+  // take last 10 digits, prefix `+1`.
+  const tenDigits = params.senderPhone.replace(/\D/g, '').slice(-10);
+  const e164 = tenDigits.length === 10 ? `+1${tenDigits}` : '';
+  if (!e164) {
+    return { success: false, error: 'Phone number must be 10 digits (US)' };
   }
 
   try {
-    // Square requires E.164 format (`+18134210633`) for phone-number search
-    // — raw 10-digit strings get rejected with INVALID_VALUE. We strip
-    // formatting first, take the last 10 digits (handles inputs that
-    // include +1 / 1 / leading parens / dashes), then re-prefix with +1
-    // for the US phone numbers this site collects.
-    const tenDigits = params.senderPhone.replace(/\D/g, '').slice(-10);
-    const e164 = tenDigits.length === 10 ? `+1${tenDigits}` : '';
-    if (!e164) {
-      // Square will reject anything else as INVALID_VALUE — fail fast with a
-      // useful message instead of pretending to search.
-      throw new Error('Phone number must be 10 digits (US)');
-    }
-
-    const customerResponse = await fetch(`${SQUARE_API_BASE}/customers/search`, {
+    const token = await getRecaptchaToken();
+    const resp = await fetch(MESSENGER_API, {
       method: 'POST',
-      headers: getSquareHeaders(),
-      body: JSON.stringify({
-        query: { filter: { phone_number: { exact: e164 } } },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        name: params.senderName,
+        message: params.message,
+        contact_id: e164,
+        contact_medium: 'SMS',
+        seller_key: ALEX_SELLER_KEY,
+        'g-recaptcha-response': token,
+        url: typeof window !== 'undefined' ? window.location.href : '',
+        business_name: BUSINESS_NAME,
+        source: 'SQUARE_ONLINE_SITE',
       }),
     });
 
-    let customerId: string;
-    let existingNote = '';
+    const data = await resp.json().catch(() => ({}));
 
-    if (customerResponse.ok) {
-      const customerData = await customerResponse.json();
-      if (customerData.customers?.length > 0) {
-        customerId = customerData.customers[0].id;
-        existingNote = customerData.customers[0].note || '';
-      } else {
-        const createResponse = await fetch(`${SQUARE_API_BASE}/customers`, {
-          method: 'POST',
-          headers: getSquareHeaders(),
-          body: JSON.stringify({
-            given_name: params.senderName.split(' ')[0],
-            family_name: params.senderName.split(' ').slice(1).join(' ') || '',
-            phone_number: e164,
-          }),
-        });
-
-        if (!createResponse.ok) {
-          // Square does phone-realism validation (Twilio-style — 555 numbers
-          // and obvious test patterns get rejected as INVALID_PHONE_NUMBER).
-          // Surface the upstream detail so the user knows to enter a real
-          // phone number, not a generic "failed to create".
-          const errBody = await createResponse.json().catch(() => ({}));
-          const detail = errBody.errors?.[0]?.detail || 'Failed to create customer';
-          if (errBody.errors?.[0]?.code === 'INVALID_PHONE_NUMBER') {
-            throw new Error('Please enter a valid US phone number');
-          }
-          throw new Error(detail);
-        }
-        const createData = await createResponse.json();
-        customerId = createData.customer.id;
-      }
-    } else {
-      const errBody = await customerResponse.json().catch(() => ({}));
-      throw new Error(errBody.errors?.[0]?.detail || 'Customer search failed');
+    if (resp.ok && data.status === 'SUCCESS') {
+      storeMessage(params);
+      return { success: true };
     }
 
-    // APPEND to the existing note rather than overwrite — Square's PUT
-    // /customers/{id} replaces the note field entirely, so prior messages
-    // would be lost without this merge. Keep total under 4096 (Square limit)
-    // by trimming oldest content.
-    const entry = `[Website Message ${new Date().toLocaleString()}]\n${params.message}\n\nFrom: ${params.senderName} (${params.senderPhone})`;
-    let combined = existingNote ? `${existingNote}\n\n---\n\n${entry}` : entry;
-    if (combined.length > 4000) combined = combined.slice(combined.length - 4000);
-
-    const noteResponse = await fetch(`${SQUARE_API_BASE}/customers/${customerId}`, {
-      method: 'PUT',
-      headers: getSquareHeaders(),
-      body: JSON.stringify({ note: combined }),
-    });
-
-    if (!noteResponse.ok) throw new Error('Failed to send message');
+    // Map Square's known error codes to user-friendly messages.
+    let errorMsg = 'Could not deliver message';
+    if (data.status === 'INVALID_PHONE_NUMBER') {
+      errorMsg = 'Please enter a valid US phone number';
+    } else if (data.debugText) {
+      errorMsg = `Square: ${String(data.debugText).slice(0, 120)}`;
+    }
 
     storeMessage(params);
-    return { success: true };
+    return {
+      success: false,
+      error: `${errorMsg}. Please try again or text Alex at ${ALEX_PHONE}.`,
+    };
   } catch (error) {
     console.error('Square message failed:', error);
-    // Capture locally so the coach can still see it via the admin view, but
-    // return failure so the UI shows an honest error instead of "Sent".
     storeMessage(params);
     const msg = error instanceof Error ? error.message : 'Unknown error';
-    return { success: false, error: `Could not deliver message: ${msg}. We've logged it locally — please try again or text ${ALEX_PHONE}.` };
+    return {
+      success: false,
+      error: `Could not deliver message: ${msg}. Please try again or text ${ALEX_PHONE}.`,
+    };
   }
-}
-
-async function sendMockMessage(params: {
-  senderName: string;
-  senderPhone: string;
-  message: string;
-}): Promise<{ success: boolean }> {
-  await new Promise(r => setTimeout(r, 1000));
-  storeMessage(params);
-  return { success: true };
 }
 
 function storeMessage(params: { senderName: string; senderPhone: string; message: string }) {

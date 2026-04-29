@@ -54,6 +54,20 @@ const STUDIO_CYCLE = [
 ];
 const STUDIO_INTERVAL_MS = 6000;
 
+// Square Appointments login deep link — opens in a popup so the customer
+// can view their bookings without leaving the site. Square's login page
+// blocks iframe embedding (X-Frame-Options) so a true in-page modal isn't
+// possible; window.open() with sized chrome is the canonical alternative.
+const CLIENT_LOGIN_URL = 'https://app.squareup.com/login?app=appointments&return_to=https%3A%2F%2Fbook.squareup.com%2Fappointments%2Fw9sm4gjau004u2%2Flocation%2FLD0SGZXT6ZSSD%2Fbookings&enc=eyJlbmMiOiJBMTI4R0NNIiwidGFnIjoiZVljNkJwOGpTalJqcmVTbnBkeTJRQSIsImFsZyI6IkExMjhHQ01LVyIsIml2IjoieS1UZzZGMmloVmt6dHBqaCJ9.u0r4K49gexBVrlr_NcmhWA.VlwdkBXxL6dOLjH2._OjGynpbmPF8ajyxYb1Uy9hfjJfCXPaWHwlDjbyZZ3xF.uTUQiP_LBdV84hBhXPMQew';
+
+function openClientLogin() {
+  const features = 'width=600,height=800,scrollbars=yes,resizable=yes,toolbar=no,menubar=no,location=no';
+  const popup = window.open(CLIENT_LOGIN_URL, 'client-login', features);
+  // If the browser blocked the popup, fall back to a new tab so the user
+  // still gets there — better than a silent failure.
+  if (!popup || popup.closed) window.open(CLIENT_LOGIN_URL, '_blank', 'noopener');
+}
+
 function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bookingModalOpen, setBookingModalOpen] = useState(false);
@@ -401,6 +415,9 @@ function App() {
             <button onClick={() => setShowAbout(true)} className="text-sm text-white/80 hover:text-white transition-colors">
               About
             </button>
+            <button onClick={openClientLogin} className="text-sm text-white/80 hover:text-white transition-colors">
+              Client Login
+            </button>
             <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-sm text-white/80 hover:text-white transition-colors flex items-center gap-1">
               <Instagram size={16} />
             </a>
@@ -426,6 +443,7 @@ function App() {
               <button onClick={() => scrollToSection('studio')} className="text-left text-white/80 py-2">Studio</button>
               <button onClick={() => scrollToSection('transformations')} className="text-left text-white/80 py-2">Results</button>
               <button onClick={() => { setShowAbout(true); setMobileMenuOpen(false); }} className="text-left text-white/80 py-2">About</button>
+              <button onClick={() => { openClientLogin(); setMobileMenuOpen(false); }} className="text-left text-white/80 py-2">Client Login</button>
               <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-white/80 py-2 flex items-center gap-2">
                 <Instagram size={18} /> Follow on Instagram
               </a>

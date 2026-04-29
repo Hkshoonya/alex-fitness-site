@@ -234,6 +234,16 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         if (paymentResult.planName) serverPlanName = paymentResult.planName;
         if (paymentResult.validUntil) serverValidUntil = paymentResult.validUntil;
       } else {
+        // Mock-payment branch is dev-only. In production, the Complete
+        // Purchase button is disabled when cardElement is null (see
+        // disabled= line below) so this branch should never fire — but
+        // a UI regression that re-enables the button could let a user
+        // create a localStorage purchase with a fake paymentId, which
+        // PostPurchaseBooking would then trust and turn into real Square
+        // bookings. Throwing here is the belt-and-suspenders guard.
+        if (!import.meta.env.DEV) {
+          throw new Error('Payment form is still loading — please wait a moment and try again.');
+        }
         await new Promise(resolve => setTimeout(resolve, 2000));
         paymentId = `mock_payment_${Date.now()}`;
       }
@@ -645,13 +655,18 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
 
                 <button
                   onClick={handlePayment}
-                  disabled={isLoading || !clientInfo.name || !clientInfo.email}
+                  disabled={isLoading || !clientInfo.name || !clientInfo.email || !cardElement}
                   className="w-full btn-primary disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {isLoading ? (
                     <>
                       <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                       Processing...
+                    </>
+                  ) : !cardElement ? (
+                    <>
+                      <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Loading payment form...
                     </>
                   ) : (
                     <>

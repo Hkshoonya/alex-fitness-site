@@ -1599,7 +1599,17 @@ export default {
         });
       }
       try {
-        const resp = await trainerizePost('/program/getList', {}, env);
+        // Trainerize's /program/getList REQUIRES type+pagination; an empty
+        // body returns code 999 ("Value can't be null"). The `type` field
+        // is an enum on eProgramAccessType: "0" = HQ/template programs,
+        // "1" = "mine" (the trainer's own master programs). Trainerize
+        // accepts ONLY the string form — `type: 1` (number) silently
+        // returns an empty list with no error. We use "1" to surface
+        // Alex's own customized programs. Verified by direct probe
+        // 2026-04-29 — got 2 real programs (Glute/Core, Starter).
+        const resp = await trainerizePost('/program/getList', {
+          type: '1', start: 0, count: 100,
+        }, env);
         const body = await resp.text();
         if (!resp.ok) {
           // Trainerize rejected the call — surface the reason so the UI can

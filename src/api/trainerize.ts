@@ -249,8 +249,14 @@ async function apiCreateClient(client: TrainerizeClient): Promise<{ success: boo
  */
 async function apiAssignProgram(clientId: string, planName: string): Promise<{ success: boolean }> {
   try {
-    // List master programs
-    const programsResponse = await apiPost('/program/getList', {});
+    // Trainerize requires type+pagination on /program/getList; an empty body
+    // returns code 999. type:"1" (string!) is the eProgramAccessType enum
+    // value for "mine" (the trainer's own master programs). type:1 (number)
+    // silently returns an empty list — Trainerize only accepts the string
+    // form here. Verified by direct probe 2026-04-29.
+    const programsResponse = await apiPost('/program/getList', {
+      type: '1', start: 0, count: 100,
+    });
 
     let programId: number | null = null;
 

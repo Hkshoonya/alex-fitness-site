@@ -112,19 +112,16 @@ function App() {
         1.0
       );
 
-    // Scroll-driven animations for sections
-    const sections = [
-      { ref: valueRef, class: 'value' },
-      { ref: plansRef, class: 'plans' },
-      { ref: studioRef, class: 'studio' },
-      { ref: transformationsRef, class: 'transformations' },
-      { ref: coachRef, class: 'coach' },
-      { ref: bookRef, class: 'book' },
-    ];
+    // Scroll-driven entrance animations. The original code targeted inner
+    // `.{name}-content` divs that were never added to the components, so
+    // these animations silently no-op'd and GSAP logged "target not found"
+    // warnings. Targeting the ref directly always matches and restores the
+    // intended fade-up effect at the section level.
+    const sectionRefs = [valueRef, plansRef, studioRef, transformationsRef, coachRef, bookRef];
 
-    sections.forEach(({ ref, class: className }) => {
+    sectionRefs.forEach(ref => {
       if (ref.current) {
-        gsap.fromTo(`.${className}-content`,
+        gsap.fromTo(ref.current,
           { y: 60, opacity: 0 },
           {
             y: 0,
@@ -274,15 +271,18 @@ function App() {
       );
     }
 
-    // Testimonials animation
+    // Testimonials section animation. The original `.testimonial-card`
+    // selector matched no DOM elements (GoogleReviews never exposed cards
+    // with that class). Targeting the section ref restores a clean entrance
+    // without crossing component boundaries; the carousel inside still has
+    // its own per-slide opacity transition.
     if (testimonialsRef.current) {
-      gsap.fromTo('.testimonial-card',
+      gsap.fromTo(testimonialsRef.current,
         { x: -60, opacity: 0 },
         {
           x: 0,
           opacity: 1,
           duration: 0.6,
-          stagger: 0.15,
           ease: 'power2.out',
           scrollTrigger: {
             trigger: testimonialsRef.current,

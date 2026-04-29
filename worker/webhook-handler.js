@@ -455,9 +455,11 @@ export default {
         [/^customers$/,                             ['POST']],
         [/^customers\/[A-Za-z0-9_-]+$/,             ['GET', 'PUT']],
         [/^customers\/search$/,                     ['POST']],
-        // Locations — GET only (gym info display)
-        [/^locations$/,                             ['GET']],
-        [/^locations\/[A-Za-z0-9_-]+$/,             ['GET']],
+        // Locations — REMOVED. The frontend doesn't read /locations; LOCATION_ID
+        // is hardcoded in the worker. Audit C-01 reproducer: spoofed Origin
+        // returned 200 + merchant_id from /locations. Closed by removing the
+        // entry entirely. Server-to-server uses Square's API directly with the
+        // hardcoded LOCATION_ID.
         // Payments — POST one-off; GET single by ID for receipt verification
         [/^payments$/,                              ['POST']],
         [/^payments\/[A-Za-z0-9_-]+$/,              ['GET']],

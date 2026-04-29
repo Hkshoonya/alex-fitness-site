@@ -27,6 +27,7 @@ import AboutPage from '@/components/AboutPage';
 import QuickMessageModal from '@/components/QuickMessageModal';
 import CoachSection from '@/components/CoachSection';
 import ChallengesSection from '@/components/ChallengesSection';
+import AdminPanel from '@/components/AdminPanel';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -46,6 +47,18 @@ function App() {
   // not in the bundled JS source. Falls back to the static map image while
   // loading or if the worker is unreachable.
   const [mapEmbedUrl, setMapEmbedUrl] = useState<string | null>(null);
+
+  // Hash-based admin route. Using `#/admin` instead of `/admin` so GitHub
+  // Pages (no server-side rewrites) doesn't 404 on direct navigation.
+  const [isAdminRoute, setIsAdminRoute] = useState(
+    typeof window !== 'undefined' && window.location.hash.startsWith('#/admin')
+  );
+
+  useEffect(() => {
+    const onHashChange = () => setIsAdminRoute(window.location.hash.startsWith('#/admin'));
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   useEffect(() => {
     const workerUrl = import.meta.env.VITE_WORKER_URL || '';
@@ -300,6 +313,10 @@ function App() {
     setShopOpen(false);
     setPostPurchaseOpen(true);
   };
+
+  if (isAdminRoute) {
+    return <AdminPanel />;
+  }
 
   if (showAbout) {
     return (

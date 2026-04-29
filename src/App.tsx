@@ -28,6 +28,7 @@ import QuickMessageModal from '@/components/QuickMessageModal';
 import CoachSection from '@/components/CoachSection';
 import ChallengesSection from '@/components/ChallengesSection';
 import AdminPanel from '@/components/AdminPanel';
+import ClientPortalModal from '@/components/ClientPortalModal';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -54,18 +55,17 @@ const STUDIO_CYCLE = [
 ];
 const STUDIO_INTERVAL_MS = 6000;
 
-// Square Appointments login deep link — opens in a popup so the customer
-// can view their bookings without leaving the site. Square's login page
-// blocks iframe embedding (X-Frame-Options) so a true in-page modal isn't
-// possible; window.open() with sized chrome is the canonical alternative.
-const CLIENT_LOGIN_URL = 'https://app.squareup.com/login?app=appointments&return_to=https%3A%2F%2Fbook.squareup.com%2Fappointments%2Fw9sm4gjau004u2%2Flocation%2FLD0SGZXT6ZSSD%2Fbookings&enc=eyJlbmMiOiJBMTI4R0NNIiwidGFnIjoiZVljNkJwOGpTalJqcmVTbnBkeTJRQSIsImFsZyI6IkExMjhHQ01LVyIsIml2IjoieS1UZzZGMmloVmt6dHBqaCJ9.u0r4K49gexBVrlr_NcmhWA.VlwdkBXxL6dOLjH2._OjGynpbmPF8ajyxYb1Uy9hfjJfCXPaWHwlDjbyZZ3xF.uTUQiP_LBdV84hBhXPMQew';
-
-function openClientLogin() {
-  const features = 'width=600,height=800,scrollbars=yes,resizable=yes,toolbar=no,menubar=no,location=no';
-  const popup = window.open(CLIENT_LOGIN_URL, 'client-login', features);
-  // If the browser blocked the popup, fall back to a new tab so the user
-  // still gets there — better than a silent failure.
-  if (!popup || popup.closed) window.open(CLIENT_LOGIN_URL, '_blank', 'noopener');
+// Parse `#/portal?token=...` from the hash. Returns the token (or null) and
+// rewrites the hash to remove the consumed token so a refresh doesn't
+// re-trigger verification with an already-spent token.
+function consumePortalTokenFromHash(): string | null {
+  if (typeof window === 'undefined') return null;
+  const hash = window.location.hash || '';
+  const m = hash.match(/^#\/portal\?token=([a-f0-9]{32})/);
+  if (!m) return null;
+  // Strip the query so reloading doesn't re-verify a one-time token.
+  history.replaceState(null, '', window.location.pathname + '#/portal');
+  return m[1];
 }
 
 function App() {
@@ -88,6 +88,12 @@ function App() {
   const [heroIndex, setHeroIndex] = useState(0);
   // Studio section cycle — gym ↔ dojo. Image + headline + sub rotate together.
   const [studioIndex, setStudioIndex] = useState(0);
+  // Client portal — themed modal replacing the old window.open to Square's
+  // login page. `portalToken` is non-null when the visitor arrived via a
+  // magic-link email (#/portal?token=...) and the modal opens straight to
+  // verifying that token.
+  const [clientPortalOpen, setClientPortalOpen] = useState(false);
+  const [portalToken, setPortalToken] = useState<string | null>(null);
 
   // Hash-based admin route. Using `#/admin` instead of `/admin` so GitHub
   // Pages (no server-side rewrites) doesn't 404 on direct navigation.
@@ -99,6 +105,16 @@ function App() {
     const onHashChange = () => setIsAdminRoute(window.location.hash.startsWith('#/admin'));
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  // Magic-link auto-open: if the URL contains a portal token on mount, open
+  // the portal modal in verifying state.
+  useEffect(() => {
+    const token = consumePortalTokenFromHash();
+    if (token) {
+      setPortalToken(token);
+      setClientPortalOpen(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -415,7 +431,7 @@ function App() {
             <button onClick={() => setShowAbout(true)} className="text-sm text-white/80 hover:text-white transition-colors">
               About
             </button>
-            <button onClick={openClientLogin} className="text-sm text-white/80 hover:text-white transition-colors">
+            <button onClick={() => { setPortalToken(null); setClientPortalOpen(true); }} className="text-sm text-white/80 hover:text-white transition-colors">
               Client Login
             </button>
             <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-sm text-white/80 hover:text-white transition-colors flex items-center gap-1">
@@ -443,7 +459,7 @@ function App() {
               <button onClick={() => scrollToSection('studio')} className="text-left text-white/80 py-2">Studio</button>
               <button onClick={() => scrollToSection('transformations')} className="text-left text-white/80 py-2">Results</button>
               <button onClick={() => { setShowAbout(true); setMobileMenuOpen(false); }} className="text-left text-white/80 py-2">About</button>
-              <button onClick={() => { openClientLogin(); setMobileMenuOpen(false); }} className="text-left text-white/80 py-2">Client Login</button>
+              <button onClick={() => { setPortalToken(null); setClientPortalOpen(true); setMobileMenuOpen(false); }} className="text-left text-white/80 py-2">Client Login</button>
               <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-white/80 py-2 flex items-center gap-2">
                 <Instagram size={18} /> Follow on Instagram
               </a>
@@ -1015,6 +1031,16 @@ function App() {
       <QuickMessageModal
         isOpen={messageModalOpen}
         onClose={() => setMessageModalOpen(false)}
+      />
+
+      {/* Client Portal Modal — themed alternative to Square's hosted login.
+          Email-based magic-link auth, displays the customer's bookings in
+          our own UI. */}
+      <ClientPortalModal
+        isOpen={clientPortalOpen}
+        onClose={() => setClientPortalOpen(false)}
+        initialToken={portalToken || undefined}
+        onBookSession={() => setBookingModalOpen(true)}
       />
     </div>
   );

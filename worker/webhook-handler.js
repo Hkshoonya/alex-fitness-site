@@ -1417,6 +1417,338 @@ export default {
       }
     }
 
+    // ===== CLIENT PORTAL (themed alternative to Square's hosted login) =====
+    //
+    // Three endpoints implementing a magic-link-authenticated mini-portal so
+    // customers can view their bookings inside our own UI instead of being
+    // redirected to Square's branded login. Backed by:
+    //   1. /portal/request-magic-link — accept email, send signed token by
+    //      email (Resend), KV-stored 10-min single-use.
+    //   2. /portal/verify-and-list — exchange magic-link token for a
+    //      30-min session token + customer's upcoming bookings.
+    //   3. /portal/cancel-booking — session-authed cancel via Square API.
+    //
+    // Required worker secrets (set via Cloudflare dashboard):
+    //   - RESEND_API_KEY           — Resend account API key (free tier OK).
+    //   - PORTAL_FROM_EMAIL        — optional. Defaults to onboarding@resend.dev
+    //                                (Resend's shared sandbox sender). For
+    //                                production use, verify a domain in Resend
+    //                                and set this to e.g. "Alex Davis Fitness
+    //                                <noreply@alexsfitness.com>".
+    //   - PORTAL_SITE_URL          — optional, defaults to the gh-pages URL.
+
+    if (url.pathname === '/portal/request-magic-link' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!await checkRateLimit(request, 'portal-request', 5, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const email = String(body?.email || '').trim().toLowerCase();
+      if (!email || !email.includes('@') || email.length > 254) {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-email' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.RESEND_API_KEY) {
+        await logEvent('error', 'portal-resend-not-configured', { email }, env);
+        return new Response(JSON.stringify({ success: false, reason: 'email-not-configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Cryptographically random magic-link token (32 hex chars).
+      const token = crypto.randomUUID().replace(/-/g, '');
+      await kvPut(`portal-magic:${token}`, JSON.stringify({
+        email, createdAt: Date.now(),
+      }), { expirationTtl: 600 }, env); // 10 min
+
+      const siteUrl = env.PORTAL_SITE_URL || 'https://hkshoonya.github.io/alex-fitness-site';
+      const link = `${siteUrl}/#/portal?token=${token}`;
+      const fromEmail = env.PORTAL_FROM_EMAIL || 'Alex Davis Fitness <onboarding@resend.dev>';
+
+      // Branded HTML — dark theme matches the site, single CTA, plain-text
+      // fallback. Keep inline CSS for email-client compatibility (Gmail
+      // strips <style> blocks; Outlook ignores most flexbox/grid).
+      const html = `<!doctype html>
+<html><body style="margin:0;padding:0;background:#0B0B0D;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#fff;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0B0D;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#111;border:1px solid rgba(255,255,255,0.08);border-radius:16px;overflow:hidden;">
+        <tr><td style="padding:40px;">
+          <h1 style="margin:0 0 8px;font-size:14px;color:#FF4D2E;letter-spacing:0.1em;text-transform:uppercase;">Alex Davis Fitness</h1>
+          <h2 style="margin:0 0 16px;font-size:24px;color:#fff;font-weight:700;">View your bookings</h2>
+          <p style="margin:0 0 24px;color:rgba(255,255,255,0.7);line-height:1.6;font-size:15px;">
+            Tap the button below to securely view your upcoming sessions. This link expires in 10 minutes and only works once.
+          </p>
+          <a href="${link}" style="display:inline-block;background:#FF4D2E;color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:14px 28px;border-radius:8px;">Open my bookings</a>
+          <p style="margin:32px 0 0;color:rgba(255,255,255,0.4);font-size:12px;line-height:1.5;">
+            If you didn't request this, ignore this email — nothing happens until the link is opened.
+          </p>
+          <p style="margin:8px 0 0;color:rgba(255,255,255,0.3);font-size:11px;word-break:break-all;">
+            Or paste this URL: ${link}
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+      const text = `View your bookings at Alex Davis Fitness:\n\n${link}\n\nThis link expires in 10 minutes and only works once. If you didn't request this, ignore this email.`;
+
+      try {
+        const emailRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: fromEmail,
+            to: [email],
+            subject: 'Your Alex Davis Fitness login link',
+            html,
+            text,
+            reply_to: 'alexdavisfit@gmail.com',
+          }),
+        });
+        if (!emailRes.ok) {
+          const errBody = await emailRes.text().catch(() => '');
+          await logEvent('error', 'portal-email-send-failed', {
+            email, status: emailRes.status, body: errBody.slice(0, 300),
+          }, env);
+          return new Response(JSON.stringify({ success: false, reason: 'email-send-failed' }), {
+            status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      } catch (e) {
+        await logEvent('error', 'portal-email-exception', { email, err: e?.message }, env);
+        return new Response(JSON.stringify({ success: false, reason: 'email-send-failed' }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/portal/verify-and-list' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!await checkRateLimit(request, 'portal-verify', 30, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const token = String(body?.token || '');
+      if (!token || !/^[a-f0-9]{32}$/.test(token)) {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-token' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const raw = await kvGet(`portal-magic:${token}`, env);
+      if (!raw) {
+        return new Response(JSON.stringify({ success: false, reason: 'expired-or-invalid' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let tokenData;
+      try { tokenData = JSON.parse(raw); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'corrupt-token' }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // Single-use: delete the magic-link token now. Subsequent actions
+      // (cancel) use the issued session token instead.
+      await env.CHALLENGES_KV.delete(`portal-magic:${token}`);
+
+      const apiBase = getSquareApiBase(env);
+      const headers = getSquareHeaders(env);
+
+      // Look up customer in Square by email.
+      let customer = null;
+      try {
+        const sr = await fetch(`${apiBase}/customers/search`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            query: { filter: { email_address: { exact: tokenData.email } } },
+          }),
+        });
+        if (sr.ok) {
+          const sd = await sr.json();
+          customer = sd.customers?.[0] || null;
+        }
+      } catch (e) {
+        await logEvent('error', 'portal-customer-search-failed', { err: e?.message }, env);
+      }
+
+      // Issue a session token (separate from magic-link). Bound to the
+      // customer record so cancel actions can verify ownership.
+      const sessionToken = crypto.randomUUID().replace(/-/g, '');
+      await kvPut(`portal-session:${sessionToken}`, JSON.stringify({
+        email: tokenData.email,
+        customerId: customer?.id || null,
+        createdAt: Date.now(),
+      }), { expirationTtl: 30 * 60 }, env); // 30 min
+
+      let bookings = [];
+      if (customer) {
+        try {
+          const br = await fetch(
+            `${apiBase}/bookings?customer_id=${encodeURIComponent(customer.id)}&location_id=${encodeURIComponent('LD0SGZXT6ZSSD')}&limit=50`,
+            { headers },
+          );
+          if (br.ok) {
+            const bd = await br.json();
+            const now = Date.now();
+            bookings = (bd.bookings || [])
+              .filter(b => {
+                if (!b.start_at || !b.status) return false;
+                const dead = ['CANCELLED_BY_SELLER', 'CANCELLED_BY_CUSTOMER', 'DECLINED', 'NO_SHOW'];
+                if (dead.includes(b.status)) return false;
+                return new Date(b.start_at).getTime() > now;
+              })
+              .sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
+              .map(b => ({
+                id: b.id,
+                startAt: b.start_at,
+                status: b.status,
+                durationMinutes: b.appointment_segments?.[0]?.duration_minutes,
+                teamMemberId: b.appointment_segments?.[0]?.team_member_id,
+                serviceVariationId: b.appointment_segments?.[0]?.service_variation_id,
+              }));
+          }
+        } catch (e) {
+          await logEvent('error', 'portal-bookings-fetch-failed', { customerId: customer.id, err: e?.message }, env);
+        }
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        sessionToken,
+        customer: customer ? {
+          name: `${customer.given_name || ''} ${customer.family_name || ''}`.trim() || tokenData.email,
+          email: customer.email_address || tokenData.email,
+        } : null,
+        bookings,
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/portal/cancel-booking' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!await checkRateLimit(request, 'portal-cancel', 10, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const sessionToken = String(body?.sessionToken || '');
+      const bookingId = String(body?.bookingId || '');
+      if (!sessionToken || !/^[a-f0-9]{32}$/.test(sessionToken) || !bookingId) {
+        return new Response(JSON.stringify({ success: false, reason: 'missing-fields' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const sessRaw = await kvGet(`portal-session:${sessionToken}`, env);
+      if (!sessRaw) {
+        return new Response(JSON.stringify({ success: false, reason: 'session-expired' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let session;
+      try { session = JSON.parse(sessRaw); } catch {
+        return new Response(JSON.stringify({ success: false, reason: 'corrupt-session' }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const apiBase = getSquareApiBase(env);
+      const headers = getSquareHeaders(env);
+
+      // Verify the booking belongs to the session's customer before
+      // cancelling — the session token alone does not authorize cancelling
+      // an arbitrary booking ID.
+      try {
+        const br = await fetch(`${apiBase}/bookings/${encodeURIComponent(bookingId)}`, { headers });
+        if (!br.ok) {
+          return new Response(JSON.stringify({ success: false, reason: 'booking-not-found' }), {
+            status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        const bd = await br.json();
+        const ownedBy = bd.booking?.customer_id;
+        if (!ownedBy || ownedBy !== session.customerId) {
+          await logEvent('error', 'portal-cancel-ownership-mismatch', {
+            sessionEmail: session.email, bookingId, ownedBy: ownedBy || 'unknown',
+          }, env);
+          return new Response(JSON.stringify({ success: false, reason: 'not-your-booking' }), {
+            status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        // Square cancel takes the booking version and an optional reason.
+        const cancelRes = await fetch(`${apiBase}/bookings/${encodeURIComponent(bookingId)}/cancel`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            booking_version: bd.booking?.version,
+          }),
+        });
+        if (!cancelRes.ok) {
+          const errBody = await cancelRes.json().catch(() => ({}));
+          const detail = errBody.errors?.[0]?.detail || 'cancel-failed';
+          await logEvent('error', 'portal-cancel-failed', {
+            sessionEmail: session.email, bookingId, status: cancelRes.status, detail,
+          }, env);
+          return new Response(JSON.stringify({ success: false, reason: 'cancel-failed', detail }), {
+            status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        await logEvent('info', 'portal-cancel-success', {
+          sessionEmail: session.email, bookingId,
+        }, env);
+        return new Response(JSON.stringify({ success: true, bookingId }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        await logEvent('error', 'portal-cancel-exception', { bookingId, err: e?.message }, env);
+        return new Response(JSON.stringify({ success: false, reason: 'fetch-failed' }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     // POST /challenges/:id/join — public, non-admin endpoint. Atomically
     // decrements spotsLeft, records the join per email so the same person
     // can't double-claim a spot. Returns the updated challenge.

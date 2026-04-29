@@ -170,6 +170,48 @@ export async function removeChallenge(id: string): Promise<void> {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
 }
 
+/**
+ * Partial update — preserves the challenge id (and therefore signups). Only
+ * fields present in `updates` are changed on the worker side. Returns the
+ * updated challenge so the UI can render the new state without re-fetching.
+ */
+export type ChallengeUpdates = Partial<Pick<Challenge,
+  'title' | 'description' | 'startDate' | 'endDate' | 'duration' |
+  'prize' | 'spots' | 'price' | 'tags'
+>>;
+
+export async function updateChallenge(id: string, updates: ChallengeUpdates): Promise<Challenge> {
+  if (!WORKER_URL) throw new Error('Edit is only available with a configured worker.');
+
+  const resp = await fetch(`${WORKER_URL}/challenges/${id}`, {
+    method: 'PUT',
+    headers: adminHeaders(),
+    body: JSON.stringify(updates),
+  }).catch(e => { console.error('Failed to update challenge:', e); return null; });
+
+  if (!resp || !resp.ok) {
+    const status = resp?.status;
+    if (status === 404) throw new Error('That challenge no longer exists.');
+    throw new Error(
+      status === 401 || status === 503
+        ? 'Admin token expired or invalid — please sign in again.'
+        : `Failed to save changes (${status || 'network'})`
+    );
+  }
+
+  const updated: Challenge = await resp.json();
+
+  // Sync the local cache.
+  const all = getLocalChallenges();
+  const idx = all.findIndex(c => c.id === id);
+  if (idx >= 0) {
+    all[idx] = updated;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+  }
+
+  return updated;
+}
+
 export interface JoinChallengeResult {
   ok: boolean;
   alreadyJoined?: boolean;

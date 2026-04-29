@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Shield, LogOut, Plus, X, Check, Trash2, Calendar, Users, Tag,
+  Shield, LogOut, Plus, X, Check, Trash2, Pencil, Calendar, Users, Tag,
   Mail, Phone, ChevronDown, Loader2, AlertCircle, Award, ExternalLink,
 } from 'lucide-react';
 import {
@@ -10,7 +10,8 @@ import {
   type ChallengeSignup, type TrainerizeProgram,
 } from '@/api/admin';
 import {
-  getActiveChallenges, addChallenge, removeChallenge, parseChallengeDate,
+  getActiveChallenges, addChallenge, removeChallenge, updateChallenge,
+  parseChallengeDate,
   type Challenge,
 } from '@/api/challenges';
 
@@ -161,6 +162,10 @@ function ChallengesTab() {
   const [challenges, setChallenges] = useState<Challenge[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
+  // ID of the challenge currently being edited inline. Null = none.
+  // Mutually exclusive with showAddForm — only one form is open at a time
+  // to keep focus and validation messages unambiguous.
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -180,9 +185,9 @@ function ChallengesTab() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-2xl font-display font-bold mb-1">Challenges</h2>
-          <p className="text-white/50 text-sm">Create, view, and remove fitness challenges shown on the public site.</p>
+          <p className="text-white/50 text-sm">Create, edit, and remove fitness challenges shown on the public site.</p>
         </div>
-        {!showAddForm && (
+        {!showAddForm && !editingId && (
           <button
             onClick={() => setShowAddForm(true)}
             className="px-4 py-2 bg-[#FF4D2E] hover:bg-[#e54327] text-white rounded-lg text-sm font-semibold flex items-center gap-2"
@@ -193,7 +198,8 @@ function ChallengesTab() {
       </div>
 
       {showAddForm && (
-        <AddChallengeForm
+        <ChallengeForm
+          mode="create"
           onCancel={() => { setShowAddForm(false); setError(null); }}
           onSaved={() => { setShowAddForm(false); setError(null); load(); }}
           onError={setError}
@@ -217,20 +223,32 @@ function ChallengesTab() {
       {!loading && challenges.length > 0 && (
         <div className="space-y-3">
           {challenges.map(c => (
-            <ChallengeRow
-              key={c.id}
-              challenge={c}
-              onDelete={async () => {
-                if (!confirm(`Delete "${c.title}"? This cannot be undone.`)) return;
-                try {
-                  await removeChallenge(c.id);
-                  setError(null);
-                  load();
-                } catch (e) {
-                  setError(e instanceof Error ? e.message : 'Delete failed');
-                }
-              }}
-            />
+            editingId === c.id ? (
+              <ChallengeForm
+                key={c.id}
+                mode="edit"
+                initial={c}
+                onCancel={() => { setEditingId(null); setError(null); }}
+                onSaved={() => { setEditingId(null); setError(null); load(); }}
+                onError={setError}
+              />
+            ) : (
+              <ChallengeRow
+                key={c.id}
+                challenge={c}
+                onEdit={() => { setEditingId(c.id); setShowAddForm(false); setError(null); }}
+                onDelete={async () => {
+                  if (!confirm(`Delete "${c.title}"? This cannot be undone — and any signups for this challenge will be orphaned (the data stays in KV but won't show in the Signups tab).`)) return;
+                  try {
+                    await removeChallenge(c.id);
+                    setError(null);
+                    load();
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : 'Delete failed');
+                  }
+                }}
+              />
+            )
           ))}
         </div>
       )}
@@ -238,7 +256,11 @@ function ChallengesTab() {
   );
 }
 
-function ChallengeRow({ challenge, onDelete }: { challenge: Challenge; onDelete: () => void }) {
+function ChallengeRow({ challenge, onEdit, onDelete }: {
+  challenge: Challenge;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
   const start = parseChallengeDate(challenge.startDate);
   const end = parseChallengeDate(challenge.endDate);
   const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -250,7 +272,7 @@ function ChallengeRow({ challenge, onDelete }: { challenge: Challenge; onDelete:
   return (
     <div className="bg-white/[0.03] border border-white/10 rounded-xl p-5 flex items-start justify-between gap-4">
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-3 mb-2">
+        <div className="flex items-center gap-3 mb-2 flex-wrap">
           <h3 className="font-semibold truncate">{challenge.title}</h3>
           <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold ${statusColor}`}>
             {challenge.status}
@@ -267,27 +289,47 @@ function ChallengeRow({ challenge, onDelete }: { challenge: Challenge; onDelete:
           )}
         </div>
       </div>
-      <button
-        onClick={onDelete}
-        className="text-white/30 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-500/10"
-        title="Delete challenge"
-      >
-        <Trash2 size={16} />
-      </button>
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          onClick={onEdit}
+          className="text-white/30 hover:text-[#FF4D2E] transition-colors p-2 rounded-lg hover:bg-[#FF4D2E]/10"
+          title="Edit challenge"
+        >
+          <Pencil size={16} />
+        </button>
+        <button
+          onClick={onDelete}
+          className="text-white/30 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-500/10"
+          title="Delete challenge"
+        >
+          <Trash2 size={16} />
+        </button>
+      </div>
     </div>
   );
 }
 
-function AddChallengeForm({
-  onCancel, onSaved, onError,
+// Dual-mode form — `mode: 'create'` calls addChallenge, `mode: 'edit'` calls
+// updateChallenge with the existing challenge's id (preserves signups).
+function ChallengeForm({
+  mode, initial, onCancel, onSaved, onError,
 }: {
+  mode: 'create' | 'edit';
+  initial?: Challenge;
   onCancel: () => void;
   onSaved: () => void;
   onError: (msg: string | null) => void;
 }) {
   const [form, setForm] = useState({
-    title: '', description: '', startDate: '', endDate: '', duration: '4 Weeks',
-    prize: '', spots: '', price: '0', tags: '',
+    title: initial?.title ?? '',
+    description: initial?.description ?? '',
+    startDate: initial?.startDate ?? '',
+    endDate: initial?.endDate ?? '',
+    duration: initial?.duration ?? '4 Weeks',
+    prize: initial?.prize ?? '',
+    spots: initial?.spots != null ? String(initial.spots) : '',
+    price: initial?.price != null ? String(initial.price) : '0',
+    tags: initial?.tags?.join(', ') ?? '',
   });
   const [saving, setSaving] = useState(false);
 
@@ -307,18 +349,32 @@ function AddChallengeForm({
 
     setSaving(true);
     try {
-      await addChallenge({
-        title: form.title.trim(),
-        description: form.description.trim(),
-        startDate: form.startDate,
-        endDate: form.endDate,
-        duration: form.duration.trim() || '4 Weeks',
-        prize: form.prize.trim() || undefined,
-        spots: spotsNum,
-        spotsLeft: spotsNum,
-        price: priceNum,
-        tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
-      });
+      if (mode === 'edit' && initial) {
+        await updateChallenge(initial.id, {
+          title: form.title.trim(),
+          description: form.description.trim(),
+          startDate: form.startDate,
+          endDate: form.endDate,
+          duration: form.duration.trim() || '4 Weeks',
+          prize: form.prize.trim() || undefined,
+          spots: spotsNum,
+          price: priceNum,
+          tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+        });
+      } else {
+        await addChallenge({
+          title: form.title.trim(),
+          description: form.description.trim(),
+          startDate: form.startDate,
+          endDate: form.endDate,
+          duration: form.duration.trim() || '4 Weeks',
+          prize: form.prize.trim() || undefined,
+          spots: spotsNum,
+          spotsLeft: spotsNum,
+          price: priceNum,
+          tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+        });
+      }
       onSaved();
     } catch (e) {
       onError(e instanceof Error ? e.message : 'Failed to save');
@@ -327,11 +383,19 @@ function AddChallengeForm({
     }
   };
 
+  const isEdit = mode === 'edit';
+
   return (
-    <div className="bg-white/[0.03] border border-white/10 rounded-2xl p-6 mb-6">
-      <h3 className="font-semibold mb-4 flex items-center gap-2">
-        <Plus size={18} className="text-[#FF4D2E]" /> New Challenge
-      </h3>
+    <div className="bg-white/[0.03] border border-[#FF4D2E]/30 rounded-2xl p-6 mb-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="font-semibold flex items-center gap-2">
+          {isEdit ? <Pencil size={18} className="text-[#FF4D2E]" /> : <Plus size={18} className="text-[#FF4D2E]" />}
+          {isEdit ? `Edit "${initial?.title}"` : 'New Challenge'}
+        </h3>
+        {isEdit && initial && (
+          <span className="text-white/30 text-xs">id: <code>{initial.id}</code></span>
+        )}
+      </div>
       <div className="grid md:grid-cols-2 gap-4">
         <Field label="Title *" className="md:col-span-2">
           <input value={form.title} onChange={setField('title')} placeholder="30-Day Shred Challenge" className={inputClass} />
@@ -361,6 +425,12 @@ function AddChallengeForm({
           <input value={form.tags} onChange={setField('tags')} placeholder="fat-loss, strength, beginners" className={inputClass} />
         </Field>
       </div>
+      {isEdit && initial?.spots != null && (
+        <p className="text-white/40 text-xs mt-3">
+          Currently <span className="text-white/70">{initial.spotsLeft ?? '?'}</span> of <span className="text-white/70">{initial.spots}</span> spots left.
+          Changing total spots adjusts spots-left to keep already-joined people counted.
+        </p>
+      )}
       <div className="flex gap-3 mt-5">
         <button onClick={onCancel} disabled={saving} className="px-4 py-2.5 bg-white/5 hover:bg-white/10 text-white rounded-lg text-sm">
           Cancel
@@ -370,7 +440,9 @@ function AddChallengeForm({
           disabled={saving || !form.title || !form.startDate || !form.endDate}
           className="flex-1 px-4 py-2.5 bg-[#FF4D2E] hover:bg-[#e54327] disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-semibold flex items-center justify-center gap-2"
         >
-          {saving ? <><Loader2 size={16} className="animate-spin" /> Saving...</> : <><Check size={16} /> Save Challenge</>}
+          {saving ? <><Loader2 size={16} className="animate-spin" /> Saving...</> :
+           isEdit ? <><Check size={16} /> Save Changes</> :
+           <><Check size={16} /> Save Challenge</>}
         </button>
       </div>
     </div>

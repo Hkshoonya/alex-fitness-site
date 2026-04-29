@@ -1385,6 +1385,42 @@ export default {
       });
     }
 
+    // PUT /challenges/:id — partial update (admin-gated). Preserves the
+    // challenge ID and createdAt so existing signup records (keyed on
+    // challenge ID) stay attached after edits. Recalculates spotsLeft when
+    // total spots changes so already-joined people aren't double-counted.
+    if (url.pathname.startsWith('/challenges/') && !url.pathname.endsWith('/join') && request.method === 'PUT') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const id = url.pathname.split('/challenges/')[1];
+      let updates;
+      try { updates = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const updateLock = await withLock('lock:challenges-write', 15, env, () => updateChallenge(id, updates, env));
+      if (!updateLock.ok) {
+        return new Response(JSON.stringify({ error: 'Challenge list is being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!updateLock.value) {
+        return new Response(JSON.stringify({ error: 'Challenge not found', id }), {
+          status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(updateLock.value), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     if (url.pathname.startsWith('/challenges/') && request.method === 'DELETE') {
       if (!isAllowedOrigin) {
         return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
@@ -4152,4 +4188,50 @@ async function deleteChallenge(id, env) {
   const all = await getChallenges(env);
   const filtered = all.filter(c => c.id !== id);
   await kvPut('challenges', JSON.stringify(filtered), {}, env);
+}
+
+/**
+ * Partial update — only fields present in `updates` are changed. The
+ * challenge id and createdAt are preserved so signup records (keyed on
+ * challenge id) stay attached. When `spots` (total) changes, spotsLeft is
+ * recalculated to honor existing joins:
+ *   joinedCount = oldSpots - oldSpotsLeft
+ *   newSpotsLeft = max(0, newSpots - joinedCount)
+ * Returns the updated challenge, or null if not found.
+ */
+async function updateChallenge(id, updates, env) {
+  if (!env.CHALLENGES_KV) return null;
+  const all = await getChallenges(env);
+  const idx = all.findIndex(c => c.id === id);
+  if (idx === -1) return null;
+  const existing = all[idx];
+
+  // Whitelist editable fields. id, createdAt, trainerizeId stay frozen — the
+  // first two for referential integrity (signups), the third because it's
+  // set by the Trainerize sync, not the admin.
+  const merged = { ...existing };
+  const editable = ['title', 'description', 'startDate', 'endDate', 'duration', 'prize', 'price', 'tags'];
+  for (const k of editable) {
+    if (k in updates) merged[k] = updates[k];
+  }
+
+  if ('spots' in updates) {
+    if (updates.spots === null || updates.spots === undefined) {
+      merged.spots = null;
+      merged.spotsLeft = null;
+    } else {
+      const newSpots = Number(updates.spots);
+      if (Number.isFinite(newSpots) && newSpots >= 0) {
+        const oldSpots = typeof existing.spots === 'number' ? existing.spots : newSpots;
+        const oldLeft  = typeof existing.spotsLeft === 'number' ? existing.spotsLeft : oldSpots;
+        const joined = Math.max(0, oldSpots - oldLeft);
+        merged.spots = newSpots;
+        merged.spotsLeft = Math.max(0, newSpots - joined);
+      }
+    }
+  }
+
+  all[idx] = merged;
+  await kvPut('challenges', JSON.stringify(all), {}, env);
+  return merged;
 }

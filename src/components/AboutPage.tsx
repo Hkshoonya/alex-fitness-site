@@ -40,6 +40,23 @@ const studioImages = [
   asset('/images/studio-12.jpg'),
 ];
 
+// Hero cycles between the gym view and the dojo view, with headline + sub
+// rotating in sync. Both kept in color on the About page (vs grayscale on
+// the homepage Studio section) so each page has its own treatment.
+const ABOUT_HERO_CYCLE = [
+  {
+    src: '/images/gym1.jpg',
+    headline: 'MORE THAN\nA GYM.',
+    sub: 'A private training studio built on one belief: every person deserves coaching that actually works. No shortcuts. No gimmicks. Just science, sweat, and someone who gives a damn.',
+  },
+  {
+    src: '/images/studio2.jpg',
+    headline: 'THE DOJO.',
+    sub: 'Heavy bags, open mat, recovery — a multi-discipline floor for every kind of training the day calls for.',
+  },
+];
+const ABOUT_HERO_INTERVAL_MS = 6000;
+
 const timeline = [
   {
     year: 'Early Days',
@@ -92,6 +109,7 @@ const values = [
 
 export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
   const [studioIndex, setStudioIndex] = useState(0);
+  const [aboutHeroIndex, setAboutHeroIndex] = useState(0);
   const heroRef = useRef<HTMLDivElement>(null);
   const storyRef = useRef<HTMLDivElement>(null);
   const studioRef = useRef<HTMLDivElement>(null);
@@ -103,6 +121,14 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
   // Auto-advance studio gallery
   useEffect(() => {
     const timer = setInterval(nextStudio, 3500);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Auto-advance the about-hero gym ↔ dojo cycle
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setAboutHeroIndex(i => (i + 1) % ABOUT_HERO_CYCLE.length);
+    }, ABOUT_HERO_INTERVAL_MS);
     return () => clearInterval(timer);
   }, []);
 
@@ -179,22 +205,43 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
         </div>
       </nav>
 
-      {/* Hero — studio background */}
-      <section ref={heroRef} className="relative min-h-screen flex items-center">
+      {/* Hero — gym ↔ dojo carousel with synchronized text rotation. Both
+          images stay in color on About (vs grayscale on the homepage). */}
+      <section ref={heroRef} className="relative min-h-screen flex items-center overflow-hidden">
         <div className="absolute inset-0 about-hero-bg">
-          <img src={asset("/images/studio-interior.jpg")} alt="Alex's Fitness Studio" className="w-full h-full object-cover" />
+          {ABOUT_HERO_CYCLE.map((entry, i) => (
+            <img
+              key={entry.src}
+              src={asset(entry.src)}
+              alt=""
+              aria-hidden="true"
+              className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ${i === aboutHeroIndex ? 'opacity-100' : 'opacity-0'}`}
+              style={{ objectPosition: 'center top' }}
+            />
+          ))}
           <div className="absolute inset-0 bg-gradient-to-r from-black/85 via-black/60 to-black/30" />
         </div>
 
         <div className="relative z-10 px-6 lg:px-[6vw] pt-24 pb-16 w-full">
           <div className="max-w-2xl">
             <p className="about-hero-label micro-label text-[#FF4D2E]/80 mb-6">EST. TEMPLE TERRACE, FL</p>
-            <h1 className="about-hero-headline headline-xl text-white text-4xl sm:text-6xl lg:text-7xl xl:text-8xl mb-6 break-words">
-              MORE THAN<br />A GYM.
-            </h1>
-            <p className="about-hero-sub text-white/80 text-lg lg:text-xl max-w-lg mb-10">
-              A private training studio built on one belief: every person deserves coaching that actually works. No shortcuts. No gimmicks. Just science, sweat, and someone who gives a damn.
-            </p>
+            {/* Grid-stack so the parent sizes to the larger of the two
+                text blocks — no layout shift when the cycle advances. */}
+            <div className="grid grid-cols-1 grid-rows-1">
+              {ABOUT_HERO_CYCLE.map((entry, i) => (
+                <div
+                  key={entry.src}
+                  className={`col-start-1 row-start-1 transition-opacity duration-1000 ${i === aboutHeroIndex ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                >
+                  <h1 className="about-hero-headline headline-xl text-white text-4xl sm:text-6xl lg:text-7xl xl:text-8xl mb-6 break-words whitespace-pre-line">
+                    {entry.headline}
+                  </h1>
+                  <p className="about-hero-sub text-white/80 text-lg lg:text-xl max-w-lg mb-10">
+                    {entry.sub}
+                  </p>
+                </div>
+              ))}
+            </div>
             <div className="flex flex-col sm:flex-row gap-4 about-hero-cta">
               <button onClick={onBooking} className="btn-primary flex items-center justify-center gap-2">
                 <Calendar size={18} />
@@ -330,7 +377,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
       {/* What Makes Us Different */}
       <section ref={valuesRef} className="relative py-24 px-6 lg:px-[6vw]">
         <div className="absolute inset-0">
-          <img src={asset("/images/studio-interior.jpg")} alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-110 opacity-15" />
+          <img src={asset("/images/gym1.jpg")} alt="" aria-hidden="true" className="w-full h-full object-cover blur-3xl scale-110 opacity-15 grayscale" />
           <div className="absolute inset-0 bg-black/70" />
         </div>
 

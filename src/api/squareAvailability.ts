@@ -7,7 +7,10 @@ import { getSquareConfig, getSquareHeaders, getServiceId, SQUARE_API_BASE } from
 const { locationId: SQUARE_LOCATION_ID } = getSquareConfig();
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
-const TEAM_CACHE_KEY = 'alex_fitness_team';
+// Bump the suffix when COACH_IMAGE_MAP changes so existing visitors with
+// stale cached team data refresh and see new photos on next load instead
+// of waiting 24h for natural expiry.
+const TEAM_CACHE_KEY = 'alex_fitness_team_v2';
 const AVAILABILITY_CACHE_KEY = 'alex_fitness_availability';
 const TEAM_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24h for team members
 const AVAILABILITY_CACHE_DURATION = 15 * 60 * 1000; // 15 min for availability
@@ -172,15 +175,27 @@ async function fetchTeamFromSquare(): Promise<TeamMember[]> {
     const data = await response.json();
     const members = data.team_members || [];
 
-    return members.map((m: any) => ({
-      id: m.id,
-      name: `${m.given_name || ''} ${m.family_name || ''}`.trim(),
-      role: m.is_owner ? 'head-coach' as const : 'coach' as const,
-      title: m.is_owner ? 'Head Coach & Founder' : 'Trainer',
-      image: asset('/images/coach-portrait.jpg'),
-      specialties: [],
-      squareTeamMemberId: m.id,
-    }));
+    // First-name → photo map. Square Team API doesn't store custom photos,
+    // so we override here. Add a coach by dropping their photo at
+    // `public/images/<firstname>.jpg` and adding the lowercase first name
+    // to this map.
+    const COACH_IMAGE_MAP: Record<string, string> = {
+      eun: '/images/eun.jpg',
+    };
+
+    return members.map((m: any) => {
+      const name = `${m.given_name || ''} ${m.family_name || ''}`.trim();
+      const firstName = name.toLowerCase().split(' ')[0];
+      return {
+        id: m.id,
+        name,
+        role: m.is_owner ? 'head-coach' as const : 'coach' as const,
+        title: m.is_owner ? 'Head Coach & Founder' : 'Trainer',
+        image: asset(COACH_IMAGE_MAP[firstName] || '/images/coach-portrait.jpg'),
+        specialties: [],
+        squareTeamMemberId: m.id,
+      };
+    });
   } catch (error) {
     console.error('Team fetch failed:', error);
     return [];

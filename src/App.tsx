@@ -32,6 +32,28 @@ import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
 
+// Hero background images cycle every 6s with a 1s cross-fade. Module-scope
+// constant so the array isn't recreated on every render.
+const HERO_IMAGES = ['/images/1.jpg', '/images/2.jpg', '/images/3.jpg'];
+const HERO_INTERVAL_MS = 6000;
+
+// Studio section cycles between two views of the gym — main weight room
+// and the dojo / open-mat area — each with its own headline + subtitle so
+// the text rotates in sync with the image.
+const STUDIO_CYCLE = [
+  {
+    src: '/images/gym1.jpg',
+    headline: 'PRIVATE TRAINING STUDIO.',
+    sub: 'No crowds. No waiting for equipment. Just you, your coach, and a plan that evolves with you.',
+  },
+  {
+    src: '/images/studio2.jpg',
+    headline: 'THE DOJO.',
+    sub: 'Heavy bags, open mat, recovery — the floor adapts to whatever your training calls for.',
+  },
+];
+const STUDIO_INTERVAL_MS = 6000;
+
 function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bookingModalOpen, setBookingModalOpen] = useState(false);
@@ -47,6 +69,11 @@ function App() {
   // not in the bundled JS source. Falls back to the static map image while
   // loading or if the worker is unreachable.
   const [mapEmbedUrl, setMapEmbedUrl] = useState<string | null>(null);
+  // Hero background cycle index — advances on a timer; the JSX renders all
+  // three images stacked and toggles opacity for a CSS cross-fade.
+  const [heroIndex, setHeroIndex] = useState(0);
+  // Studio section cycle — gym ↔ dojo. Image + headline + sub rotate together.
+  const [studioIndex, setStudioIndex] = useState(0);
 
   // Hash-based admin route. Using `#/admin` instead of `/admin` so GitHub
   // Pages (no server-side rewrites) doesn't 404 on direct navigation.
@@ -67,6 +94,20 @@ function App() {
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d?.src) setMapEmbedUrl(d.src); })
       .catch(() => { /* silent — fall back to static image */ });
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setHeroIndex(i => (i + 1) % HERO_IMAGES.length);
+    }, HERO_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setStudioIndex(i => (i + 1) % STUDIO_CYCLE.length);
+    }, STUDIO_INTERVAL_MS);
+    return () => clearInterval(id);
   }, []);
 
   const heroRef = useRef<HTMLDivElement>(null);
@@ -396,14 +437,32 @@ function App() {
 
       {/* Section 1: Hero */}
       <section id="hero" ref={heroRef} className="relative min-h-screen flex items-center">
-        {/* Background image */}
+        {/* Background image — auto-cycling between 3 photos with cross-fade.
+            Each cycle uses two layers: a blurred original behind, and a
+            transparent-bg subject PNG in front (extracted via rembg). The
+            subject layer keeps people sharp; only the photo background blurs. */}
         <div className="absolute inset-0 hero-bg">
-          <img 
-            src={asset("/images/hero-lifting.jpg")}
-            alt="Athlete lifting weights" 
-            className="w-full h-full object-cover"
-          />
-          <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/50 to-transparent" />
+          {HERO_IMAGES.map((src, i) => (
+            <div
+              key={src}
+              aria-hidden="true"
+              className={`absolute inset-0 transition-opacity duration-1000 ${i === heroIndex ? 'opacity-100' : 'opacity-0'}`}
+            >
+              <img
+                src={asset(src)}
+                alt=""
+                className="absolute inset-0 w-full h-full object-cover grayscale blur-sm"
+                style={{ objectPosition: 'center 30%' }}
+              />
+              <img
+                src={asset(src.replace('.jpg', '-fg.png'))}
+                alt=""
+                className="absolute inset-0 w-full h-full object-cover grayscale"
+                style={{ objectPosition: 'center 30%' }}
+              />
+            </div>
+          ))}
+          <div className="absolute inset-0 bg-gradient-to-r from-black/65 via-black/30 to-transparent" />
         </div>
 
         {/* Content */}
@@ -440,12 +499,22 @@ function App() {
       {/* Section 2: Stronger Body, Stronger Mind */}
       <section ref={valueRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0">
-          <img 
-            src={asset("/images/value-seated.jpg")}
-            alt="Athlete with dumbbell" 
-            className="w-full h-full object-cover"
+          {/* Blurred original — provides background depth */}
+          <img
+            src={asset("/images/4.jpg")}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 w-full h-full object-cover grayscale blur-sm"
+            style={{ objectPosition: 'center 30%' }}
           />
-          <div className="absolute inset-0 bg-gradient-to-l from-black/80 via-black/40 to-transparent" />
+          {/* Sharp subject (extracted via rembg) on top — keeps trainer crisp */}
+          <img
+            src={asset("/images/4-fg.png")}
+            alt="Trainer in the studio"
+            className="absolute inset-0 w-full h-full object-cover grayscale"
+            style={{ objectPosition: 'center 30%' }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-l from-black/65 via-black/30 to-transparent" />
         </div>
 
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">
@@ -468,12 +537,22 @@ function App() {
       {/* Section 3: Training Plans */}
       <section id="plans" ref={plansRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0">
-          <img 
-            src={asset("/images/plans-dumbbells.jpg")}
-            alt="Athlete with dumbbells" 
-            className="w-full h-full object-cover"
+          {/* Blurred original — provides background depth */}
+          <img
+            src={asset("/images/trainingplan.jpg")}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 w-full h-full object-cover grayscale blur-sm"
+            style={{ objectPosition: 'center 30%' }}
           />
-          <div className="absolute inset-0 bg-black/60" />
+          {/* Sharp subject (extracted via rembg) on top */}
+          <img
+            src={asset("/images/trainingplan-fg.png")}
+            alt="Trainer using cable machine"
+            className="absolute inset-0 w-full h-full object-cover grayscale"
+            style={{ objectPosition: 'center 30%' }}
+          />
+          <div className="absolute inset-0 bg-black/50" />
         </div>
 
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">
@@ -527,28 +606,45 @@ function App() {
         </div>
       </section>
 
-      {/* Section 4: Private Training Studio */}
-      <section id="studio" ref={studioRef} className="relative min-h-screen flex items-center">
+      {/* Section 4: Private Training Studio + Dojo (cycles every 6s).
+          Image and text rotate together: the gym view pairs with the
+          "PRIVATE TRAINING STUDIO." headline; the dojo view pairs with
+          "THE DOJO." headline. Both images grayscale, matching the
+          homepage's editorial treatment. */}
+      <section id="studio" ref={studioRef} className="relative min-h-screen flex items-center overflow-hidden">
         <div className="absolute inset-0">
-          <img 
-            src={asset("/images/studio-interior.jpg")}
-            alt="Alex's private training studio" 
-            className="w-full h-full object-cover"
-          />
-          <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/40 to-transparent" />
+          {STUDIO_CYCLE.map((entry, i) => (
+            <img
+              key={entry.src}
+              src={asset(entry.src)}
+              alt=""
+              aria-hidden="true"
+              className={`absolute inset-0 w-full h-full object-cover grayscale transition-opacity duration-1000 ${i === studioIndex ? 'opacity-100' : 'opacity-0'}`}
+              style={{ objectPosition: 'center top' }}
+            />
+          ))}
+          <div className="absolute inset-0 bg-gradient-to-r from-black/65 via-black/30 to-transparent" />
         </div>
 
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">
-          <div className="max-w-xl studio-content">
-            <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-6">
-              PRIVATE TRAINING STUDIO.
-            </h2>
-            <p className="text-white/70 text-lg mb-8">
-              No crowds. No waiting for equipment. Just you, your coach, and a plan that evolves with you.
-            </p>
-            <button onClick={() => scrollToSection('book')} className="text-[#FF4D2E] font-semibold text-sm uppercase tracking-wider link-underline">
-              See the Studio
-            </button>
+          {/* Grid-stack: both text blocks live in the same cell so the
+              parent sizes to the larger of the two — no layout shift when
+              the cycle advances. Only the active block has opacity-100. */}
+          <div className="grid grid-cols-1 grid-rows-1 max-w-xl studio-content">
+            {STUDIO_CYCLE.map((entry, i) => (
+              <div
+                key={entry.src}
+                className={`col-start-1 row-start-1 transition-opacity duration-1000 ${i === studioIndex ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+              >
+                <h2 className="headline-xl text-white text-3xl sm:text-5xl lg:text-6xl break-words mb-6">
+                  {entry.headline}
+                </h2>
+                <p className="text-white/70 text-lg mb-8">{entry.sub}</p>
+                <button onClick={() => scrollToSection('book')} className="text-[#FF4D2E] font-semibold text-sm uppercase tracking-wider link-underline">
+                  See the Studio
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       </section>
@@ -619,12 +715,22 @@ function App() {
       {/* Section 8: Book Your Session */}
       <section id="book" ref={bookRef} className="relative min-h-screen flex items-center">
         <div className="absolute inset-0">
+          {/* Blurred original — provides background depth */}
           <img
-            src={asset("/images/book-lifting.jpg")}
-            alt="Athlete lifting"
-            className="w-full h-full object-cover"
+            src={asset("/images/start1.jpg")}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 w-full h-full object-cover grayscale blur-sm"
+            style={{ objectPosition: 'center 30%' }}
           />
-          <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/50 to-transparent" />
+          {/* Sharp subject (extracted via rembg) on top — boxing-pose action shot */}
+          <img
+            src={asset("/images/start1-fg.png")}
+            alt="Trainer in boxing pose"
+            className="absolute inset-0 w-full h-full object-cover grayscale"
+            style={{ objectPosition: 'center 30%' }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-r from-black/65 via-black/30 to-transparent" />
         </div>
 
         <div className="relative z-10 px-6 lg:px-[6vw] py-24 w-full">

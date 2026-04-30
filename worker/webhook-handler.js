@@ -1152,8 +1152,14 @@ export default {
         [/^payments$/,                              ['POST']],
         [/^payments\/[A-Za-z0-9_-]+$/,              ['GET']],
         // Subscriptions
-        [/^subscriptions$/,                         ['POST']],
-        [/^subscriptions\/[A-Za-z0-9_-]+$/,         ['GET', 'POST']],
+        //   POST /subscriptions          — create
+        //   GET  /subscriptions/{id}     — read
+        //   POST /subscriptions/{id}/cancel | /pause | /resume — lifecycle
+        // (POST on /subscriptions/{id} bare was a stale mismatch — Square's
+        //  UpdateSubscription is PUT, not POST, and no UI was using it.)
+        [/^subscriptions$/,                                       ['POST']],
+        [/^subscriptions\/[A-Za-z0-9_-]+$/,                       ['GET']],
+        [/^subscriptions\/[A-Za-z0-9_-]+\/(cancel|pause|resume)$/,['POST']],
         // Team members (coach picker uses search; never list everyone)
         [/^team-members\/search$/,                  ['POST']],
       ];

@@ -20,3 +20,6 @@ worker/.wrangler/
 *.pem
 *.p12
 *secret*.json
+
+# Internal audit reports — keep local only, do NOT commit to public repo
+security_best_practices_report.md

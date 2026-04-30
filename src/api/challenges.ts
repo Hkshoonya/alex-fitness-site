@@ -258,11 +258,24 @@ export async function joinChallenge(
 }
 
 /**
+ * Parse a YYYY-MM-DD date string as LOCAL midnight (not UTC). `new Date("2026-04-30")`
+ * parses as UTC, which displays as the previous day in negative-offset zones (EST/EDT)
+ * — a challenge meant to start April 30 would show as starting April 29.
+ */
+function parseLocalDate(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return new Date(dateStr); // fall back if not YYYY-MM-DD
+  return new Date(y, m - 1, d);
+}
+
+/**
  * Determine challenge status based on dates
  */
 function getStatus(c: Challenge, now: Date): Challenge['status'] {
-  const start = new Date(c.startDate);
-  const end = new Date(c.endDate);
+  const start = parseLocalDate(c.startDate);
+  // End date is inclusive — a challenge ending April 30 is active through end-of-day April 30 local.
+  const endDay = parseLocalDate(c.endDate);
+  const end = new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate(), 23, 59, 59, 999);
 
   if (now < start) return 'upcoming';
   if (now > end) return 'ended';

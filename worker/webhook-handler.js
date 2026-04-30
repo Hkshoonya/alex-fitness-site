@@ -52,6 +52,23 @@ function getInPersonApptType(env) {
   const v = parseInt(env.TZ_INPERSON_APPOINTMENT_TYPE_ID || '', 10);
   return Number.isFinite(v) && v > 0 ? v : null;
 }
+
+/**
+ * Map a Square service_variation_id to a Trainerize appointment type ID.
+ * Reads the env var TZ_TYPE_BY_SERVICE as JSON; returns null if missing or
+ * the service isn't mapped. Used by reverse-sync to route each booking to
+ * the correct TZ type instead of using a single default.
+ */
+function getTzTypeForService(serviceId, env) {
+  if (!serviceId || !env.TZ_TYPE_BY_SERVICE) return null;
+  try {
+    const map = JSON.parse(env.TZ_TYPE_BY_SERVICE);
+    const v = parseInt(map[serviceId], 10);
+    return Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null; // malformed JSON — fall through to other defaults
+  }
+}
 const STUDIO_ADDRESS = '13305 Sanctuary Cove Dr, Temple Terrace, FL 33637';
 
 // Booking policy constants
@@ -4217,24 +4234,34 @@ async function syncBookingToTrainerize(booking, env) {
       const tzStart = startAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
       const tzEnd = endAt.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
 
-      // Pick the right Trainerize appointment type. Previously ALL synced
-      // bookings used the virtual type because we couldn't resolve a location
-      // ID — which made Alex's calendar show "virtual" for every in-person
-      // session. Now: honor TZ_INPERSON_APPOINTMENT_TYPE_ID when set, fall
-      // back to virtual only when it's unset (with a log so the mis-config
-      // is visible).
+      // Pick the right Trainerize appointment type. Resolution order:
+      //   1. Per-Square-service map (TZ_TYPE_BY_SERVICE) — exact, preferred
+      //   2. In-person default (TZ_INPERSON_APPOINTMENT_TYPE_ID) when not virtual
+      //   3. Virtual default (TZ_VIRTUAL_APPOINTMENT_TYPE_ID, has hardcoded fallback)
+      //
+      // Step 1 lets Alex map each Square service variation (PT 30/60/90,
+      // Free Consultation, etc.) to a specific Trainerize type without code
+      // changes. Step 2 covers the case where a Square service ID isn't yet
+      // in the map — better than always falling to "virtual" when the booking
+      // is in-person at the studio.
+      const segmentServiceId = booking.appointment_segments?.[0]?.service_variation_id;
+      const mappedTypeId = getTzTypeForService(segmentServiceId, env);
       const inPersonTypeId = getInPersonApptType(env);
       const virtualTypeId = getVirtualApptType(env);
       let chosenTypeId;
-      if (isVirtual) {
+      if (mappedTypeId) {
+        chosenTypeId = mappedTypeId;
+      } else if (isVirtual) {
         chosenTypeId = virtualTypeId;
       } else if (inPersonTypeId) {
         chosenTypeId = inPersonTypeId;
       } else {
         chosenTypeId = virtualTypeId;
-        await logEvent('error', 'tz-inperson-type-missing', {
-          bookingId: booking.id, squareLocationType: booking.location_type,
-          hint: 'Set TZ_INPERSON_APPOINTMENT_TYPE_ID in Cloudflare env. List IDs via GET /admin/trainerize-appointment-types.',
+        await logEvent('error', 'tz-type-fallback', {
+          bookingId: booking.id,
+          squareLocationType: booking.location_type,
+          serviceVariationId: segmentServiceId,
+          hint: 'Set TZ_TYPE_BY_SERVICE (JSON map) or TZ_INPERSON_APPOINTMENT_TYPE_ID in Cloudflare env.',
         }, env);
       }
 
@@ -5067,12 +5094,30 @@ async function handleSessionInvoicePaid(invoice, env) {
 async function syncTrainerizeAppointmentsToSquare(env) {
   if (!isTrainerizeConfigured(env)) return;
 
-  const SERVICE_IDS = {
-    30: 'AP6SY2YY6DHCTMOCGORX4WFS',
-    45: 'GXOISXWZ6NREZ3J5VHZNSUIT',
-    60: 'KBRH7JNDZMU2K5JQUTERXBU4',
-    90: 'B56W2433G6HFLVMWQGLUREUN',
+  // Duration → Square service variation. These match the IDs the website's
+  // /book-session flow uses (PT - X Minute Session) so a Trainerize-originated
+  // booking and a website-originated booking land as the SAME Square service,
+  // not two parallel services. Old "30 Min Training" IDs were stale legacy.
+  // Override per-environment via SQ_SERVICE_BY_DURATION env var (JSON).
+  let SERVICE_IDS = {
+    30: '66QDZG33XW3F62HR63P6VF5G',  // PT - 30 Minute Session
+    60: 'DFDGPQ56NTEWU4TX2WQBU7TR',  // PT - 60 Minute Session
+    90: 'EFAXK3SOJJPNK2G3XK3MHXZI',  // PT - 90 Minute
   };
+  if (env.SQ_SERVICE_BY_DURATION) {
+    try {
+      const override = JSON.parse(env.SQ_SERVICE_BY_DURATION);
+      SERVICE_IDS = { ...SERVICE_IDS, ...override };
+    } catch { /* malformed JSON — keep defaults */ }
+  }
+  // Per-Trainerize-type override (max precision when Alex wants a specific TZ
+  // type to always sync to a specific Square service, regardless of duration).
+  // SQ_SERVICE_BY_TZ_TYPE is JSON: {"<tzTypeId>": "<squareServiceId>"}.
+  let TZ_TYPE_TO_SQ_SERVICE = {};
+  if (env.SQ_SERVICE_BY_TZ_TYPE) {
+    try { TZ_TYPE_TO_SQ_SERVICE = JSON.parse(env.SQ_SERVICE_BY_TZ_TYPE); }
+    catch { /* keep empty */ }
+  }
   const LOCATION_ID = 'LD0SGZXT6ZSSD';
   const TEAM_MEMBER_ID = 'TMr0PTR22KYH_0QK';
 
@@ -5125,7 +5170,11 @@ async function syncTrainerizeAppointmentsToSquare(env) {
       if (startMs < now.getTime()) continue;
 
       const durationMin = Math.round((endMs - startMs) / 60000);
-      const serviceId = SERVICE_IDS[durationMin] || SERVICE_IDS[60];
+      // Resolution: per-TZ-type override > duration-based default > 60 min fallback.
+      const tzTypeId = apt.appointmentTypeID || apt.type || null;
+      const serviceId = (tzTypeId && TZ_TYPE_TO_SQ_SERVICE[String(tzTypeId)])
+        || SERVICE_IDS[durationMin]
+        || SERVICE_IDS[60];
 
       // Find client's Square customer ID if possible
       let squareCustomerId = null;

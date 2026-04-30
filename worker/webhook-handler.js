@@ -2163,9 +2163,24 @@ export default {
 
       // Cryptographically random magic-link token (32 hex chars).
       const token = crypto.randomUUID().replace(/-/g, '');
-      await kvPut(`portal-magic:${token}`, JSON.stringify({
+      // CRITICAL: kvPut returns false on failure (e.g., daily-write-limit
+      // exhausted on free tier). If the token never lands in KV, the email
+      // we send afterwards points to a token that can't be verified — the
+      // user clicks and sees "expired or already used" forever. Surface the
+      // failure honestly instead of sending a broken link.
+      const kvOk = await kvPut(`portal-magic:${token}`, JSON.stringify({
         email, createdAt: Date.now(),
       }), { expirationTtl: 600 }, env); // 10 min
+      if (!kvOk) {
+        await logEvent('error', 'portal-magic-kv-write-failed', { email }, env);
+        return new Response(JSON.stringify({
+          success: false,
+          reason: 'storage-unavailable',
+          detail: 'Login service is temporarily over its quota. Please try again in a few hours.',
+        }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
 
       const siteUrl = env.PORTAL_SITE_URL || 'https://hkshoonya.github.io/alex-fitness-site';
       const link = `${siteUrl}/#/portal?token=${token}`;

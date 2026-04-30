@@ -100,6 +100,7 @@ export default function ClientPortalModal({ isOpen, onClose, initialToken, onBoo
           reason === 'invalid-email' ? 'Please enter a valid email address.' :
           reason === 'email-not-configured' ? "Email login isn't ready yet — please reach out to Alex directly." :
           reason === 'email-send-failed' ? "Couldn't send your link right now. Please try again or text Alex." :
+          reason === 'storage-unavailable' ? "Login is temporarily over capacity. Please try again later or text Alex." :
           'Something went wrong. Please try again.';
         setErrorMessage(friendly);
         setStep('error');

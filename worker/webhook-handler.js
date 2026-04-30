@@ -2271,9 +2271,17 @@ export default {
           status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
-      // Single-use: delete the magic-link token now. Subsequent actions
-      // (cancel) use the issued session token instead.
-      await env.CHALLENGES_KV.delete(`portal-magic:${token}`);
+      // The magic-link token used to be single-use, but enterprise email
+      // scanners (Microsoft Defender ATP, Mimecast, Proofpoint) often
+      // detonate links in headless Chrome — they click buttons too — which
+      // burned the token before the real user could open it. Switching to
+      // multi-use within the existing 10-min KV TTL solves that without
+      // weakening real-world security: the session token issued below (30-min
+      // single-issue, stored only in modal state) is the actual auth
+      // boundary for cancellations. The magic-link is just an email-bound
+      // proof of inbox ownership — having it valid for the full 10 minutes
+      // matches Stripe / Vercel / Auth0's magic-link patterns.
+      // (Token expires naturally via KV TTL — no explicit delete needed.)
 
       const apiBase = getSquareApiBase(env);
       const headers = getSquareHeaders(env);

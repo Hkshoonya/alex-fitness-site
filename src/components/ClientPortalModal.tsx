@@ -34,7 +34,7 @@ interface PortalCustomer {
   email: string;
 }
 
-type Step = 'email' | 'sending' | 'sent' | 'verifying' | 'bookings' | 'error';
+type Step = 'email' | 'sending' | 'sent' | 'ready' | 'verifying' | 'bookings' | 'error';
 
 export default function ClientPortalModal({ isOpen, onClose, initialToken, onBookSession }: ClientPortalModalProps) {
   const [step, setStep] = useState<Step>('email');
@@ -62,12 +62,17 @@ export default function ClientPortalModal({ isOpen, onClose, initialToken, onBoo
     return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
 
-  // Auto-verify when an initial token is supplied (magic-link click flow).
+  // When an initial token is supplied (magic-link click flow), DON'T auto-
+  // verify. Email security scanners (Microsoft Defender, Google Safe
+  // Browsing, Mimecast, etc.) pre-fetch links from incoming mail in headless
+  // browsers. If we auto-verify on landing, the scanner burns the token
+  // before the real user gets to click — single-use enforcement turns every
+  // legit click into "expired or already used."
+  //
+  // The fix: show a Continue button. Scanners don't click buttons; humans do.
   useEffect(() => {
     if (!isOpen || !initialToken) return;
-    void verifyToken(initialToken);
-    // The token clears from the URL once consumed — see App.tsx mount-time
-    // hook that strips ?token= after passing it in.
+    setStep('ready');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialToken]);
 
@@ -239,6 +244,25 @@ export default function ClientPortalModal({ isOpen, onClose, initialToken, onBoo
                 Check <span className="text-white">{email}</span> and click the link.
               </p>
               <p className="text-white/40 text-xs">It expires in 10 minutes.</p>
+            </div>
+          )}
+
+          {step === 'ready' && (
+            <div className="text-center py-6">
+              <div className="w-16 h-16 bg-[#FF4D2E]/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Check className="text-[#FF4D2E]" size={32} />
+              </div>
+              <p className="text-white font-semibold mb-1">Welcome back</p>
+              <p className="text-white/60 text-sm mb-6">
+                Tap below to view your upcoming sessions.
+              </p>
+              <button
+                onClick={() => initialToken && verifyToken(initialToken)}
+                className="btn-primary text-sm flex items-center justify-center gap-2 mx-auto"
+              >
+                View my bookings
+                <ChevronRight size={16} />
+              </button>
             </div>
           )}
 

@@ -3103,6 +3103,52 @@ export default {
       }
     }
 
+    // GET /admin/env-check — admin-gated env var presence audit. Returns
+    // boolean per known key (never values). For verifying that a config
+    // change in the Cloudflare dashboard actually persisted.
+    if (url.pathname === '/admin/env-check' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN || (request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const keys = [
+        'SQUARE_ACCESS_TOKEN', 'SQUARE_APPLICATION_ID', 'SQUARE_LOCATION_ID',
+        'SQUARE_WEBHOOK_SIGNATURE_KEY',
+        'TRAINERIZE_API_KEY', 'TRAINERIZE_TRAINER_GROUP_ID', 'TRAINERIZE_GROUP_ID',
+        'TRAINERIZE_COACH_USER_ID', 'TRAINERIZE_TRAINER_ID',
+        'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN',
+        'GOOGLE_CALENDAR_ID', 'GOOGLE_PLACES_API_KEY', 'GOOGLE_PLACE_ID',
+        'GOOGLE_MAPS_JAVASCRIPT_API_KEY',
+        'RESEND_API_KEY', 'PORTAL_FROM_EMAIL', 'PORTAL_SITE_URL',
+        'ADMIN_LOG_TOKEN',
+        'TZ_INPERSON_APPOINTMENT_TYPE_ID', 'TZ_VIRTUAL_APPOINTMENT_TYPE_ID',
+        'TZ_TYPE_BY_SERVICE', 'TZ_TAG_BY_SERVICE',
+        'SQ_SERVICE_BY_TZ_TYPE', 'SQ_SERVICE_BY_DURATION',
+        'TZ_INPERSON_APPOINTMENT_TYPE_ID', 'TZ_VIRTUAL_APPOINTMENT_TYPE_ID',
+      ];
+      const out = {};
+      for (const k of keys) {
+        const v = env[k];
+        const set = v != null && String(v).trim().length > 0;
+        out[k] = set ? { set: true, length: String(v).length } : { set: false };
+      }
+      // Validate JSON-shaped vars parse cleanly
+      const jsonKeys = ['TZ_TYPE_BY_SERVICE', 'TZ_TAG_BY_SERVICE', 'SQ_SERVICE_BY_TZ_TYPE', 'SQ_SERVICE_BY_DURATION'];
+      for (const k of jsonKeys) {
+        if (out[k]?.set) {
+          try {
+            const parsed = JSON.parse(env[k]);
+            out[k].validJson = true;
+            out[k].keyCount = Object.keys(parsed || {}).length;
+          } catch {
+            out[k].validJson = false;
+          }
+        }
+      }
+      return new Response(JSON.stringify({ env: out, kvBinding: !!env.CHALLENGES_KV }, null, 2), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // GET /admin/people-sync/status — last run summary + lock state
     if (url.pathname === '/admin/people-sync/status' && request.method === 'GET') {
       if (!env.ADMIN_LOG_TOKEN || (request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {

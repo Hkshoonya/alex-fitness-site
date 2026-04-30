@@ -362,6 +362,694 @@ async function findTrainerizeUserByEmail(email, env) {
   }
 }
 
+// ===== PEOPLE SYNC (Trainerize ↔ Square) =====
+// Bidirectional reconciler keeping email/phone/name in lockstep.
+// Conflict policy: P2 — Trainerize is the canonical source of truth, since
+// that's where Alex actively manages his clients. Square is the payments +
+// bookings pipe. When the two systems disagree on a non-empty field, TZ
+// wins and the conflict gets logged for audit.
+//
+// State stored in CHALLENGES_KV:
+//   link:tz:{tzId}      → JSON {sqId, method, linkedAt}
+//   link:sq:{sqId}      → JSON {tzId, method, linkedAt}
+//   snap:link:{tzId}:{sqId} → JSON {tz:{...fields}, sq:{...fields}, updatedAt}
+//   conflict:{ts}:{tzId}:{field} → 90-day audit trail
+//   psync:lastrun       → JSON {startedAt, finishedAt, summary}
+//   psync:lock          → 10-min mutex so concurrent runs don't double-write
+
+function normEmail(e) { return (e == null ? '' : String(e)).trim().toLowerCase(); }
+function normName(n)  { return (n == null ? '' : String(n)).trim(); }
+function normPhone(p) {
+  if (p == null) return '';
+  const digits = String(p).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+function fieldSnapshot(rec) {
+  return {
+    email: normEmail(rec.email),
+    phone: normPhone(rec.phone),
+    firstName: normName(rec.firstName),
+    lastName: normName(rec.lastName),
+  };
+}
+
+/**
+ * Pull every active Trainerize client. The v03 API has no /user/list and
+ * /user/getClientList isn't exposed via our proxy allowlist for PII reasons —
+ * but server-side we have direct creds. Iterate /user/find across the
+ * alphabet (Trainerize searches by name) and dedupe by user ID.
+ */
+async function pullAllTrainerizeActiveClients(env) {
+  const seen = new Map();
+  for (const ch of 'abcdefghijklmnopqrstuvwxyz') {
+    const resp = await trainerizePost('/user/find', {
+      searchTerm: ch, view: 'activeClient', count: 100, start: 0, verbose: true,
+    }, env);
+    if (!resp.ok) continue;
+    let data; try { data = await resp.json(); } catch { continue; }
+    for (const u of data.users || []) {
+      if (u.type && u.type !== 'client') continue;
+      const id = u.id ?? u.userID;
+      if (!id) continue;
+      seen.set(id, {
+        id,
+        firstName: u.firstName || '',
+        lastName: u.lastName || '',
+        email: u.email || '',
+        phone: u.phone || (u.details && u.details.phone) || '',
+      });
+    }
+  }
+  return Array.from(seen.values());
+}
+
+/**
+ * Pull every Square customer via paginated /customers/search.
+ * (Square's Customers list endpoint requires a query body but accepts an
+ *  empty filter — that returns everyone, paginated by cursor.)
+ */
+async function pullAllSquareCustomers(env) {
+  const out = [];
+  let cursor = null;
+  // Hard cap pagination to prevent infinite loop on a buggy API response.
+  for (let pages = 0; pages < 50; pages++) {
+    const body = cursor ? { cursor, limit: 100 } : { limit: 100 };
+    const resp = await fetch(`${getSquareApiBase(env)}/customers/search`, {
+      method: 'POST', headers: getSquareHeaders(env), body: JSON.stringify(body),
+    });
+    if (!resp.ok) break;
+    let data; try { data = await resp.json(); } catch { break; }
+    for (const c of data.customers || []) {
+      out.push({
+        id: c.id,
+        firstName: c.given_name || '',
+        lastName: c.family_name || '',
+        email: c.email_address || '',
+        phone: c.phone_number || '',
+        updatedAt: c.updated_at || null,
+        referenceId: c.reference_id || null,
+      });
+    }
+    cursor = data.cursor || null;
+    if (!cursor) break;
+  }
+  return out;
+}
+
+/**
+ * Build the linkage table by matching TZ clients against SQ customers.
+ * Three tiers: email exact → phone last-10 → first+last name (only when
+ * the SQ candidate is otherwise unclaimed). Returns counts + new mappings.
+ *
+ * Pre-existing KV links are honored — once a pair is linked we trust the
+ * stored mapping over fresh matching, so an email change in TZ doesn't
+ * accidentally break the link.
+ */
+async function buildPeopleLinkage(tzClients, sqCustomers, env) {
+  const linksTz = {};
+  const linksSq = {};
+  const stats = { reused: 0, viaEmail: 0, viaPhone: 0, viaName: 0, viaReferenceId: 0 };
+
+  // Hydrate from existing KV first
+  for (const tz of tzClients) {
+    const raw = await kvGet(`link:tz:${tz.id}`, env);
+    if (!raw) continue;
+    let parsed; try { parsed = JSON.parse(raw); } catch { continue; }
+    if (parsed && parsed.sqId) {
+      // Tag with `hydrated:true` so the persist phase can skip rewriting
+      // links already in KV — saves subrequests on retry/resume runs.
+      linksTz[tz.id] = { ...parsed, hydrated: true };
+      linksSq[parsed.sqId] = { tzId: tz.id, method: parsed.method, linkedAt: parsed.linkedAt, hydrated: true };
+      stats.reused++;
+    }
+  }
+
+  // Index Square by various keys for fast lookup
+  const sqByEmail = new Map();
+  const sqByPhone = new Map();
+  const sqByName  = new Map();
+  const sqByRefId = new Map();
+  for (const sq of sqCustomers) {
+    const e = normEmail(sq.email);
+    const p = normPhone(sq.phone);
+    const n = `${normName(sq.firstName).toLowerCase()}|${normName(sq.lastName).toLowerCase()}`;
+    if (e && !sqByEmail.has(e)) sqByEmail.set(e, sq);
+    if (p && !sqByPhone.has(p)) sqByPhone.set(p, sq);
+    if (n !== '|' && !sqByName.has(n)) sqByName.set(n, []);
+    if (n !== '|') sqByName.get(n).push(sq);
+    if (sq.referenceId && sq.referenceId.startsWith('tz:')) {
+      sqByRefId.set(sq.referenceId, sq);
+    }
+  }
+
+  for (const tz of tzClients) {
+    if (linksTz[tz.id]) continue; // already linked
+
+    const e = normEmail(tz.email);
+    const p = normPhone(tz.phone);
+    const n = `${normName(tz.firstName).toLowerCase()}|${normName(tz.lastName).toLowerCase()}`;
+    const refKey = `tz:${tz.id}`;
+
+    let match = null;
+    let method = null;
+
+    if (sqByRefId.has(refKey)) {
+      match = sqByRefId.get(refKey);
+      method = 'reference_id';
+      stats.viaReferenceId++;
+    } else if (e && sqByEmail.has(e) && !linksSq[sqByEmail.get(e).id]) {
+      match = sqByEmail.get(e);
+      method = 'email';
+      stats.viaEmail++;
+    } else if (p && sqByPhone.has(p) && !linksSq[sqByPhone.get(p).id]) {
+      // Phone matches — but US household phones are reused across family
+      // members, so demand a corroborating signal: name overlap (any prefix
+      // or substring ≥3 chars) on first OR last name, or a shared email
+      // domain. Otherwise treat as inconclusive and leave unlinked. The
+      // canonical false-positive caught here: TZ "Vaneeka Grant" linked to
+      // SQ "Micah Jarvis" by shared phone alone.
+      const candidate = sqByPhone.get(p);
+      const sf = normName(candidate.firstName).toLowerCase();
+      const sl = normName(candidate.lastName).toLowerCase();
+      const tf = normName(tz.firstName).toLowerCase();
+      const tl = normName(tz.lastName).toLowerCase();
+      const sharesPrefix = (a, b) => {
+        if (!a || !b) return false;
+        if (a === b) return true;
+        if (a.startsWith(b) || b.startsWith(a)) return true;
+        // shared substring of ≥4 chars
+        for (let len = Math.min(a.length, b.length); len >= 4; len--) {
+          for (let i = 0; i + len <= a.length; i++) {
+            if (b.includes(a.slice(i, i + len))) return true;
+          }
+        }
+        return false;
+      };
+      const namesAlign = sharesPrefix(tf, sf) || sharesPrefix(tl, sl);
+      const ce = normEmail(candidate.email);
+      const sharedDomain = e && ce && e.split('@')[1] === ce.split('@')[1];
+      if (namesAlign || sharedDomain) {
+        match = candidate;
+        method = 'phone';
+        stats.viaPhone++;
+      } else {
+        stats.phoneRejectedAsAmbiguous = (stats.phoneRejectedAsAmbiguous || 0) + 1;
+      }
+    } else if (n !== '|' && sqByName.has(n)) {
+      // Last resort: name. Only accept if SQ candidate is unclaimed AND has
+      // an empty email (otherwise email-mismatch should NOT auto-link by
+      // name — that's a different person until proven otherwise).
+      const candidates = sqByName.get(n).filter(c => !linksSq[c.id]);
+      const candidate = candidates.find(c => !normEmail(c.email));
+      if (candidate) {
+        match = candidate;
+        method = 'name';
+        stats.viaName++;
+      }
+    }
+
+    if (match) {
+      const linkedAt = new Date().toISOString();
+      linksTz[tz.id] = { sqId: match.id, method, linkedAt };
+      linksSq[match.id] = { tzId: tz.id, method, linkedAt };
+    }
+  }
+
+  const tzUnlinked = tzClients.filter(t => !linksTz[t.id]).map(t => t.id);
+  const sqUnlinked = sqCustomers.filter(c => !linksSq[c.id]).map(c => c.id);
+
+  return { linksTz, linksSq, tzUnlinked, sqUnlinked, stats };
+}
+
+/**
+ * Reconcile a single linked (tz, sq) pair. Compares current values against
+ * KV snapshot to detect "who changed since last sync", and applies P2 policy
+ * for true drift. Returns the planned actions and any conflicts.
+ *
+ * Actions are NOT applied when dryRun=true — caller can show the plan first.
+ */
+async function reconcileLinkedPair(tz, sq, env, dryRun) {
+  const actions = [];
+  const conflicts = [];
+  const snapKey = `snap:link:${tz.id}:${sq.id}`;
+  const snapRaw = await kvGet(snapKey, env);
+  let snap = null;
+  if (snapRaw) { try { snap = JSON.parse(snapRaw); } catch { snap = null; } }
+
+  const tzNow = fieldSnapshot(tz);
+  const sqNow = fieldSnapshot(sq);
+
+  // Conservative merge guards — refuse to overwrite when there's any signal
+  // that the two records might describe DIFFERENT people. False merges destroy
+  // data silently; false splits leave a duplicate that's easy to find later.
+  //
+  // (a) Email mismatch (both non-empty, different): could be the same person
+  //     using two emails, or could be two different people. Without a stronger
+  //     signal we don't auto-pick. Includes obvious-looking typos like
+  //     `gmail.con` — they may be intentional or refer to a separate record.
+  //
+  // (b) Both first AND last name completely differ (no prefix/substring
+  //     overlap): catches namesake collisions and household-shared identifiers.
+  const sharedToken = (a, b) => {
+    if (!a || !b) return true;
+    if (a === b) return true;
+    if (a.startsWith(b) || b.startsWith(a)) return true;
+    for (let len = Math.min(a.length, b.length); len >= 4; len--) {
+      for (let i = 0; i + len <= a.length; i++) {
+        if (b.includes(a.slice(i, i + len))) return true;
+      }
+    }
+    return false;
+  };
+  const emailDrift = tzNow.email && sqNow.email && tzNow.email !== sqNow.email;
+  const namesAllDiverge = tzNow.firstName && sqNow.firstName && tzNow.lastName && sqNow.lastName
+    && !sharedToken(tzNow.firstName.toLowerCase(), sqNow.firstName.toLowerCase())
+    && !sharedToken(tzNow.lastName.toLowerCase(),  sqNow.lastName.toLowerCase());
+
+  if (emailDrift || namesAllDiverge) {
+    const reason = emailDrift && namesAllDiverge ? 'email-and-names-diverge'
+                 : emailDrift ? 'email-diverges'
+                 : 'both-names-diverge';
+    const review = {
+      tzId: tz.id, sqId: sq.id,
+      reason,
+      tz: tzNow, sq: sqNow,
+      resolution: 'skipped-needs-manual-review',
+      ts: new Date().toISOString(),
+    };
+    if (!dryRun) {
+      const k = `conflict:${review.ts.replace(/[:.]/g, '')}:${tz.id}:pair-skipped`;
+      await kvPut(k, JSON.stringify(review), { expirationTtl: 90 * 24 * 3600 }, env);
+    }
+    return {
+      actions: [],
+      conflicts: [review],
+      tzUpdates: {}, sqUpdates: {},
+      tzApplied: false, sqApplied: false,
+      skipped: true, skippedReason: reason,
+    };
+  }
+
+  const tzUpdates = {};
+  const sqUpdates = {};
+
+  for (const field of ['email', 'phone', 'firstName', 'lastName']) {
+    const tzVal = tzNow[field];
+    const sqVal = sqNow[field];
+    if (tzVal === sqVal) continue;
+
+    if (!tzVal && sqVal) {
+      // TZ empty → backfill from SQ
+      tzUpdates[field] = sqVal;
+      actions.push({ side: 'tz', field, from: tzVal, to: sqVal, reason: 'tz-empty' });
+    } else if (tzVal && !sqVal) {
+      // SQ empty → backfill from TZ
+      sqUpdates[field] = tzVal;
+      actions.push({ side: 'sq', field, from: sqVal, to: tzVal, reason: 'sq-empty' });
+    } else {
+      // Both non-empty + differ → P2: TZ wins, log conflict
+      sqUpdates[field] = tzVal;
+      const conflictRecord = {
+        tzId: tz.id, sqId: sq.id, field,
+        tzValue: tzVal, sqValue: sqVal,
+        snapTz: snap?.tz?.[field] ?? null,
+        snapSq: snap?.sq?.[field] ?? null,
+        resolution: 'tz-wins',
+        ts: new Date().toISOString(),
+      };
+      actions.push({ side: 'sq', field, from: sqVal, to: tzVal, reason: 'p2-tz-wins' });
+      conflicts.push(conflictRecord);
+    }
+  }
+
+  let tzApplied = false;
+  let sqApplied = false;
+
+  if (!dryRun) {
+    if (Object.keys(tzUpdates).length > 0) {
+      const userBody = { userID: tz.id };
+      if (tzUpdates.email !== undefined)     userBody.email = tzUpdates.email;
+      if (tzUpdates.phone !== undefined)     userBody.phone = tzUpdates.phone;
+      if (tzUpdates.firstName !== undefined) userBody.firstName = tzUpdates.firstName;
+      if (tzUpdates.lastName !== undefined)  userBody.lastName  = tzUpdates.lastName;
+      try {
+        const r = await trainerizePost('/user/setProfile', { user: userBody }, env);
+        tzApplied = r.ok;
+        if (!r.ok) {
+          await logEvent('error', 'people-sync-tz-write-failed', { tzId: tz.id, status: r.status, body: (await r.text()).slice(0, 200) }, env);
+        }
+      } catch (e) {
+        await logEvent('error', 'people-sync-tz-write-threw', { tzId: tz.id, err: e?.message }, env);
+      }
+    }
+    if (Object.keys(sqUpdates).length > 0) {
+      const sqBody = {};
+      if (sqUpdates.email !== undefined)     sqBody.email_address = sqUpdates.email;
+      if (sqUpdates.phone !== undefined)     sqBody.phone_number  = sqUpdates.phone;
+      if (sqUpdates.firstName !== undefined) sqBody.given_name    = sqUpdates.firstName;
+      if (sqUpdates.lastName !== undefined)  sqBody.family_name   = sqUpdates.lastName;
+      try {
+        const r = await fetch(`${getSquareApiBase(env)}/customers/${sq.id}`, {
+          method: 'PUT', headers: getSquareHeaders(env), body: JSON.stringify(sqBody),
+        });
+        sqApplied = r.ok;
+        if (!r.ok) {
+          await logEvent('error', 'people-sync-sq-write-failed', { sqId: sq.id, status: r.status, body: (await r.text()).slice(0, 200) }, env);
+        }
+      } catch (e) {
+        await logEvent('error', 'people-sync-sq-write-threw', { sqId: sq.id, err: e?.message }, env);
+      }
+    }
+    // Persist new snapshot ONLY for fields whose write actually succeeded,
+    // AND only when something actually changed. Cloudflare KV has a 1000
+    // writes/day limit on free tier — writing a no-change snapshot per pair
+    // per run would burn ~149 writes daily. Steady-state should be ~0 writes.
+    const tzNeeded = Object.keys(tzUpdates).length > 0;
+    const sqNeeded = Object.keys(sqUpdates).length > 0;
+    const tzOk = !tzNeeded || tzApplied;
+    const sqOk = !sqNeeded || sqApplied;
+    const anythingChanged = tzNeeded || sqNeeded;
+    if (anythingChanged) {
+      const newTz = tzOk ? { ...tzNow, ...tzUpdates } : tzNow;
+      const newSq = sqOk ? { ...sqNow, ...sqUpdates } : sqNow;
+      await kvPut(snapKey, JSON.stringify({
+        tz: newTz, sq: newSq,
+        updatedAt: new Date().toISOString(),
+        partialFailure: !(tzOk && sqOk),
+      }), {}, env);
+    }
+
+    // Persist conflicts to the audit trail (90-day TTL)
+    for (const c of conflicts) {
+      const cKey = `conflict:${c.ts.replace(/[:.]/g, '')}:${tz.id}:${c.field}`;
+      await kvPut(cKey, JSON.stringify(c), { expirationTtl: 90 * 24 * 3600 }, env);
+    }
+  }
+
+  return { actions, conflicts, tzUpdates, sqUpdates, tzApplied, sqApplied };
+}
+
+/**
+ * Create a Square customer from a Trainerize-only client. Always run when
+ * the TZ client has at least one contact field (email or phone) — else skip.
+ * Sets reference_id="tz:{id}" so the linkage is durable even if the email
+ * changes later.
+ */
+async function createSquareFromTrainerize(tz, env, dryRun) {
+  if (!normEmail(tz.email) && !normPhone(tz.phone)) {
+    return { skipped: true, reason: 'no-contact', tzId: tz.id };
+  }
+  if (dryRun) {
+    return { wouldCreate: { side: 'sq', from: 'tz', tzId: tz.id, name: `${tz.firstName} ${tz.lastName}`.trim(), email: tz.email, phone: tz.phone } };
+  }
+  const body = {
+    given_name: tz.firstName || '',
+    family_name: tz.lastName || '',
+    note: `Auto-created by people-sync from Trainerize id ${tz.id}`,
+    reference_id: `tz:${tz.id}`,
+  };
+  if (tz.email) body.email_address = tz.email;
+  if (tz.phone) body.phone_number  = tz.phone;
+  try {
+    const r = await fetch(`${getSquareApiBase(env)}/customers`, {
+      method: 'POST', headers: getSquareHeaders(env), body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const errText = (await r.text()).slice(0, 200);
+      await logEvent('error', 'people-sync-sq-create-failed', { tzId: tz.id, status: r.status, err: errText }, env);
+      return { error: `sq-create-${r.status}`, tzId: tz.id };
+    }
+    const data = await r.json();
+    return { created: { sqId: data.customer?.id, tzId: tz.id } };
+  } catch (e) {
+    await logEvent('error', 'people-sync-sq-create-threw', { tzId: tz.id, err: e?.message }, env);
+    return { error: e?.message || 'sq-create-threw', tzId: tz.id };
+  }
+}
+
+/**
+ * Create a Trainerize client from a Square-only customer. Asymmetric: Square
+ * has many one-off contacts (consultations, browse-only) we don't want
+ * cluttering Trainerize. Caller passes hasBookingFilter=true to require
+ * the SQ customer to have at least one Square booking.
+ */
+async function createTrainerizeFromSquare(sq, env, dryRun) {
+  if (!normEmail(sq.email)) {
+    return { skipped: true, reason: 'no-email', sqId: sq.id };
+  }
+  if (dryRun) {
+    return { wouldCreate: { side: 'tz', from: 'sq', sqId: sq.id, name: `${sq.firstName} ${sq.lastName}`.trim(), email: sq.email, phone: sq.phone } };
+  }
+  try {
+    const r = await trainerizePost('/user/add', {
+      user: {
+        firstName: sq.firstName || '',
+        lastName: sq.lastName || '',
+        fullName: `${sq.firstName || ''} ${sq.lastName || ''}`.trim() || sq.email,
+        type: 'client',
+        trainerID: getTrainerizeTrainerId(env),
+        email: sq.email,
+        phone: sq.phone || '',
+      },
+      sendMail: false,
+      isSetup: false,
+    }, env);
+    const text = await r.text();
+    if (!r.ok) {
+      await logEvent('error', 'people-sync-tz-create-failed', { sqId: sq.id, status: r.status, err: text.slice(0, 200) }, env);
+      return { error: `tz-create-${r.status}`, sqId: sq.id };
+    }
+    let parsed; try { parsed = JSON.parse(text); } catch { parsed = {}; }
+    return { created: { tzId: parsed.userID || parsed.id || null, sqId: sq.id } };
+  } catch (e) {
+    await logEvent('error', 'people-sync-tz-create-threw', { sqId: sq.id, err: e?.message }, env);
+    return { error: e?.message || 'tz-create-threw', sqId: sq.id };
+  }
+}
+
+/**
+ * Check if a Square customer has any bookings (any status, any time).
+ * Used to gate auto-creation of Trainerize records — we only create a TZ
+ * client from a Square-only customer if they've actually booked something,
+ * so consultations and browse-only contacts don't flood Trainerize.
+ */
+async function squareCustomerHasAnyBookings(sqId, env) {
+  try {
+    const url = new URL(`${getSquareApiBase(env)}/bookings`);
+    url.searchParams.set('customer_id', sqId);
+    url.searchParams.set('limit', '1');
+    const r = await fetch(url.toString(), { headers: getSquareHeaders(env) });
+    if (!r.ok) return false;
+    const data = await r.json();
+    return Array.isArray(data.bookings) && data.bookings.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run the full reconcile cycle: pull both sides, build linkage, reconcile
+ * each linked pair, optionally create missing records on both sides.
+ * Returns a structured report. dryRun=true means no writes, just the plan.
+ */
+async function runPeopleSync(env, opts) {
+  const dryRun = !!opts.dryRun;
+  const createMissing = opts.createMissing !== false; // default true
+  const sqCreateGate  = opts.sqCreateGate || 'with-bookings'; // 'with-bookings' | 'all' | 'never'
+  // Phase splitting — Cloudflare Workers cap subrequests per invocation
+  // (1000 paid). The full backfill exceeds that, so split into phases the
+  // caller can drive sequentially. Steady-state daily runs use 'all' since
+  // most days touch <5 pairs.
+  //   'link'      — pull both sides, build & persist linkage. ~280 subreq.
+  //   'reconcile' — pull, link, reconcile pairs. Skip create phase.
+  //   'create'    — pull, link, skip reconcile, run create phase only.
+  //   'all'       — every phase (default; backwards-compatible).
+  const phase = opts.phase || 'all';
+  const force = !!opts.force; // bypass the lock (operator override)
+
+  // Acquire mutex unless we're a dry run
+  if (!dryRun && !force) {
+    const lockRaw = await kvGet('psync:lock', env);
+    if (lockRaw) {
+      return { error: 'sync-already-running', startedAt: lockRaw, hint: 'pass force:true to override' };
+    }
+    await kvPut('psync:lock', new Date().toISOString(), { expirationTtl: 600 }, env);
+  }
+
+  const startedAt = new Date().toISOString();
+  let tzClients = [], sqCustomers = [];
+  try {
+    [tzClients, sqCustomers] = await Promise.all([
+      pullAllTrainerizeActiveClients(env),
+      pullAllSquareCustomers(env),
+    ]);
+  } catch (e) {
+    if (!dryRun) await kvPut('psync:lock', '', { expirationTtl: 1 }, env);
+    return { error: 'pull-failed', detail: e?.message };
+  }
+
+  const linkage = await buildPeopleLinkage(tzClients, sqCustomers, env);
+
+  // Persist links if not dry-running. Only on 'link' or 'all' phases — for
+  // sub-phases ('reconcile', 'create') links are assumed already persisted
+  // from a prior 'link' phase, saving ~242 subrequests per invocation.
+  // Only writes links that weren't hydrated from KV (i.e., genuinely new).
+  if (!dryRun && (phase === 'link' || phase === 'all')) {
+    for (const [tzId, link] of Object.entries(linkage.linksTz)) {
+      // Skip writes for already-hydrated links (no-op KV churn)
+      if (link.hydrated) continue;
+      await kvPut(`link:tz:${tzId}`, JSON.stringify(link), {}, env);
+    }
+    for (const [sqId, link] of Object.entries(linkage.linksSq)) {
+      if (link.hydrated) continue;
+      await kvPut(`link:sq:${sqId}`, JSON.stringify(link), {}, env);
+    }
+  }
+
+  const tzById = new Map(tzClients.map(t => [t.id, t]));
+  const sqById = new Map(sqCustomers.map(c => [c.id, c]));
+
+  const allActions = [];
+  const allConflicts = [];
+  const allSkipped = [];
+  let pairsReconciled = 0;
+  let pairsWithUpdates = 0;
+  let pairsSkipped = 0;
+
+  // Reconcile phase — skip when phase is 'link' (link-only) or 'create'
+  if (phase === 'reconcile' || phase === 'all') {
+    for (const [tzId, link] of Object.entries(linkage.linksTz)) {
+      const tz = tzById.get(parseInt(tzId)) || tzById.get(tzId);
+      const sq = sqById.get(link.sqId);
+      if (!tz || !sq) continue;
+      const result = await reconcileLinkedPair(tz, sq, env, dryRun);
+      pairsReconciled++;
+      if (result.skipped) {
+        pairsSkipped++;
+        allSkipped.push({
+          tzId: tz.id, sqId: sq.id,
+          name: `${tz.firstName} ${tz.lastName}`.trim(),
+          reason: result.skippedReason,
+          tzEmail: tz.email, sqEmail: sq.email,
+          tzName: `${tz.firstName} ${tz.lastName}`.trim(),
+          sqName: `${sq.firstName} ${sq.lastName}`.trim(),
+        });
+      } else if (result.actions.length > 0) {
+        pairsWithUpdates++;
+        allActions.push({ tzId: tz.id, sqId: sq.id, name: `${tz.firstName} ${tz.lastName}`.trim(), actions: result.actions });
+      }
+      if (result.conflicts.length > 0) allConflicts.push(...result.conflicts);
+    }
+  }
+
+  const created = { sq: [], tz: [] };
+
+  // Create phase — skip when phase is 'link' or 'reconcile'
+  const runCreate = (phase === 'create' || phase === 'all') && createMissing;
+  if (runCreate) {
+    // TZ-only → create SQ
+    for (const tzId of linkage.tzUnlinked) {
+      const tz = tzById.get(tzId);
+      if (!tz) continue;
+      const r = await createSquareFromTrainerize(tz, env, dryRun);
+      created.sq.push(r);
+      if (!dryRun && r.created?.sqId) {
+        const linkedAt = new Date().toISOString();
+        await kvPut(`link:tz:${tz.id}`, JSON.stringify({ sqId: r.created.sqId, method: 'sync-created-sq', linkedAt }), {}, env);
+        await kvPut(`link:sq:${r.created.sqId}`, JSON.stringify({ tzId: tz.id, method: 'sync-created-sq', linkedAt }), {}, env);
+      }
+    }
+    // SQ-only → maybe create TZ (depends on gate). Guard against duplicate
+    // TZ creation when an SQ record shares an email with an already-linked
+    // TZ client — happens when one TZ client has multiple Square records
+    // (e.g., Boon S has 2 SQ entries both at kobsitti@icloud.com).
+    if (sqCreateGate !== 'never') {
+      const tzEmailToId = new Map();
+      for (const t of tzClients) {
+        const e = normEmail(t.email);
+        if (e && !tzEmailToId.has(e)) tzEmailToId.set(e, t.id);
+      }
+      for (const sqId of linkage.sqUnlinked) {
+        const sq = sqById.get(sqId);
+        if (!sq) continue;
+        const sqEmail = normEmail(sq.email);
+        if (!sqEmail) {
+          created.tz.push({ skipped: true, reason: 'no-email', sqId });
+          continue;
+        }
+        // Already-known TZ at this email — don't duplicate. Just back-link
+        // this SQ record to the existing TZ so future runs see them paired.
+        if (tzEmailToId.has(sqEmail)) {
+          const existingTzId = tzEmailToId.get(sqEmail);
+          created.tz.push({ skipped: true, reason: 'tz-exists-by-email', sqId, existingTzId });
+          if (!dryRun) {
+            const linkedAt = new Date().toISOString();
+            await kvPut(`link:sq:${sq.id}`, JSON.stringify({ tzId: existingTzId, method: 'duplicate-sq-relink', linkedAt }), {}, env);
+            // Don't overwrite link:tz:{id} — that already points at the
+            // primary SQ record.
+          }
+          continue;
+        }
+        if (sqCreateGate === 'with-bookings') {
+          const hasBookings = await squareCustomerHasAnyBookings(sqId, env);
+          if (!hasBookings) {
+            created.tz.push({ skipped: true, reason: 'no-bookings', sqId });
+            continue;
+          }
+        }
+        const r = await createTrainerizeFromSquare(sq, env, dryRun);
+        created.tz.push(r);
+        if (!dryRun && r.created?.tzId) {
+          const linkedAt = new Date().toISOString();
+          await kvPut(`link:tz:${r.created.tzId}`, JSON.stringify({ sqId: sq.id, method: 'sync-created-tz', linkedAt }), {}, env);
+          await kvPut(`link:sq:${sq.id}`, JSON.stringify({ tzId: r.created.tzId, method: 'sync-created-tz', linkedAt }), {}, env);
+        }
+      }
+    }
+  }
+
+  const finishedAt = new Date().toISOString();
+  const summary = {
+    startedAt, finishedAt,
+    tzCount: tzClients.length,
+    sqCount: sqCustomers.length,
+    linkage: {
+      reused: linkage.stats.reused,
+      newViaEmail: linkage.stats.viaEmail,
+      newViaPhone: linkage.stats.viaPhone,
+      newViaName: linkage.stats.viaName,
+      newViaReferenceId: linkage.stats.viaReferenceId,
+      phoneRejectedAsAmbiguous: linkage.stats.phoneRejectedAsAmbiguous || 0,
+      tzUnlinked: linkage.tzUnlinked.length,
+      sqUnlinked: linkage.sqUnlinked.length,
+    },
+    reconcile: {
+      pairsReconciled,
+      pairsWithUpdates,
+      pairsSkippedForReview: pairsSkipped,
+      totalActions: allActions.reduce((n, x) => n + x.actions.length, 0),
+      conflicts: allConflicts.length,
+    },
+    created: {
+      sqCreated: created.sq.filter(x => x.created || x.wouldCreate).length,
+      sqSkipped: created.sq.filter(x => x.skipped).length,
+      sqErrored: created.sq.filter(x => x.error).length,
+      tzCreated: created.tz.filter(x => x.created || x.wouldCreate).length,
+      tzSkipped: created.tz.filter(x => x.skipped).length,
+      tzErrored: created.tz.filter(x => x.error).length,
+    },
+    dryRun,
+  };
+
+  if (!dryRun) {
+    await kvPut('psync:lastrun', JSON.stringify(summary), {}, env);
+    await logEvent('sync', 'people-sync-completed', summary, env);
+    await kvPut('psync:lock', '', { expirationTtl: 1 }, env);
+  }
+
+  return { summary, actions: allActions, conflicts: allConflicts, skipped: allSkipped, created };
+}
+
 // ===== MAIN HANDLER =====
 
 export default {
@@ -2308,6 +2996,90 @@ export default {
       }
     }
 
+    // ===== PEOPLE SYNC =====
+    // POST /admin/people-sync — run the bidirectional reconciler.
+    // Body: { dry_run: bool, create_missing: bool, sq_create_gate: 'with-bookings'|'all'|'never' }
+    // Returns full report (summary + actions + conflicts + created).
+    if (url.pathname === '/admin/people-sync' && request.method === 'POST') {
+      if (!env.ADMIN_LOG_TOKEN) {
+        return new Response(JSON.stringify({ error: 'admin-not-configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if ((request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      if (!isTrainerizeConfigured(env)) {
+        return new Response(JSON.stringify({ error: 'trainerize-not-configured' }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let body = {};
+      try { body = await request.json(); } catch { /* defaults */ }
+      const opts = {
+        dryRun: body.dry_run !== false,           // default true — safe default
+        createMissing: body.create_missing !== false,
+        sqCreateGate: body.sq_create_gate || 'with-bookings',
+        phase: body.phase || 'all',               // 'link' | 'reconcile' | 'create' | 'all'
+        force: !!body.force,                      // override stale lock
+      };
+      try {
+        const report = await runPeopleSync(env, opts);
+        return new Response(JSON.stringify(report, null, 2), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        await logEvent('error', 'people-sync-threw', { err: e?.message, stack: e?.stack?.slice(0, 400) }, env);
+        return new Response(JSON.stringify({ error: 'sync-threw', detail: e?.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // GET /admin/people-sync/status — last run summary + lock state
+    if (url.pathname === '/admin/people-sync/status' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN || (request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const lastRunRaw = await kvGet('psync:lastrun', env);
+      const lockRaw = await kvGet('psync:lock', env);
+      let lastRun = null;
+      if (lastRunRaw) { try { lastRun = JSON.parse(lastRunRaw); } catch { /* ignore */ } }
+      return new Response(JSON.stringify({
+        lastRun,
+        running: !!lockRaw,
+        lockStartedAt: lockRaw || null,
+      }, null, 2), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // GET /admin/people-sync/conflicts?limit=50 — list pending conflict audit log
+    if (url.pathname === '/admin/people-sync/conflicts' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN || (request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const limit = parseInt(url.searchParams.get('limit') || '100');
+      try {
+        const keys = await env.CHALLENGES_KV.list({ prefix: 'conflict:', limit: limit * 2 });
+        const out = [];
+        for (const k of keys.keys.slice(0, limit)) {
+          const v = await env.CHALLENGES_KV.get(k.name);
+          if (!v) continue;
+          try { out.push(JSON.parse(v)); } catch { /* skip */ }
+        }
+        // Most recent first
+        out.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+        return new Response(JSON.stringify(out, null, 2), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e?.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     // ===== EVENT LOGS =====
     // GET /logs?category=credit&limit=20 — query recent events
     // Auth: requires X-Admin-Token header matching env.ADMIN_LOG_TOKEN.
@@ -2664,14 +3436,25 @@ export default {
   },
 
   // ===== CRON: periodic sync tasks =====
-  // Runs every 15 minutes:
-  //   1. Sync Trainerize appointments → Square (reverse sync)
-  //   2. Deduct credits for completed sessions (past appointment dates)
+  // Multiple cron expressions in wrangler.toml — dispatch by event.cron:
+  //   "*/15 * * * *" → every 15 min: TZ→SQ appointments + credit deductions
+  //   "0 4 * * *"    → daily 04:00 UTC: people-sync reconciler (TZ↔SQ identity)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(Promise.all([
-      syncTrainerizeAppointmentsToSquare(env),
-      deductCreditsForCompletedSessions(env),
-    ]));
+    const cron = event.cron || '';
+    if (cron === '0 4 * * *') {
+      // Daily reconciler: keep TZ ↔ SQ identity fields in lockstep.
+      ctx.waitUntil(
+        runPeopleSync(env, { dryRun: false, createMissing: true, sqCreateGate: 'with-bookings' })
+          .then(report => logEvent('sync', 'people-sync-cron-completed', report.summary || report, env))
+          .catch(err => logEvent('error', 'people-sync-cron-failed', { err: err?.message }, env))
+      );
+    } else {
+      // Default 15-min tick (and any unknown schedule defaults here too).
+      ctx.waitUntil(Promise.all([
+        syncTrainerizeAppointmentsToSquare(env),
+        deductCreditsForCompletedSessions(env),
+      ]));
+    }
   },
 };
 

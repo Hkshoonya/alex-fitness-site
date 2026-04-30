@@ -14,9 +14,11 @@ id = "128fbaa0a7244943b73ac25f22bf203c"
 # TRAINERIZE_TRAINER_GROUP_ID, TRAINERIZE_API_KEY, TRAINERIZE_COACH_USER_ID
 [vars]
 
-# Cron trigger: sync Trainerize appointments → Square every 15 minutes
+# Cron triggers:
+#   */15 * * * *  → every 15 min: Trainerize→Square appointment sync + credit deduction
+#   0 4 * * *     → daily 04:00 UTC: bidirectional people-sync (TZ↔SQ identity reconcile)
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "0 4 * * *"]
 
 # Square Webhook Events to subscribe to:
 # (configure these in Square Dashboard > Developer > Webhooks > Add endpoint)

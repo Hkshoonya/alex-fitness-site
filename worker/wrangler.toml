@@ -12,7 +12,18 @@ id = "128fbaa0a7244943b73ac25f22bf203c"
 # All secrets set via Cloudflare Dashboard or: wrangler secret put <NAME>
 # SQUARE_APPLICATION_ID, SQUARE_ACCESS_TOKEN, SQUARE_WEBHOOK_SIGNATURE_KEY
 # TRAINERIZE_TRAINER_GROUP_ID, TRAINERIZE_API_KEY, TRAINERIZE_COACH_USER_ID
+#
+# Plaintext config below — these are NOT secrets (Square service IDs and
+# Trainerize type IDs are both public-by-design, visible in URLs and UI),
+# so version-controlling them in wrangler.toml is safe and gives us atomic
+# deploys + change history.
 [vars]
+# Square service variation → Trainerize appointment type (reverse-sync direction)
+TZ_TYPE_BY_SERVICE = '{"UTPNPXXQA2R3WTKRQWXE6CBG":2845441,"66QDZG33XW3F62HR63P6VF5G":8116657,"DFDGPQ56NTEWU4TX2WQBU7TR":8116656,"EFAXK3SOJJPNK2G3XK3MHXZI":5850677}'
+# Square service → user tag applied to TZ profile when this booking type is taken
+TZ_TAG_BY_SERVICE = '{"UTPNPXXQA2R3WTKRQWXE6CBG":"Initial Consultation"}'
+# Trainerize type → Square service variation (forward-sync direction)
+SQ_SERVICE_BY_TZ_TYPE = '{"8116657":"66QDZG33XW3F62HR63P6VF5G","8116656":"DFDGPQ56NTEWU4TX2WQBU7TR","10915844":"DFDGPQ56NTEWU4TX2WQBU7TR","5850677":"EFAXK3SOJJPNK2G3XK3MHXZI"}'
 
 # Cron triggers:
 #   */15 * * * *  → every 15 min: Trainerize→Square appointment sync + credit deduction

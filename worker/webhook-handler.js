@@ -69,6 +69,27 @@ function getTzTypeForService(serviceId, env) {
     return null; // malformed JSON — fall through to other defaults
   }
 }
+
+/**
+ * Map a Square service_variation_id to a Trainerize tag name. Lets Alex
+ * mark certain bookings (consultations, free welcome workouts, pre-paid
+ * sessions, etc.) on the client's user profile in Trainerize without needing
+ * a dedicated appointment type for each. Returns null if the service isn't
+ * mapped or the env var is missing/malformed.
+ *
+ * Env var TZ_TAG_BY_SERVICE example:
+ *   {"UTPNPXXQA2R3WTKRQWXE6CBG":"Initial Consultation"}
+ */
+function getTzTagForService(serviceId, env) {
+  if (!serviceId || !env.TZ_TAG_BY_SERVICE) return null;
+  try {
+    const map = JSON.parse(env.TZ_TAG_BY_SERVICE);
+    const tag = map[serviceId];
+    return typeof tag === 'string' && tag.trim() ? tag.trim() : null;
+  } catch {
+    return null;
+  }
+}
 const STUDIO_ADDRESS = '13305 Sanctuary Cove Dr, Temple Terrace, FL 33637';
 
 // Booking policy constants
@@ -4265,12 +4286,20 @@ async function syncBookingToTrainerize(booking, env) {
         }, env);
       }
 
+      // Optional service-specific tag (e.g. "Initial Consultation" for the
+      // 30-min consultation service) — surfaces the booking purpose on the
+      // client's TZ profile without needing a dedicated appointment type per
+      // category. Tag also embedded in the appointment notes for at-a-glance
+      // visibility on the calendar.
+      const serviceTag = getTzTagForService(segmentServiceId, env);
+      const tagPrefix = serviceTag ? `[${serviceTag}] ` : '';
+
       const resp = await trainerizePost('/appointment/add', {
         userID: getTrainerizeTrainerId(env),
         startDate: tzStart,
         endDate: tzEnd,
         appointmentTypeID: chosenTypeId,
-        notes: `${duration}min ${isVirtual ? 'virtual' : 'in-person'} session (Square #${booking.id.slice(0, 8)})${!userId ? ` | Client: ${customer.given_name || ''} ${customer.family_name || ''} <${email}>` : ''}${isVirtual ? '' : ' | ' + STUDIO_ADDRESS}`,
+        notes: `${tagPrefix}${duration}min ${isVirtual ? 'virtual' : 'in-person'} session (Square #${booking.id.slice(0, 8)})${!userId ? ` | Client: ${customer.given_name || ''} ${customer.family_name || ''} <${email}>` : ''}${isVirtual ? '' : ' | ' + STUDIO_ADDRESS}`,
         attendents: userId ? [{ userID: userId }] : [],
       }, env);
 
@@ -4284,6 +4313,23 @@ async function syncBookingToTrainerize(booking, env) {
             await kvPut(aptLinkKey, String(aptId), { expirationTtl: 90 * 24 * 3600 }, env);
           }
         } catch { /* response parse best-effort */ }
+      }
+
+      // Apply the service-tag to the user (best-effort — TZ tags are user-
+      // scoped, not appointment-scoped, so this only works when we resolved
+      // a userId). Brand-new clients without a TZ user yet: tag will get
+      // applied later when people-sync auto-creates the user, since the
+      // sync recreates them with reference_id pointing at Square.
+      if (resp?.ok && serviceTag && userId) {
+        try {
+          await trainerizePost('/user/addTag', {
+            userID: userId, userTag: serviceTag,
+          }, env);
+        } catch (e) {
+          await logEvent('error', 'tz-tag-add-failed', {
+            userId, tag: serviceTag, err: e?.message,
+          }, env);
+        }
       }
 
       console.log(`Booking synced to Trainerize: ${email} → ${startAt} (${duration}min)`);

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Shield, LogOut, Plus, X, Check, Trash2, Pencil, Calendar, Users, Tag,
   Mail, Phone, ChevronDown, Loader2, AlertCircle, Award, ExternalLink,
+  Megaphone,
 } from 'lucide-react';
 import {
   isAdminTokenFresh, verifyAdminToken, saveAdminSession, clearAdminSession,
@@ -14,8 +15,13 @@ import {
   parseChallengeDate,
   type Challenge,
 } from '@/api/challenges';
+import {
+  getAllAnnouncements, createAnnouncement, updateAnnouncement, deleteAnnouncement,
+  getAnnouncementStatus,
+  type Announcement,
+} from '@/api/announcements';
 
-type Tab = 'challenges' | 'signups';
+type Tab = 'challenges' | 'announcements' | 'signups';
 
 export default function AdminPanel() {
   const [authed, setAuthed] = useState(isAdminTokenFresh());
@@ -48,12 +54,14 @@ export default function AdminPanel() {
 
         <nav className="max-w-6xl mx-auto px-6 flex gap-1">
           <TabButton active={tab === 'challenges'} onClick={() => setTab('challenges')} label="Challenges" />
+          <TabButton active={tab === 'announcements'} onClick={() => setTab('announcements')} label="Announcements" />
           <TabButton active={tab === 'signups'} onClick={() => setTab('signups')} label="Signups" />
         </nav>
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-8">
         {tab === 'challenges' && <ChallengesTab />}
+        {tab === 'announcements' && <AnnouncementsTab />}
         {tab === 'signups' && <SignupsTab />}
       </main>
 
@@ -744,5 +752,434 @@ function AssignProgramModal({ signup, onClose }: { signup: ChallengeSignup; onCl
         </p>
       </div>
     </div>
+  );
+}
+
+// ============================================================
+// ANNOUNCEMENTS TAB — site banner + inline-card content
+// ============================================================
+
+function AnnouncementsTab() {
+  const [items, setItems] = useState<Announcement[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const all = await getAllAnnouncements();
+    // Newest first — admin most likely to edit recent items.
+    all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    setItems(all);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="font-display font-bold text-2xl mb-1">Announcements</h2>
+          <p className="text-white/40 text-sm">
+            Sticky banner at the top of the homepage, or an inline card above the plans section.
+          </p>
+        </div>
+        {!showAddForm && (
+          <button
+            onClick={() => { setShowAddForm(true); setEditingId(null); setError(null); }}
+            className="bg-[#FF4D2E] hover:bg-[#FF6B4A] text-white text-sm font-semibold px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
+          >
+            <Plus size={16} /> New Announcement
+          </button>
+        )}
+      </div>
+
+      {showAddForm && (
+        <AnnouncementForm
+          mode="create"
+          onCancel={() => { setShowAddForm(false); setError(null); }}
+          onSaved={() => { setShowAddForm(false); setError(null); load(); }}
+          onError={setError}
+        />
+      )}
+
+      {error && (
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" /> {error}
+        </p>
+      )}
+
+      {loading && <div className="text-white/50 text-sm flex items-center gap-2 py-12 justify-center"><Loader2 size={16} className="animate-spin" /> Loading announcements...</div>}
+
+      {!loading && items.length === 0 && (
+        <div className="border border-dashed border-white/10 rounded-2xl p-12 text-center">
+          <Megaphone size={28} className="mx-auto mb-3 text-white/30" />
+          <p className="text-white/40 text-sm">No announcements yet. Hit "New Announcement" to add the first one.</p>
+        </div>
+      )}
+
+      {!loading && items.length > 0 && (
+        <div className="space-y-3">
+          {items.map(a => (
+            editingId === a.id ? (
+              <AnnouncementForm
+                key={a.id}
+                mode="edit"
+                initial={a}
+                onCancel={() => { setEditingId(null); setError(null); }}
+                onSaved={() => { setEditingId(null); setError(null); load(); }}
+                onError={setError}
+              />
+            ) : (
+              <AnnouncementRow
+                key={a.id}
+                announcement={a}
+                onEdit={() => { setEditingId(a.id); setShowAddForm(false); setError(null); }}
+                onToggle={async () => {
+                  setError(null);
+                  const updated = await updateAnnouncement(a.id, { enabled: !a.enabled });
+                  if (!updated) setError('Could not update — try again.');
+                  load();
+                }}
+                onDelete={async () => {
+                  if (!confirm(`Delete "${a.title}"? This cannot be undone.`)) return;
+                  const ok = await deleteAnnouncement(a.id);
+                  if (!ok) setError('Delete failed — try again.');
+                  load();
+                }}
+              />
+            )
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AnnouncementRow({ announcement: a, onEdit, onToggle, onDelete }: {
+  announcement: Announcement;
+  onEdit: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  const status = getAnnouncementStatus(a);
+  const statusStyles = {
+    live: 'text-green-400 bg-green-500/10',
+    scheduled: 'text-[#FF4D2E] bg-[#FF4D2E]/10',
+    ended: 'text-white/30 bg-white/5',
+    disabled: 'text-white/30 bg-white/5',
+  }[status];
+
+  const fmt = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+
+  return (
+    <div className="bg-white/[0.03] border border-white/10 rounded-xl p-5 flex items-start justify-between gap-4">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-3 mb-2 flex-wrap">
+          <h3 className="font-semibold truncate">{a.title}</h3>
+          <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold ${statusStyles}`}>
+            {status}
+          </span>
+          <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold text-white/60 bg-white/5">
+            {a.style === 'banner' ? 'Top banner' : 'Inline card'}
+          </span>
+          {a.priority === 'high' && (
+            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold text-[#FF4D2E] bg-[#FF4D2E]/10">
+              High priority
+            </span>
+          )}
+          {a.discountCode && (
+            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold text-white/70 bg-white/[0.07] font-mono">
+              {a.discountCode}
+            </span>
+          )}
+        </div>
+        {a.subtitle && <p className="text-white/50 text-sm mb-3 line-clamp-2">{a.subtitle}</p>}
+        <div className="flex flex-wrap gap-4 text-xs text-white/40">
+          <span className="flex items-center gap-1.5">
+            <Calendar size={12} /> {fmt(a.startsAt)} → {fmt(a.endsAt)}
+          </span>
+          {a.ctaLabel && a.ctaTarget && (
+            <span className="text-white/50 truncate max-w-xs">CTA: "{a.ctaLabel}" → {a.ctaTarget}</span>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          onClick={onToggle}
+          className={`text-xs font-semibold uppercase tracking-wider px-3 py-2 rounded-lg transition-colors ${
+            a.enabled
+              ? 'text-green-400 bg-green-500/10 hover:bg-green-500/20'
+              : 'text-white/40 bg-white/5 hover:bg-white/10'
+          }`}
+          title={a.enabled ? 'Click to disable' : 'Click to enable'}
+        >
+          {a.enabled ? 'On' : 'Off'}
+        </button>
+        <button
+          onClick={onEdit}
+          className="text-white/30 hover:text-[#FF4D2E] transition-colors p-2 rounded-lg hover:bg-[#FF4D2E]/10"
+          title="Edit announcement"
+        >
+          <Pencil size={16} />
+        </button>
+        <button
+          onClick={onDelete}
+          className="text-white/30 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-500/10"
+          title="Delete announcement"
+        >
+          <Trash2 size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AnnouncementForm({
+  mode, initial, onCancel, onSaved, onError,
+}: {
+  mode: 'create' | 'edit';
+  initial?: Announcement;
+  onCancel: () => void;
+  onSaved: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [form, setForm] = useState({
+    title: initial?.title ?? '',
+    subtitle: initial?.subtitle ?? '',
+    ctaLabel: initial?.ctaLabel ?? '',
+    ctaTarget: initial?.ctaTarget ?? '',
+    style: (initial?.style ?? 'banner') as 'banner' | 'card',
+    priority: (initial?.priority ?? 'normal') as 'high' | 'normal',
+    startsAt: initial?.startsAt ?? '',
+    endsAt: initial?.endsAt ?? '',
+    enabled: initial?.enabled ?? true,
+    discountCode: initial?.discountCode ?? '',
+  });
+  const [saving, setSaving] = useState(false);
+
+  const setField = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) =>
+    setForm(p => ({ ...p, [k]: v }));
+
+  const handleSave = async () => {
+    onError(null);
+    if (!form.title.trim()) return onError('Title is required.');
+    if (form.endsAt && form.startsAt && new Date(form.endsAt) < new Date(form.startsAt)) {
+      return onError('End date must be after start date.');
+    }
+    setSaving(true);
+    const payload = {
+      ...form,
+      startsAt: form.startsAt || null,
+      endsAt: form.endsAt || null,
+    };
+    const result = mode === 'create'
+      ? await createAnnouncement(payload)
+      : await updateAnnouncement(initial!.id, payload);
+    setSaving(false);
+    if (!result) {
+      onError(mode === 'create' ? 'Could not create — check your admin token.' : 'Could not update — check your admin token.');
+      return;
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="bg-white/[0.03] border border-white/10 rounded-xl p-6 mb-3 space-y-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="font-display font-bold text-lg">
+          {mode === 'create' ? 'New Announcement' : 'Edit Announcement'}
+        </h3>
+        <button onClick={onCancel} className="text-white/40 hover:text-white p-1" aria-label="Cancel">
+          <X size={18} />
+        </button>
+      </div>
+
+      {/* Title */}
+      <FormField label="Title" required hint="Max ~40 chars to fit on one line in the banner.">
+        <input
+          type="text"
+          value={form.title}
+          onChange={e => setField('title', e.target.value)}
+          placeholder="20% off all training plans"
+          className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+        />
+      </FormField>
+
+      {/* Subtitle */}
+      <FormField label="Subtitle" hint="Optional. Shown next to title (banner) or below (card).">
+        <input
+          type="text"
+          value={form.subtitle}
+          onChange={e => setField('subtitle', e.target.value)}
+          placeholder="Use code SUMMER20 at checkout — through June 30"
+          className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+        />
+      </FormField>
+
+      {/* Style + Priority */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <FormField label="Display style">
+          <div className="grid grid-cols-2 gap-2">
+            <RadioPill
+              active={form.style === 'banner'}
+              onClick={() => setField('style', 'banner')}
+              label="Top banner"
+              hint="Sticky at top"
+            />
+            <RadioPill
+              active={form.style === 'card'}
+              onClick={() => setField('style', 'card')}
+              label="Inline card"
+              hint="Above plans"
+            />
+          </div>
+        </FormField>
+
+        <FormField label="Priority">
+          <div className="grid grid-cols-2 gap-2">
+            <RadioPill
+              active={form.priority === 'normal'}
+              onClick={() => setField('priority', 'normal')}
+              label="Normal"
+            />
+            <RadioPill
+              active={form.priority === 'high'}
+              onClick={() => setField('priority', 'high')}
+              label="High"
+              hint="Pulse + accent"
+            />
+          </div>
+        </FormField>
+      </div>
+
+      {/* CTA */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <FormField label="CTA Label" hint='e.g. "View Plans"'>
+          <input
+            type="text"
+            value={form.ctaLabel}
+            onChange={e => setField('ctaLabel', e.target.value)}
+            placeholder="View Plans"
+            className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+          />
+        </FormField>
+        <FormField label="CTA Target" hint="#section-id, modal:booking, or url:https://...">
+          <input
+            type="text"
+            value={form.ctaTarget}
+            onChange={e => setField('ctaTarget', e.target.value)}
+            placeholder="#plans"
+            className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+          />
+        </FormField>
+      </div>
+
+      {/* Discount code */}
+      <FormField label="Discount code (optional)" hint="Set in Square. Shown next to subtitle.">
+        <input
+          type="text"
+          value={form.discountCode}
+          onChange={e => setField('discountCode', e.target.value)}
+          placeholder="SUMMER20"
+          className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] font-mono uppercase tracking-wider"
+        />
+      </FormField>
+
+      {/* Dates */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <FormField label="Starts at" hint="Optional. Empty = show now.">
+          <input
+            type="datetime-local"
+            value={form.startsAt ? form.startsAt.slice(0, 16) : ''}
+            onChange={e => setField('startsAt', e.target.value ? new Date(e.target.value).toISOString() : '')}
+            className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+          />
+        </FormField>
+        <FormField label="Ends at" hint="Optional. Empty = run until disabled.">
+          <input
+            type="datetime-local"
+            value={form.endsAt ? form.endsAt.slice(0, 16) : ''}
+            onChange={e => setField('endsAt', e.target.value ? new Date(e.target.value).toISOString() : '')}
+            className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+          />
+        </FormField>
+      </div>
+
+      {/* Enabled toggle */}
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={form.enabled}
+          onChange={e => setField('enabled', e.target.checked)}
+          className="w-4 h-4 rounded border-white/20 bg-white/5 text-[#FF4D2E] focus:ring-[#FF4D2E]"
+        />
+        <span className="text-sm text-white/80">Enabled (visible to visitors)</span>
+      </label>
+
+      {/* Actions */}
+      <div className="flex items-center gap-2 pt-2 border-t border-white/5">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="bg-[#FF4D2E] hover:bg-[#FF6B4A] disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
+        >
+          {saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+          {mode === 'create' ? 'Create' : 'Save changes'}
+        </button>
+        <button
+          onClick={onCancel}
+          className="text-white/50 hover:text-white text-sm px-4 py-2 rounded-lg"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FormField({
+  label, required, hint, children,
+}: {
+  label: string;
+  required?: boolean;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <label className="block text-xs uppercase tracking-wider text-white/50 font-semibold mb-1.5">
+        {label}{required && <span className="text-[#FF4D2E]"> *</span>}
+      </label>
+      {children}
+      {hint && <p className="text-white/30 text-xs mt-1">{hint}</p>}
+    </div>
+  );
+}
+
+function RadioPill({
+  active, onClick, label, hint,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  hint?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
+        active
+          ? 'border-[#FF4D2E]/40 bg-[#FF4D2E]/10 text-white'
+          : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
+      }`}
+    >
+      <span className="font-semibold block">{label}</span>
+      {hint && <span className="text-[0.65rem] text-white/40">{hint}</span>}
+    </button>
   );
 }

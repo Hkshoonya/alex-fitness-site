@@ -29,6 +29,7 @@ import CoachSection from '@/components/CoachSection';
 import ChallengesSection from '@/components/ChallengesSection';
 import AdminPanel from '@/components/AdminPanel';
 import ClientPortalModal from '@/components/ClientPortalModal';
+import { AnnouncementBanner, AnnouncementCards } from '@/components/Announcements';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -401,13 +402,28 @@ function App() {
     );
   }
 
+  // Routes ctaTarget="modal:<key>" from announcements to the right modal.
+  // Add a new key here when wiring a new modal-style CTA.
+  const openAnnouncementModal = (key: string) => {
+    if (key === 'booking') setBookingModalOpen(true);
+    else if (key === 'shop') setShopOpen(true);
+    else if (key === 'message') setMessageModalOpen(true);
+    else if (key === 'about') setShowAbout(true);
+  };
+
   return (
     <div className="relative bg-[#0B0B0D] min-h-screen">
       {/* Grain overlay */}
       <div className="grain-overlay" />
-      
-      {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 bg-[#0B0B0D]/90 backdrop-blur-sm border-b border-white/5">
+
+      {/* Announcement banner — sits above nav, scrolls away with the page.
+          Returns null when no active banner-style announcements. */}
+      <AnnouncementBanner openModal={openAnnouncementModal} />
+
+      {/* Navigation. `sticky top-0` (not `fixed`) so the announcement banner
+          can occupy space above it on initial load and the nav still pins
+          to the viewport top once the banner scrolls past. */}
+      <nav className="sticky top-0 left-0 right-0 z-50 bg-[#0B0B0D]/90 backdrop-blur-sm border-b border-white/5">
         <div className="flex items-center justify-between px-6 lg:px-12 py-4">
           {/* Logo */}
           <button onClick={() => scrollToSection('hero')} className="flex items-center gap-3 group">
@@ -567,6 +583,11 @@ function App() {
           </div>
         </div>
       </section>
+
+      {/* Inline announcement cards — render only when admin posts a card-style
+          announcement. Sits between the value section and plans so offers
+          appear right where pricing decisions happen. Returns null otherwise. */}
+      <AnnouncementCards openModal={openAnnouncementModal} />
 
       {/* Section 3: Training Plans */}
       <section id="plans" ref={plansRef} className="relative min-h-screen flex items-center">

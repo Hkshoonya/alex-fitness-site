@@ -2823,6 +2823,147 @@ export default {
       return new Response(JSON.stringify({ deleted: id }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
+    // ===== ANNOUNCEMENTS API =====
+    // GET /announcements — public, returns active (enabled + within date window)
+    // GET /admin/announcements/all — admin, returns all (incl. scheduled / ended)
+    // POST /admin/announcements — admin, create
+    // PUT /admin/announcements/:id — admin, partial update
+    // DELETE /admin/announcements/:id — admin, remove
+
+    if (url.pathname === '/announcements' && request.method === 'GET') {
+      if (!await checkRateLimit(request, 'announcements-get', 240, env)) {
+        return new Response('Too many requests', { status: 429, headers: corsHeaders });
+      }
+      const active = await getActiveAnnouncements(env);
+      return new Response(JSON.stringify(active), {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          // Short cache: lets the banner update within a minute of admin
+          // edits without hammering KV. Public endpoint, no auth concerns.
+          'Cache-Control': 'public, max-age=60',
+        },
+      });
+    }
+
+    if (url.pathname === '/admin/announcements/all' && request.method === 'GET') {
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const all = await getAllAnnouncements(env);
+      return new Response(JSON.stringify(all), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname === '/admin/announcements' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      let data;
+      try { data = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!data.title || typeof data.title !== 'string' || !data.title.trim()) {
+        return new Response(JSON.stringify({ error: 'title is required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // endsAt is optional — undefined means "show indefinitely until disabled"
+      if (data.endsAt) {
+        const t = new Date(data.endsAt).getTime();
+        if (Number.isNaN(t)) {
+          return new Response(JSON.stringify({ error: 'endsAt must be a valid date' }), {
+            status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      }
+      const announcement = {
+        id: `ann_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        title: String(data.title).trim().slice(0, 200),
+        subtitle: data.subtitle ? String(data.subtitle).slice(0, 400) : '',
+        ctaLabel: data.ctaLabel ? String(data.ctaLabel).slice(0, 40) : '',
+        ctaTarget: data.ctaTarget ? String(data.ctaTarget).slice(0, 200) : '',
+        // 'banner' = sticky top, 'card' = inline above plans/etc
+        style: data.style === 'card' ? 'card' : 'banner',
+        priority: data.priority === 'high' ? 'high' : 'normal',
+        startsAt: data.startsAt || null,
+        endsAt: data.endsAt || null,
+        enabled: data.enabled !== false,
+        discountCode: data.discountCode ? String(data.discountCode).trim().slice(0, 40) : '',
+        createdAt: new Date().toISOString(),
+      };
+      const lock = await withLock('lock:announcements-write', 15, env, () => saveAnnouncement(announcement, env));
+      if (!lock.ok) {
+        return new Response(JSON.stringify({ error: 'Announcement list is being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(announcement), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname.startsWith('/admin/announcements/') && request.method === 'PUT') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const id = url.pathname.split('/admin/announcements/')[1];
+      let updates;
+      try { updates = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const updateLock = await withLock('lock:announcements-write', 15, env, () => updateAnnouncement(id, updates, env));
+      if (!updateLock.ok) {
+        return new Response(JSON.stringify({ error: 'Announcement list is being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!updateLock.value) {
+        return new Response(JSON.stringify({ error: 'Announcement not found', id }), {
+          status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(updateLock.value), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname.startsWith('/admin/announcements/') && request.method === 'DELETE') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const id = url.pathname.split('/admin/announcements/')[1];
+      const delLock = await withLock('lock:announcements-write', 10, env, () => deleteAnnouncement(id, env));
+      if (!delLock.ok) {
+        return new Response(JSON.stringify({ error: 'Announcement list is being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ deleted: id }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== ADMIN: list Trainerize appointment types =====
     // GET /admin/trainerize-appointment-types — returns types available to
     // this API key so Alex can pick the in-person ID and set
@@ -5840,6 +5981,75 @@ async function updateChallenge(id, updates, env) {
   all[idx] = merged;
   await kvPut('challenges', JSON.stringify(all), {}, env);
   return merged;
+}
+
+// ============================================================
+// ANNOUNCEMENTS — site-wide banner + inline-card content
+// ============================================================
+//
+// One KV key 'announcements' holds the array. Source-of-truth for both
+// admin edits and the public banner. Filtering by date/enabled happens at
+// read time so admins can schedule posts in advance.
+
+const MAX_ANNOUNCEMENTS = 25;
+
+async function getAllAnnouncements(env) {
+  if (!env.CHALLENGES_KV) return [];
+  try {
+    const raw = await kvGet('announcements', env);
+    if (!raw) return [];
+    const all = JSON.parse(raw);
+    return Array.isArray(all) ? all : [];
+  } catch {
+    return [];
+  }
+}
+
+async function getActiveAnnouncements(env) {
+  const all = await getAllAnnouncements(env);
+  const now = Date.now();
+  return all.filter(a => {
+    if (!a.enabled) return false;
+    if (a.startsAt && new Date(a.startsAt).getTime() > now) return false;
+    if (a.endsAt && new Date(a.endsAt).getTime() < now) return false;
+    return true;
+  });
+}
+
+async function saveAnnouncement(announcement, env) {
+  if (!env.CHALLENGES_KV) return;
+  let all = await getAllAnnouncements(env);
+  if (all.length >= MAX_ANNOUNCEMENTS) {
+    all = all.slice(all.length - MAX_ANNOUNCEMENTS + 1);
+  }
+  all.push(announcement);
+  await kvPut('announcements', JSON.stringify(all), {}, env);
+}
+
+async function updateAnnouncement(id, updates, env) {
+  if (!env.CHALLENGES_KV) return null;
+  const all = await getAllAnnouncements(env);
+  const idx = all.findIndex(a => a.id === id);
+  if (idx === -1) return null;
+  const editable = [
+    'title', 'subtitle', 'ctaLabel', 'ctaTarget',
+    'style', 'priority', 'startsAt', 'endsAt',
+    'enabled', 'discountCode',
+  ];
+  const merged = { ...all[idx] };
+  for (const k of editable) {
+    if (k in updates) merged[k] = updates[k];
+  }
+  all[idx] = merged;
+  await kvPut('announcements', JSON.stringify(all), {}, env);
+  return merged;
+}
+
+async function deleteAnnouncement(id, env) {
+  if (!env.CHALLENGES_KV) return;
+  const all = await getAllAnnouncements(env);
+  const filtered = all.filter(a => a.id !== id);
+  await kvPut('announcements', JSON.stringify(filtered), {}, env);
 }
 
 /**

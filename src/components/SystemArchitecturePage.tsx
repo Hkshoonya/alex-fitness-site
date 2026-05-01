@@ -21,6 +21,7 @@ import {
   AlertTriangle, RotateCcw, GitMerge, Zap, ShieldCheck, Clock,
   ChevronRight, Cpu, Webhook, Lock, Sparkles,
   Workflow, ShieldAlert, DollarSign,
+  Check, X as XIcon, Minus, Scale,
 } from 'lucide-react';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -352,6 +353,66 @@ const BUILD_TOTAL = HOURLY_TOTAL + FIXED_FEE_TOTAL;
 const ONGOING_PER_WEEK = HOURS_PER_WEEK * RATE;
 
 // ──────────────────────────────────────────────────────────────────
+// Value vs alternatives — what Square's free booking page can't do
+// ──────────────────────────────────────────────────────────────────
+// Honest comparison. Square's free site DOES handle bookings, payments,
+// and customer profiles — those rows show "yes" on both sides. The value
+// of this build is in the columns Square can't fill: Trainerize bridge,
+// admin CMS, identity sync, automated business-logic enforcement, etc.
+
+type Support = 'yes' | 'partial' | 'no';
+
+interface CapabilityRow {
+  capability: string;
+  square: Support;
+  platform: Support;
+  note?: string;
+}
+
+const CAPABILITIES: CapabilityRow[] = [
+  { capability: 'Booking calendar with availability search',          square: 'yes',     platform: 'yes', note: 'Square is the source of truth — this platform displays it on a custom-branded site instead of a generic Square page.' },
+  { capability: 'PCI-compliant card payments',                        square: 'yes',     platform: 'yes', note: 'Same Square Web Payments SDK on both. The platform just brings it to a custom checkout flow.' },
+  { capability: 'Custom branded site (hero, plans, transformations, coach pages)', square: 'no',  platform: 'yes' },
+  { capability: 'Trainerize integration — auto credit grant on purchase', square: 'no',  platform: 'yes', note: 'Without this, Alex manually opens Trainerize and adds credits after every Square sale (~5 min per purchase, easy to forget).' },
+  { capability: 'No-show / late-cancel auto-deduction in Trainerize', square: 'no',      platform: 'yes', note: 'Square never tells Trainerize about missed sessions. Without enforcement, clients eat sessions they should have paid for.' },
+  { capability: 'Public coupon-code redemption from Square Discounts', square: 'partial', platform: 'yes', note: 'Discounts work in Square POS; this platform exposes them as redeemable codes on the public site.' },
+  { capability: 'Identity reconciliation (Square ↔ Trainerize emails/phones)', square: 'no', platform: 'yes', note: '29 active Trainerize clients had no Square email — they could not use the portal. Nightly sync filled the gaps.' },
+  { capability: 'Admin CMS for challenges, announcements, photos, stories', square: 'no', platform: 'yes', note: 'Square has no surface for non-product content. Without this, Alex would need a separate CMS or to edit HTML by hand.' },
+  { capability: 'Webhook-driven automation (paid → tag → push notify)', square: 'partial', platform: 'yes', note: 'Square sends webhooks; you still need a server to interpret them and orchestrate Trainerize calls.' },
+  { capability: 'Audit trail of admin actions and state changes',     square: 'no',      platform: 'yes', note: 'Worker logs every state-changing action with reason + actor. Refunds, credit grants, conflicts — all queryable.' },
+];
+
+// Three "before vs after" scenarios that anchor the comparison in real
+// situations. Each is a story Alex would actually have lived through.
+interface Scenario {
+  Icon: typeof CreditCard;
+  situation: string;
+  withoutPlatform: string;
+  withPlatform: string;
+}
+
+const SCENARIOS: Scenario[] = [
+  {
+    Icon: CreditCard,
+    situation: 'A client buys a 12-week 3×/week plan',
+    withoutPlatform: 'Card charges on Square. Alex must open Trainerize, find the client, add 36 credits, send a welcome message — and remember to do this for every sale. ~5 minutes per purchase, easy to skip when busy.',
+    withPlatform: 'Card charges, plan claim is embedded in the payment, /credit-grant runs in seconds — credits added, welcome sent, audit logged. Zero manual work.',
+  },
+  {
+    Icon: AlertTriangle,
+    situation: 'Client books a session and no-shows',
+    withoutPlatform: 'Alex must notice the no-show, decide if it should cost a credit, manually deduct in Trainerize. Easy to forget, especially across a full week of sessions — silent revenue loss.',
+    withPlatform: 'Square fires a NO_SHOW webhook → worker checks the 24-hr policy → deducts a credit → DMs the client a policy reminder + writes a trainer note. Triple-net (webhook + manual + cron) means it never falls through.',
+  },
+  {
+    Icon: GitMerge,
+    situation: 'Trainerize and Square have drifting client data',
+    withoutPlatform: '29 active Trainerize clients had no Square email — they could not use the portal, could not self-book, could not see their plan. Each one is a support ticket waiting to happen.',
+    withPlatform: 'Nightly people-sync links profiles by email/phone/name with corroboration guards, backfills missing fields, logs conflicts for human review — without auto-fixing typos.',
+  },
+];
+
+// ──────────────────────────────────────────────────────────────────
 // Helper: compute SVG path between two nodes with optional curvature
 // ──────────────────────────────────────────────────────────────────
 // Quadratic Bezier with the control point pushed perpendicular to the line.
@@ -381,6 +442,7 @@ export default function SystemArchitecturePage() {
   const pipelinesRef = useRef<HTMLDivElement>(null);
   const cardsRef = useRef<HTMLDivElement>(null);
   const matrixRef = useRef<HTMLDivElement>(null);
+  const valueRef = useRef<HTMLDivElement>(null);
   const phasesRef = useRef<HTMLDivElement>(null);
 
   // Selected node controls which edges/labels are highlighted on the diagram.
@@ -427,7 +489,7 @@ export default function SystemArchitecturePage() {
     }
 
     // Section-level fade-up for the rest of the page, mirroring App.tsx.
-    [pipelinesRef, cardsRef, matrixRef, phasesRef].forEach(ref => {
+    [pipelinesRef, cardsRef, matrixRef, valueRef, phasesRef].forEach(ref => {
       if (!ref.current) return;
       gsap.fromTo(ref.current,
         { y: 50, opacity: 0 },
@@ -461,6 +523,7 @@ export default function SystemArchitecturePage() {
       />
       <SmartnessSection refProp={cardsRef} />
       <ComplexitySection refProp={matrixRef} />
+      <ValueSection refProp={valueRef} />
       <PhasesSection refProp={phasesRef} />
     </div>
   );
@@ -989,6 +1052,126 @@ function TotalCard({ Icon, label, value, sub, tint, highlight }: {
       <p className="text-[10px] uppercase tracking-wider text-white/40">{label}</p>
       <p className={`mt-1 font-display text-2xl md:text-3xl font-bold ${highlight ? 'text-emerald-300' : 'text-white'}`}>{value}</p>
       <p className="text-[12px] text-white/50 mt-1.5 leading-snug">{sub}</p>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Value section — what Square free can't do (positioned before cost)
+// ──────────────────────────────────────────────────────────────────
+function ValueSection({ refProp }: { refProp: RefObject<HTMLDivElement | null> }) {
+  return (
+    <section ref={refProp}>
+      <SectionHeader
+        eyebrow="Value vs alternatives"
+        title="Why this exists beyond Square's free booking page"
+        subtitle="Square's free booking page is real and it's good — bookings, payments, customer profiles all work out of the box. Here's where it stops, and what this platform fills in."
+      />
+
+      {/* Comparison table — Capability | Square free | This platform | note */}
+      <div className="rounded-2xl border border-white/10 overflow-hidden mb-8">
+        <div className="hidden md:grid grid-cols-[2.4fr_100px_120px_3fr] gap-3 px-5 py-3 bg-white/5 border-b border-white/10 text-[11px] uppercase tracking-wider text-white/50 font-semibold">
+          <span>Capability</span>
+          <span className="text-center">Square free</span>
+          <span className="text-center">This platform</span>
+          <span>Why the gap matters</span>
+        </div>
+        {CAPABILITIES.map((row, i) => (
+          <CapabilityRowView key={i} row={row} alt={i % 2 === 1} />
+        ))}
+      </div>
+
+      {/* Three concrete before/after scenarios — make the gap tangible */}
+      <h3 className="font-display text-xl font-bold mb-4 mt-10 flex items-center gap-2">
+        <Scale size={18} className="text-[#FF4D2E]" />
+        What this looks like in real situations
+      </h3>
+      <div className="space-y-4">
+        {SCENARIOS.map((s, i) => (
+          <ScenarioCard key={i} scenario={s} />
+        ))}
+      </div>
+
+      {/* Honest framing — what was already there vs what this added */}
+      <div className="mt-8 rounded-xl border border-white/10 bg-gradient-to-br from-emerald-500/5 to-transparent p-5">
+        <p className="text-[11px] uppercase tracking-wider text-emerald-300 font-semibold mb-2">The honest framing</p>
+        <p className="text-white/75 text-sm leading-relaxed">
+          Before this build, the foundations existed — Square handled bookings + payments,
+          Trainerize handled coaching + credits, both worked independently. The two never talked
+          to each other. <strong className="text-white">This platform is the bridge</strong> —
+          plus a custom branded site, an admin CMS, identity reconciliation, automated business-logic
+          enforcement, and security/audit hardening.{' '}
+          The build doesn't replace Square or Trainerize; it makes them work together as one
+          system, eliminates manual data entry, and prevents silent revenue loss from missed
+          no-shows or unsynced clients.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function CapabilityRowView({ row, alt }: { row: CapabilityRow; alt: boolean }) {
+  return (
+    <div className={`grid grid-cols-1 md:grid-cols-[2.4fr_100px_120px_3fr] gap-3 px-5 py-4 items-start ${alt ? 'bg-white/[0.015]' : 'bg-transparent'} border-b border-white/5 last:border-b-0`}>
+      <div className="text-white font-medium text-sm md:text-base leading-snug">{row.capability}</div>
+      <div className="md:flex md:justify-center">
+        <SupportBadge level={row.square} />
+      </div>
+      <div className="md:flex md:justify-center">
+        <SupportBadge level={row.platform} />
+      </div>
+      <div className="text-sm text-white/55 leading-relaxed">{row.note ?? ''}</div>
+    </div>
+  );
+}
+
+// Color-coded support indicator — yes/partial/no with icon + label.
+function SupportBadge({ level }: { level: Support }) {
+  if (level === 'yes') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-400/30">
+        <Check size={12} /> Yes
+      </span>
+    );
+  }
+  if (level === 'partial') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-amber-500/15 text-amber-300 border border-amber-400/30">
+        <Minus size={12} /> Partial
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-rose-500/15 text-rose-300 border border-rose-400/30">
+      <XIcon size={12} /> No
+    </span>
+  );
+}
+
+function ScenarioCard({ scenario }: { scenario: Scenario }) {
+  const Icon = scenario.Icon;
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.025] p-5">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-lg bg-[#FF4D2E]/10 border border-[#FF4D2E]/30 flex items-center justify-center text-[#FF4D2E] shrink-0">
+          <Icon size={18} />
+        </div>
+        <h4 className="font-semibold text-white text-base">{scenario.situation}</h4>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="rounded-lg border border-rose-400/20 bg-rose-500/[0.05] p-4">
+          <p className="text-[10px] uppercase tracking-wider text-rose-300 font-semibold mb-1.5 flex items-center gap-1.5">
+            <XIcon size={12} /> Without this platform
+          </p>
+          <p className="text-sm text-white/70 leading-relaxed">{scenario.withoutPlatform}</p>
+        </div>
+        <div className="rounded-lg border border-emerald-400/20 bg-emerald-500/[0.05] p-4">
+          <p className="text-[10px] uppercase tracking-wider text-emerald-300 font-semibold mb-1.5 flex items-center gap-1.5">
+            <Check size={12} /> With this platform
+          </p>
+          <p className="text-sm text-white/70 leading-relaxed">{scenario.withPlatform}</p>
+        </div>
+      </div>
     </div>
   );
 }

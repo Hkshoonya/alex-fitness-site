@@ -538,7 +538,7 @@ function App() {
             <div className="logo-shine logo-glow rounded-lg">
               <img src={asset("/images/logo-circle.png")} alt="Alex Davis Fitness" className="h-10 w-auto group-hover:scale-105 transition-transform" />
             </div>
-            <span className="font-display font-bold text-xl tracking-tight text-white hidden sm:block">ALEX'S FITNESS</span>
+            <span className="font-display font-bold text-lg sm:text-xl tracking-tight text-white">ALEX'S FITNESS</span>
           </button>
 
           {/* Desktop Nav */}
@@ -566,13 +566,28 @@ function App() {
             </button>
           </div>
 
-          {/* Mobile menu button */}
-          <button
-            className="lg:hidden text-white"
-            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          >
-            {mobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
-          </button>
+          {/* Mobile cluster: Instagram + hamburger. The desktop Instagram
+              link lives inside the lg:flex nav above; this duplicate is
+              shown only at <lg so the brand link is reachable on mobile
+              without first opening the hamburger. */}
+          <div className="flex items-center gap-3 lg:hidden">
+            <a
+              href="https://www.instagram.com/alexdavisfit/reels/"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Instagram"
+              className="text-white/80 hover:text-white transition-colors"
+            >
+              <InstagramIcon size={22} />
+            </a>
+            <button
+              className="text-white"
+              aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            >
+              {mobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
+            </button>
+          </div>
         </div>
 
         {/* Mobile menu */}

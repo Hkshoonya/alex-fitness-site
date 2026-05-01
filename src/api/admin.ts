@@ -97,6 +97,50 @@ export async function getChallengeSignups(challengeId: string): Promise<{ signup
   return { signups: data.signups || [], count: data.count || 0 };
 }
 
+export interface RefundCreditResult {
+  ok: boolean;
+  userId?: number;
+  refunded?: number;
+  requested?: number;
+  remaining?: number;
+  total?: number;
+  bumpTotal?: boolean;
+  reason?: string;
+  error?: string;
+}
+
+/**
+ * Refund a session credit to a client. Wraps POST /admin/refund-credit.
+ * Either email or userId must be provided. Reason is required for the
+ * audit log + Trainerize note.
+ */
+export async function refundCredit(params: {
+  email?: string;
+  userId?: number;
+  sessions?: number;
+  bumpTotal?: boolean;
+  reason: string;
+}): Promise<RefundCreditResult> {
+  if (!WORKER_URL) return { ok: false, error: 'Worker not configured' };
+  try {
+    const resp = await fetch(`${WORKER_URL}/admin/refund-credit`, {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify(params),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 401) {
+      return { ok: false, error: 'Admin token expired or invalid — please log in again.' };
+    }
+    if (!resp.ok) {
+      return { ok: false, error: data.error || `Refund failed (${resp.status})` };
+    }
+    return { ok: true, ...data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+  }
+}
+
 export interface TrainerizeProgram {
   id: number;
   name: string;

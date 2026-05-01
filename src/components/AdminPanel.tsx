@@ -7,7 +7,7 @@ import {
 import {
   isAdminTokenFresh, verifyAdminToken, saveAdminSession, clearAdminSession,
   getChallengeSignups, getTrainerizePrograms, assignTrainerizeProgram,
-  describeTrainerizeReason,
+  describeTrainerizeReason, refundCredit,
   type ChallengeSignup, type TrainerizeProgram,
 } from '@/api/admin';
 import {
@@ -37,7 +37,7 @@ import {
 import { compressImage } from '@/lib/imageUpload';
 import { CoachAvatar } from '@/components/CoachAvatar';
 
-type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'stories' | 'transformations' | 'signups';
+type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'stories' | 'transformations' | 'signups' | 'credits';
 
 export default function AdminPanel() {
   const [authed, setAuthed] = useState(isAdminTokenFresh());
@@ -105,6 +105,7 @@ export default function AdminPanel() {
           <TabButton active={tab === 'stories'} onClick={() => setTab('stories')} label="Stories" />
           <TabButton active={tab === 'transformations'} onClick={() => setTab('transformations')} label="Transformations" />
           <TabButton active={tab === 'signups'} onClick={() => setTab('signups')} label="Signups" />
+          <TabButton active={tab === 'credits'} onClick={() => setTab('credits')} label="Credits" />
         </nav>
       </header>
 
@@ -116,6 +117,7 @@ export default function AdminPanel() {
         {tab === 'stories' && <StoriesTab />}
         {tab === 'transformations' && <TransformationsTab />}
         {tab === 'signups' && <SignupsTab />}
+        {tab === 'credits' && <CreditsTab />}
       </main>
 
       <footer className="max-w-6xl mx-auto px-6 py-8 text-white/30 text-xs border-t border-white/5 mt-8">
@@ -724,6 +726,164 @@ function SignupsTab() {
           onClose={() => setAssignTarget(null)}
         />
       )}
+    </div>
+  );
+}
+
+// Refund a session credit. Wraps POST /admin/refund-credit. Common
+// case: forgive a no-show. By default the credit is added back to
+// `remaining` capped at `total`; toggle "bonus credits" to also raise
+// `total`. The reason is required and surfaces in the Trainerize note
+// + admin log so refunds are auditable.
+function CreditsTab() {
+  const [identifier, setIdentifier] = useState('');
+  const [identifierKind, setIdentifierKind] = useState<'email' | 'userId'>('email');
+  const [sessions, setSessions] = useState(1);
+  const [bumpTotal, setBumpTotal] = useState(false);
+  const [reason, setReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const submit = async () => {
+    setResult(null);
+    if (!identifier.trim()) {
+      setResult({ ok: false, message: 'Enter the client\'s email or Trainerize userId.' });
+      return;
+    }
+    if (!reason.trim()) {
+      setResult({ ok: false, message: 'Reason is required (audit trail).' });
+      return;
+    }
+    setSubmitting(true);
+    const params: { email?: string; userId?: number; sessions: number; bumpTotal: boolean; reason: string } = {
+      sessions, bumpTotal, reason: reason.trim(),
+    };
+    if (identifierKind === 'email') {
+      params.email = identifier.trim();
+    } else {
+      const n = Number(identifier.trim());
+      if (!Number.isFinite(n) || n <= 0) {
+        setResult({ ok: false, message: 'userId must be a positive number.' });
+        setSubmitting(false);
+        return;
+      }
+      params.userId = n;
+    }
+    const resp = await refundCredit(params);
+    if (resp.ok) {
+      setResult({
+        ok: true,
+        message: `Refunded ${resp.refunded ?? sessions} credit${(resp.refunded ?? sessions) === 1 ? '' : 's'} to userId ${resp.userId}. Now: ${resp.remaining}/${resp.total} remaining.${resp.refunded != null && resp.refunded < (resp.requested ?? sessions) ? ` (Capped at total — toggle "Add as bonus credits" to exceed.)` : ''}`,
+      });
+      // Clear the form on success so the next refund starts fresh.
+      setIdentifier('');
+      setSessions(1);
+      setBumpTotal(false);
+      setReason('');
+    } else {
+      setResult({ ok: false, message: resp.error || 'Refund failed.' });
+    }
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="max-w-2xl">
+      <AdminTipsBox
+        tips={[
+          'Use this when a client missed a session you want to forgive (sick, emergency, scheduling mix-up).',
+          'The refund is logged with your reason — it shows up in Trainerize as a coach note + client message, and in the admin log.',
+          '"Bonus credit" raises the total beyond what they purchased. Use sparingly — it\'s a gift, not a refund.',
+        ]}
+      />
+
+      <h2 className="text-white text-xl font-semibold mt-6 mb-4">Refund a Session Credit</h2>
+
+      <div className="bg-white/5 border border-white/10 rounded-xl p-6 space-y-5">
+        <div>
+          <div className="flex gap-3 mb-2 text-sm">
+            <button
+              onClick={() => setIdentifierKind('email')}
+              className={`px-3 py-1.5 rounded-md ${identifierKind === 'email' ? 'bg-[#FF4D2E] text-white' : 'bg-white/5 text-white/60 hover:text-white'}`}
+            >
+              By email
+            </button>
+            <button
+              onClick={() => setIdentifierKind('userId')}
+              className={`px-3 py-1.5 rounded-md ${identifierKind === 'userId' ? 'bg-[#FF4D2E] text-white' : 'bg-white/5 text-white/60 hover:text-white'}`}
+            >
+              By Trainerize userId
+            </button>
+          </div>
+          <input
+            type={identifierKind === 'email' ? 'email' : 'text'}
+            value={identifier}
+            onChange={e => setIdentifier(e.target.value)}
+            placeholder={identifierKind === 'email' ? 'client@example.com' : '12345678'}
+            className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] transition-colors"
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-white/60 text-sm mb-1.5">Sessions to refund</label>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={sessions}
+              onChange={e => setSessions(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+              className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white focus:outline-none focus:border-[#FF4D2E] transition-colors"
+            />
+          </div>
+          <div className="flex items-end">
+            <label className="flex items-center gap-2 text-white/70 text-sm cursor-pointer pb-3">
+              <input
+                type="checkbox"
+                checked={bumpTotal}
+                onChange={e => setBumpTotal(e.target.checked)}
+                className="w-4 h-4 accent-[#FF4D2E]"
+              />
+              Add as bonus credits (raises total)
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-white/60 text-sm mb-1.5">
+            Reason <span className="text-red-400">*</span>
+          </label>
+          <textarea
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            placeholder="e.g. No-show forgiven — client had a flat tire"
+            rows={2}
+            className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] transition-colors resize-none"
+          />
+          <p className="text-white/40 text-xs mt-1">
+            Sent to the client via Trainerize and stored in the admin log.
+          </p>
+        </div>
+
+        <button
+          onClick={submit}
+          disabled={submitting}
+          className="bg-[#FF4D2E] hover:bg-[#FF6347] disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-2.5 px-6 rounded-lg transition-colors"
+        >
+          {submitting ? 'Refunding…' : 'Refund Credit'}
+        </button>
+
+        {result && (
+          <div
+            className={`mt-2 px-4 py-3 rounded-lg text-sm ${
+              result.ok
+                ? 'bg-green-500/10 border border-green-500/30 text-green-300'
+                : 'bg-red-500/10 border border-red-500/30 text-red-300'
+            }`}
+          >
+            {result.message}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

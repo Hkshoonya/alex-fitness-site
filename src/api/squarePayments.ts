@@ -386,7 +386,11 @@ export const getAvailableSessions = (trainerId?: 'alex1' | 'alex2') => {
   });
 };
 
-export const useSession = (purchaseId: string) => {
+// Decrements the local sessionsRemaining count for a purchase. Not a React
+// hook — the original `useSession` name tripped ESLint's rules-of-hooks check
+// on every call site. Renamed to consumeSession (action verb, no `use`
+// prefix) for clarity.
+export const consumeSession = (purchaseId: string) => {
   const purchases = getPurchases();
   const purchase = purchases.find((p: any) => p.id === purchaseId);
   if (purchase && purchase.sessionsRemaining > 0) {

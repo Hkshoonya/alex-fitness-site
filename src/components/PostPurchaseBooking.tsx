@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { X, ChevronLeft, ChevronRight, Clock, Check, Repeat, User, Info } from 'lucide-react';
 import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date-fns';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
-import { getPurchases, useSession } from '@/api/squarePayments';
+import { getPurchases, consumeSession } from '@/api/squarePayments';
 import { createBooking } from '@/api/squareAvailability';
 
 // Trainer picker uses the frontend ID ('alex1' / 'alex2'); real Square
@@ -209,7 +209,7 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
       for (const purchase of matching) {
         let remaining = purchase.sessionsRemaining;
         while (remaining > 0 && bookingIdx < succeeded) {
-          useSession(purchase.id);
+          consumeSession(purchase.id);
           remaining--;
           bookingIdx++;
         }

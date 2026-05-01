@@ -320,18 +320,54 @@ export const storePurchase = (purchase: {
     if (raw) purchases = JSON.parse(raw);
     if (!Array.isArray(purchases)) purchases = [];
   } catch { purchases = []; }
-  purchases.push({ ...purchase, id: `purchase_${Date.now()}` });
+  // agreementSigned defaults to false. PostPurchaseBooking filters out
+  // unsigned purchases so a user who paid but closed the agreement modal
+  // can't reach scheduling. App.tsx watches for unsigned purchases on mount
+  // and re-opens MemberAgreement in resume mode.
+  purchases.push({ ...purchase, id: `purchase_${Date.now()}`, agreementSigned: false });
   try { localStorage.setItem('purchases', JSON.stringify(purchases)); } catch { /* quota */ }
   return purchase;
 };
 
 export const getPurchases = () => JSON.parse(localStorage.getItem('purchases') || '[]');
 
+/**
+ * Mark a stored purchase as having a signed agreement on file. Called by
+ * MemberAgreement once the signature is captured (server stored or queued
+ * locally). Idempotent — calling again has no effect.
+ */
+export const markAgreementSigned = (paymentId: string): boolean => {
+  const purchases = getPurchases();
+  let touched = false;
+  for (const p of purchases) {
+    if (p.paymentId === paymentId && !p.agreementSigned) {
+      p.agreementSigned = true;
+      touched = true;
+    }
+  }
+  if (touched) {
+    try { localStorage.setItem('purchases', JSON.stringify(purchases)); } catch { /* quota */ }
+  }
+  return touched;
+};
+
+/**
+ * Return purchases that have credits remaining but no signed agreement.
+ * App.tsx uses this on mount to surface a resume modal so paid-but-unsigned
+ * members can finish enrollment before booking.
+ */
+export const getUnsignedPurchases = () => {
+  return getPurchases().filter((p: any) =>
+    p.sessionsRemaining > 0 && p.agreementSigned !== true,
+  );
+};
+
 export const getAvailableSessions = (trainerId?: 'alex1' | 'alex2') => {
   const now = new Date();
   return getPurchases().filter((p: any) => {
     if (trainerId && p.trainerId !== trainerId) return false;
     if (new Date(p.validUntil) < now) return false;
+    if (p.agreementSigned !== true) return false;
     return p.sessionsRemaining > 0;
   });
 };

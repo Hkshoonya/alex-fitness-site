@@ -20,6 +20,7 @@ import {
   FULL_AGREEMENT_TEXT,
   hashAgreementText,
 } from '@/data/agreementText';
+import { markAgreementSigned } from '@/api/squarePayments';
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
@@ -168,6 +169,12 @@ export default function MemberAgreement({
       // No worker URL — dev / mock mode. Queue locally.
       try { localStorage.setItem(localKey, localPayload); } catch { /* ignore */ }
     }
+
+    // Mark the local purchase record as signed regardless of remote-store
+    // outcome — local UI gates use this flag and the worker retry effect
+    // in App.tsx will eventually flush a queued POST. Either way the
+    // signature exists at least on this device.
+    try { markAgreementSigned(paymentId); } catch { /* purchases storage may be wiped */ }
 
     setSubmitting(false);
 

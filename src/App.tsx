@@ -28,8 +28,11 @@ import CoachSection from '@/components/CoachSection';
 import ChallengesSection from '@/components/ChallengesSection';
 import AdminPanel from '@/components/AdminPanel';
 import ClientPortalModal from '@/components/ClientPortalModal';
+import MemberAgreement, { type MemberAgreementSnapshot } from '@/components/MemberAgreement';
 import { AnnouncementCards, AnnouncementSection } from '@/components/Announcements';
 import { getClientPhotos, type ClientPhoto } from '@/api/clientPhotos';
+import { getUnsignedPurchases } from '@/api/squarePayments';
+import { getTrainingPlans } from '@/api/squareCatalog';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -151,6 +154,15 @@ function App() {
   const [clientPortalOpen, setClientPortalOpen] = useState(false);
   const [portalToken, setPortalToken] = useState<string | null>(null);
 
+  // Resume mode for the post-payment Member Agreement. Set on mount when
+  // we find a paid-but-unsigned purchase in localStorage (user closed the
+  // modal mid-flow); cleared once the agreement is signed.
+  const [agreementResume, setAgreementResume] = useState<{
+    paymentId: string;
+    client: { name: string; email: string; phone: string };
+    snapshot: MemberAgreementSnapshot;
+  } | null>(null);
+
   // Hash-based admin route. Using `#/admin` instead of `/admin` so GitHub
   // Pages (no server-side rewrites) doesn't 404 on direct navigation.
   const [isAdminRoute, setIsAdminRoute] = useState(
@@ -249,6 +261,63 @@ function App() {
     };
 
     flush();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Resume scan — at mount, if there's a paid purchase in localStorage
+  // without a matching agreement (user paid then closed the modal before
+  // signing), reconstruct the snapshot from the purchase record and
+  // re-open MemberAgreement so they can finish enrollment. PostPurchaseBooking
+  // separately filters out unsigned purchases so they can't book in the
+  // meantime.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const unsigned = getUnsignedPurchases();
+      if (unsigned.length === 0) return;
+
+      // Pick the most recently purchased one — if there's a backlog of
+      // multiple unsigned purchases, the user can sign each one in turn
+      // (next mount picks the next one up).
+      const purchase = unsigned.sort(
+        (a: any, b: any) =>
+          new Date(b.purchaseDate || 0).getTime() -
+          new Date(a.purchaseDate || 0).getTime(),
+      )[0];
+
+      // Look up plan name + duration from the catalog. Falls back to "Your
+      // Training Plan" if the catalog can't be loaded — the signature is
+      // still valid even if the snapshot is best-effort.
+      let planName = 'Your Training Plan';
+      let durationMinutes = 60;
+      try {
+        const plans = await getTrainingPlans();
+        const found = plans.find(p => p.id === purchase.planId);
+        if (found) {
+          planName = found.name;
+          durationMinutes = found.duration || 60;
+        }
+      } catch { /* offline / catalog unavailable — fallback labels are fine */ }
+
+      if (cancelled) return;
+
+      setAgreementResume({
+        paymentId: purchase.paymentId,
+        client: {
+          name: purchase.clientName || '',
+          email: purchase.clientEmail || '',
+          phone: purchase.clientPhone || '',
+        },
+        snapshot: {
+          planName,
+          sessions: purchase.sessionsRemaining,
+          durationMinutes,
+          amountPaid: purchase.amount,
+          trainerName: purchase.coachPreferenceName,
+          paymentDate: purchase.purchaseDate,
+        },
+      });
+    })();
     return () => { cancelled = true; };
   }, []);
 
@@ -1286,6 +1355,38 @@ function App() {
         initialToken={portalToken || undefined}
         onBookSession={() => setBookingModalOpen(true)}
       />
+
+      {/* Resume Member Agreement — opens automatically when an unsigned
+          paid purchase is found in localStorage on mount. Note: there is
+          no close button. The user paid; until the agreement is signed
+          they can't book. They can still navigate the rest of the site,
+          but PostPurchaseBooking filters out unsigned purchases. */}
+      {agreementResume && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/95 backdrop-blur-sm" />
+          <div
+            className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-3xl flex flex-col overflow-hidden"
+            style={{ maxHeight: 'min(90vh, 90dvh)' }}
+          >
+            <div className="shrink-0 p-4 sm:p-6 border-b border-white/10">
+              <h2 className="text-xl sm:text-2xl font-display font-bold text-white">
+                Finish Your Enrollment
+              </h2>
+              <p className="text-white/60 text-sm mt-1">
+                You paid earlier but didn't finish signing. A few signatures and you're set.
+              </p>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
+              <MemberAgreement
+                paymentId={agreementResume.paymentId}
+                client={agreementResume.client}
+                snapshot={agreementResume.snapshot}
+                onSigned={() => setAgreementResume(null)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

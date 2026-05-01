@@ -3789,6 +3789,143 @@ export default {
       });
     }
 
+    // ===== ADMIN: refund a session credit =====
+    //
+    // POST /admin/refund-credit
+    //   Headers: x-admin-token: <ADMIN_LOG_TOKEN>
+    //   Body: {
+    //     email?: string,        // one of email/userId required
+    //     userId?: number,
+    //     sessions?: number,     // default 1; capped so remaining ≤ total
+    //     bumpTotal?: boolean,   // if true, also raises `total` for bonus credits
+    //     reason: string,        // required, surfaced in Trainerize + admin log
+    //   }
+    //
+    // Use case: forgiving a no-show, correcting a mis-deducted credit, or
+    // gifting a session. Credit is added back to remaining (capped at total
+    // unless bumpTotal=true). Sends a Trainerize message to the client and
+    // adds a coach note with the reason. The credit-handled / session-counted
+    // sentinel keys are intentionally left untouched — they represent
+    // "this session was processed", separate from "should the client owe
+    // for it". Audit log makes every refund traceable.
+    if (url.pathname === '/admin/refund-credit' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      let userId = Number.isFinite(Number(body.userId)) && Number(body.userId) > 0 ? Number(body.userId) : null;
+      const sessions = Number.isFinite(Number(body.sessions)) && Number(body.sessions) > 0
+        ? Math.min(Number(body.sessions), 100) // sanity cap
+        : 1;
+      const bumpTotal = body.bumpTotal === true;
+      const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 200) : '';
+
+      if (!reason) {
+        return new Response(JSON.stringify({ error: 'reason is required (audit trail)' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!userId && !email) {
+        return new Response(JSON.stringify({ error: 'email or userId required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Resolve userId from email if not provided directly.
+      if (!userId && email) {
+        try {
+          userId = await findTrainerizeUserByEmail(email, env);
+        } catch { /* fall through to 404 below */ }
+        if (!userId) {
+          return new Response(JSON.stringify({ error: `No Trainerize user found for ${email}` }), {
+            status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
+      const creditKey = `credits:${userId}`;
+      const raw = await kvGet(creditKey, env);
+      if (!raw) {
+        return new Response(JSON.stringify({
+          error: `No credit record for userId ${userId}. The client must purchase a plan before credits can be refunded.`,
+        }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      let creditData;
+      try { creditData = JSON.parse(raw); }
+      catch {
+        return new Response(JSON.stringify({ error: 'Credit record is corrupted' }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const before = { remaining: creditData.remaining || 0, total: creditData.total || 0 };
+      const newRemaining = bumpTotal
+        ? before.remaining + sessions
+        : Math.min(before.total, before.remaining + sessions);
+      const newTotal = bumpTotal ? before.total + sessions : before.total;
+      const actuallyRefunded = newRemaining - before.remaining;
+
+      creditData.remaining = newRemaining;
+      creditData.total = newTotal;
+      creditData.lastRefundAt = new Date().toISOString();
+      creditData.lastRefundReason = reason;
+      // Preserve TTL if the original record had one — KV puts that don't
+      // specify expirationTtl reset to no-expiry.
+      const putOpts = creditData.validUntil
+        ? { expirationTtl: Math.max(60, Math.floor((new Date(creditData.validUntil).getTime() - Date.now()) / 1000)) }
+        : {};
+      await kvPut(creditKey, JSON.stringify(creditData), putOpts, env);
+
+      // Notify the client via Trainerize message + leave a trainer note.
+      // Wrapped in try so a Trainerize blip doesn't reverse the refund.
+      try {
+        await trainerizePost('/message/send', {
+          userID: getTrainerizeTrainerId(env),
+          recipients: [userId],
+          subject: 'Session Credit Restored',
+          body: `Good news — ${actuallyRefunded === 1 ? 'a session credit has' : `${actuallyRefunded} session credits have`} been restored to your account. Reason: ${reason}`,
+          threadType: 'mainThread',
+          conversationType: 'single',
+          type: 'text',
+        }, env);
+        await trainerizePost('/trainerNote/add', {
+          userID: userId,
+          content: `Credit refunded (+${actuallyRefunded}). Reason: ${reason}. Remaining: ${newRemaining}/${newTotal}.`,
+          type: 'general',
+        }, env);
+      } catch (e) {
+        console.error('Refund-credit Trainerize notify failed:', e);
+      }
+
+      await logEvent('credit', `Refund: +${actuallyRefunded} to userId ${userId} (${email || 'no-email'}). Reason: ${reason}`, {
+        userId, email, refunded: actuallyRefunded, before, after: { remaining: newRemaining, total: newTotal },
+        bumpTotal, reason,
+      }, env);
+
+      return new Response(JSON.stringify({
+        ok: true,
+        userId,
+        refunded: actuallyRefunded,
+        requested: sessions,
+        remaining: newRemaining,
+        total: newTotal,
+        bumpTotal,
+        reason,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     // ===== ADMIN: list Trainerize master programs =====
     // GET /admin/trainerize-programs — returns the list of master programs Alex
     // can assign to clients. Used by the admin signup viewer to populate the

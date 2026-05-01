@@ -485,13 +485,13 @@ function App() {
               <img
                 src={asset(src)}
                 alt=""
-                className="absolute inset-0 w-full h-full object-cover grayscale blur-sm"
+                className="absolute inset-0 w-full h-full object-cover blur-sm"
                 style={{ objectPosition: 'center 30%' }}
               />
               <img
                 src={asset(src.replace('.jpg', '-fg.png'))}
                 alt=""
-                className="absolute inset-0 w-full h-full object-cover grayscale"
+                className="absolute inset-0 w-full h-full object-cover"
                 style={{ objectPosition: 'center 30%' }}
               />
             </div>
@@ -538,14 +538,14 @@ function App() {
             src={asset("/images/4.jpg")}
             alt=""
             aria-hidden="true"
-            className="absolute inset-0 w-full h-full object-cover grayscale blur-sm"
+            className="absolute inset-0 w-full h-full object-cover blur-sm"
             style={{ objectPosition: 'center 30%' }}
           />
           {/* Sharp subject (extracted via rembg) on top — keeps trainer crisp */}
           <img
             src={asset("/images/4-fg.png")}
             alt="Trainer in the studio"
-            className="absolute inset-0 w-full h-full object-cover grayscale"
+            className="absolute inset-0 w-full h-full object-cover"
             style={{ objectPosition: 'center 30%' }}
           />
           <div className="absolute inset-0 bg-gradient-to-l from-black/65 via-black/30 to-transparent" />
@@ -576,14 +576,14 @@ function App() {
             src={asset("/images/trainingplan.jpg")}
             alt=""
             aria-hidden="true"
-            className="absolute inset-0 w-full h-full object-cover grayscale blur-sm"
+            className="absolute inset-0 w-full h-full object-cover blur-sm"
             style={{ objectPosition: 'center 30%' }}
           />
           {/* Sharp subject (extracted via rembg) on top */}
           <img
             src={asset("/images/trainingplan-fg.png")}
             alt="Trainer using cable machine"
-            className="absolute inset-0 w-full h-full object-cover grayscale"
+            className="absolute inset-0 w-full h-full object-cover"
             style={{ objectPosition: 'center 30%' }}
           />
           <div className="absolute inset-0 bg-black/50" />
@@ -643,8 +643,8 @@ function App() {
       {/* Section 4: Private Training Studio + Dojo (cycles every 6s).
           Image and text rotate together: the gym view pairs with the
           "PRIVATE TRAINING STUDIO." headline; the dojo view pairs with
-          "THE DOJO." headline. Both images grayscale, matching the
-          homepage's editorial treatment. */}
+          "THE DOJO." headline. Color images for warmth — only the LET'S
+          GET STARTED section keeps grayscale as a deliberate accent. */}
       <section id="studio" ref={studioRef} className="relative min-h-screen flex items-center overflow-hidden">
         <div className="absolute inset-0">
           {STUDIO_CYCLE.map((entry, i) => (
@@ -653,7 +653,7 @@ function App() {
               src={asset(entry.src)}
               alt=""
               aria-hidden="true"
-              className={`absolute inset-0 w-full h-full object-cover grayscale transition-opacity duration-1000 ${i === studioIndex ? 'opacity-100' : 'opacity-0'}`}
+              className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ${i === studioIndex ? 'opacity-100' : 'opacity-0'}`}
               style={{ objectPosition: 'center top' }}
             />
           ))}

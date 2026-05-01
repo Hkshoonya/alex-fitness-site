@@ -4268,6 +4268,85 @@ export default {
     //
     // Use case: forgiving a no-show, correcting a mis-deducted credit, or
     // gifting a session. Credit is added back to remaining (capped at total
+    // ===== ADMIN: credit catalog map (M-1 self-learning view + clear) =====
+    //
+    // GET  /admin/credit-map         → returns merged view of env override,
+    //                                    auto-learned KV map, and the resulting
+    //                                    "effective" map (env wins on conflict).
+    // POST /admin/credit-map/clear   → wipes the KV-learned map. Existing
+    //                                    env.CREDIT_CATALOG_MAP is unaffected.
+    //                                    Use when a previously-misfired
+    //                                    learning needs to be re-learned from
+    //                                    scratch (rare).
+    //
+    // Both admin-token gated. Read endpoint also rate-limited (10/min) so a
+    // leaked token can't enumerate the catalog at speed.
+    if (url.pathname === '/admin/credit-map' && request.method === 'GET') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      if (!await checkRateLimit(request, 'admin-credit-map', 10, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let envMap = {};
+      if (env.CREDIT_CATALOG_MAP) {
+        try { envMap = JSON.parse(env.CREDIT_CATALOG_MAP) || {}; } catch { envMap = {}; }
+      }
+      let learnedMap = {};
+      const learnedRaw = await kvGet('learned-credit-map', env);
+      if (learnedRaw) {
+        try { learnedMap = JSON.parse(learnedRaw) || {}; } catch { learnedMap = {}; }
+      }
+      // Effective map: learned map first, then env override on top (env wins).
+      const effective = { ...learnedMap, ...envMap };
+      return new Response(JSON.stringify({
+        env: envMap,
+        learned: learnedMap,
+        effective,
+        counts: {
+          env: Object.keys(envMap).length,
+          learned: Object.keys(learnedMap).length,
+          effective: Object.keys(effective).length,
+        },
+      }, null, 2), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    if (url.pathname === '/admin/credit-map/clear' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      // Capture what we're clearing for the audit log so the action is
+      // recoverable (Alex sees: which variations were learned, what credits
+      // they had, when first seen).
+      const learnedRaw = await kvGet('learned-credit-map', env);
+      let snapshot = {};
+      if (learnedRaw) {
+        try { snapshot = JSON.parse(learnedRaw); } catch { /* ignore */ }
+      }
+      await env.CHALLENGES_KV.delete('learned-credit-map');
+      await logEvent('admin', 'credit-map-cleared', {
+        clearedCount: Object.keys(snapshot).length,
+        variations: Object.keys(snapshot),
+      }, env);
+      return new Response(JSON.stringify({
+        ok: true,
+        cleared: Object.keys(snapshot).length,
+        snapshot,
+      }, null, 2), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     // unless bumpTotal=true). Sends a Trainerize message to the client and
     // adds a coach note with the reason. The credit-handled / session-counted
     // sentinel keys are intentionally left untouched — they represent
@@ -6369,14 +6448,39 @@ async function handleCreditPurchaseOrder(order, env) {
   // Any variation listed there is treated as authoritative; the name
   // heuristic only runs for line items NOT in the map. Quantity multiplies
   // the per-unit credits.
-  let creditMap = {};
+  // Match priority:
+  //   1. env.CREDIT_CATALOG_MAP — manual override, takes precedence so Alex
+  //      can correct any misfire by setting a wrangler secret.
+  //   2. KV `learned-credit-map` — auto-populated from successful name-
+  //      heuristic matches. Self-learns each variation's credits/duration
+  //      on its first sale, so subsequent orders match by ID directly.
+  //   3. Name heuristic — last-resort match for unfamiliar variations.
+  //      Every hit also writes the inferred mapping to the learned map,
+  //      so the second sale of that variation is already an ID match.
+  let envMap = {};
   if (env.CREDIT_CATALOG_MAP) {
     try {
-      creditMap = JSON.parse(env.CREDIT_CATALOG_MAP) || {};
+      envMap = JSON.parse(env.CREDIT_CATALOG_MAP) || {};
     } catch (e) {
       await logEvent('error', 'credit-map-parse-failed', { err: e?.message }, env);
     }
   }
+
+  let learnedMap = {};
+  const learnedRaw = await kvGet('learned-credit-map', env);
+  if (learnedRaw) {
+    try {
+      learnedMap = JSON.parse(learnedRaw) || {};
+    } catch (e) {
+      await logEvent('error', 'learned-credit-map-parse-failed', { err: e?.message }, env);
+      learnedMap = {};
+    }
+  }
+
+  // Mappings inferred during this order — persisted at end if any line item
+  // hit the name-heuristic path. Keyed by variation_id so quantity multiplies
+  // correctly on subsequent orders.
+  const learnedThisOrder = {};
 
   let totalCredits = 0;
   let duration = 60;
@@ -6387,39 +6491,87 @@ async function handleCreditPurchaseOrder(order, env) {
     const varName = li.variation_name || '';
     const variationId = li.catalog_object_id || '';
 
-    // Primary path: explicit catalog-ID match. Most stable across catalog
-    // edits — if Alex renames the product, the ID stays the same.
-    const mapped = variationId && creditMap[variationId];
-    if (mapped && Number.isFinite(mapped.credits)) {
-      totalCredits += qty * mapped.credits;
-      if (Number.isFinite(mapped.duration)) duration = mapped.duration;
+    // Priority 1: env override.
+    const envMapped = variationId && envMap[variationId];
+    if (envMapped && Number.isFinite(envMapped.credits)) {
+      totalCredits += qty * envMapped.credits;
+      if (Number.isFinite(envMapped.duration)) duration = envMapped.duration;
       continue;
     }
 
-    // Fallback: name-string heuristic. Emit a warning so a future catalog
-    // rename or new credit-granting product is visible in logs.
+    // Priority 2: previously-learned mapping.
+    const learnedMapped = variationId && learnedMap[variationId];
+    if (learnedMapped && Number.isFinite(learnedMapped.credits)) {
+      totalCredits += qty * learnedMapped.credits;
+      if (Number.isFinite(learnedMapped.duration)) duration = learnedMapped.duration;
+      // Bump usage counters so the admin view shows this variation is alive.
+      learnedThisOrder[variationId] = {
+        ...learnedMapped,
+        lastSeen: new Date().toISOString(),
+        count: (learnedMapped.count || 0) + 1,
+      };
+      continue;
+    }
+
+    // Priority 3: name heuristic. Stash the inferred unit-credits + duration
+    // so the post-loop write can teach the learned map for next time.
+    let inferredCreditsPerUnit = 0;
+    let inferredDuration = duration;
+    let source = '';
+
     if (name.includes('Training Session Credits') || name.includes('Single Session')) {
-      totalCredits += qty;
-      if (varName.includes('30') || name.includes('30')) duration = 30;
-      else if (varName.includes('90') || name.includes('90')) duration = 90;
-      await logEvent('warn', 'credit-match-by-name', {
-        orderId: order.id, name, variationId, qty, source: 'session-credits',
-        hint: 'Add this variation_id to env.CREDIT_CATALOG_MAP for stability',
-      }, env);
+      inferredCreditsPerUnit = 1;
+      if (varName.includes('30') || name.includes('30')) inferredDuration = 30;
+      else if (varName.includes('90') || name.includes('90')) inferredDuration = 90;
+      source = 'session-credits';
     } else if (name.includes('Training Plan') || name.includes('Training plan')) {
-      if (name.includes('12 Week') || name.includes('13 Week')) totalCredits += 12;
-      else if (varName.includes('2x/week')) totalCredits += qty * 4;
-      else if (varName.includes('1x/week')) totalCredits += qty * 2;
-      else totalCredits += qty * 4;
-      if (name.includes('90')) duration = 90;
+      if (name.includes('12 Week') || name.includes('13 Week')) inferredCreditsPerUnit = 12;
+      else if (varName.includes('2x/week')) inferredCreditsPerUnit = 4;
+      else if (varName.includes('1x/week')) inferredCreditsPerUnit = 2;
+      else inferredCreditsPerUnit = 4;
+      if (name.includes('90')) inferredDuration = 90;
+      source = 'training-plan';
+    }
+
+    if (inferredCreditsPerUnit > 0) {
+      totalCredits += qty * inferredCreditsPerUnit;
+      duration = inferredDuration;
       await logEvent('warn', 'credit-match-by-name', {
-        orderId: order.id, name, variationId, qty, source: 'training-plan',
-        hint: 'Add this variation_id to env.CREDIT_CATALOG_MAP for stability',
+        orderId: order.id, name, variationId, qty, source,
+        learned: !!variationId,
       }, env);
+      // Self-learn: only if the order line item actually has a variation_id.
+      // Without one (rare), there's nothing to key the learned mapping on.
+      if (variationId) {
+        learnedThisOrder[variationId] = {
+          credits: inferredCreditsPerUnit,
+          duration: inferredDuration,
+          source,
+          firstSeen: learnedMap[variationId]?.firstSeen || new Date().toISOString(),
+          lastSeen: new Date().toISOString(),
+          count: (learnedMap[variationId]?.count || 0) + 1,
+          // Capture the name at learning time so the admin view is human-readable.
+          name: name || varName,
+        };
+      }
     }
   }
 
   if (totalCredits === 0) return;
+
+  // Persist any new/updated learned mappings. KV is eventually consistent,
+  // so concurrent orders may both read empty and both write — last-write-wins
+  // is fine here (both writes carry the correct mapping).
+  if (Object.keys(learnedThisOrder).length > 0) {
+    const merged = { ...learnedMap, ...learnedThisOrder };
+    try {
+      await kvPut('learned-credit-map', JSON.stringify(merged), {}, env);
+    } catch (e) {
+      // Don't fail the credit grant just because we couldn't update the
+      // learning cache. Worst case: same name-heuristic logging next time.
+      await logEvent('error', 'learned-credit-map-write-failed', { err: e?.message }, env);
+    }
+  }
 
   // Get customer email
   const email = await getCustomerEmail(order.customer_id, env);

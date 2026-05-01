@@ -24,6 +24,10 @@ TZ_TYPE_BY_SERVICE = '{"UTPNPXXQA2R3WTKRQWXE6CBG":2845441,"66QDZG33XW3F62HR63P6V
 TZ_TAG_BY_SERVICE = '{"UTPNPXXQA2R3WTKRQWXE6CBG":"Initial Consultation"}'
 # Trainerize type → Square service variation (forward-sync direction)
 SQ_SERVICE_BY_TZ_TYPE = '{"8116657":"66QDZG33XW3F62HR63P6VF5G","8116656":"DFDGPQ56NTEWU4TX2WQBU7TR","10915844":"DFDGPQ56NTEWU4TX2WQBU7TR","5850677":"EFAXK3SOJJPNK2G3XK3MHXZI"}'
+# SPA origin used to build magic-link callback URLs in portal emails. NOT a
+# secret — it's the public site URL, baked into every magic-link email anyway.
+# Override for apex cutover: change to "https://alexsfitness.com" and redeploy.
+PORTAL_SITE_URL = "https://hkshoonya.github.io/alex-fitness-site"
 
 # Cron triggers:
 #   */15 * * * *  → every 15 min: Trainerize→Square appointment sync + credit deduction

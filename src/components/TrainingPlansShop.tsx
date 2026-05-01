@@ -12,6 +12,7 @@ import { initializeAllPaymentMethods, createCardPayment, storePurchase, validate
 import { provisionNewClientWithPlan } from '@/api/trainerize';
 import { getTeamMembers, type TeamMember } from '@/api/squareAvailability';
 import { asset } from '@/lib/assets';
+import MemberAgreement, { type MemberAgreementSnapshot, type SignedAgreementRecord } from '@/components/MemberAgreement';
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 // Recurring auto-pay (purchaseAndSubscribe) is deferred — see handlePayment.
@@ -65,6 +66,15 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   } | null>(null);
   const [couponError, setCouponError] = useState<string | null>(null);
   const [isValidatingCoupon, setIsValidatingCoupon] = useState(false);
+
+  // Agreement gating — payment populates pendingAgreement; signing
+  // populates agreementRecord. onPurchaseComplete only fires AFTER signing,
+  // so the user can't reach scheduling without finishing the legal step.
+  const [pendingAgreement, setPendingAgreement] = useState<{
+    paymentId: string;
+    snapshot: MemberAgreementSnapshot;
+  } | null>(null);
+  const [agreementRecord, setAgreementRecord] = useState<SignedAgreementRecord | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -219,6 +229,8 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     setAppliedCoupon(null);
     setCouponError(null);
     setIsValidatingCoupon(false);
+    setPendingAgreement(null);
+    setAgreementRecord(null);
   };
 
   // Drop the applied coupon if the user changes plan or frequency — it
@@ -442,8 +454,23 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
       // the correct IDs are threaded through. Until then, plans charge
       // once at purchase and the coach invoices manually for renewal.
 
+      // Capture purchase snapshot for the Member Agreement form. The
+      // success step now embeds the agreement and only fires
+      // onPurchaseComplete AFTER the agreement is signed — so the user
+      // can't reach scheduling without finishing the legal step.
+      setPendingAgreement({
+        paymentId,
+        snapshot: {
+          planName: serverPlanName,
+          sessions: serverSessions,
+          durationMinutes: selectedPlan.duration || 60,
+          amountPaid: serverAmount,
+          trainerName: selectedTrainer.name,
+          paymentDate: new Date().toISOString(),
+        },
+      });
+
       setStep('success');
-      if (onPurchaseComplete) onPurchaseComplete(selectedPlan, selectedTrainer, clientInfo);
 
       // Provision client in Trainerize (fire-and-forget)
       // Creates client account → generates ID + password → sends activation email → assigns plan
@@ -502,7 +529,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
               {step === 'configure' && 'Choose Frequency'}
               {step === 'trainer' && 'Choose Your Trainer'}
               {step === 'payment' && 'Complete Purchase'}
-              {step === 'success' && 'Purchase Complete!'}
+              {step === 'success' && (agreementRecord ? 'You\'re all set!' : 'Finalize Your Enrollment')}
             </h2>
             {selectedPlan && step !== 'browse' && step !== 'success' && (
               <p className="text-white/60 text-sm mt-1 truncate">{selectedPlan.name}</p>
@@ -909,22 +936,50 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
           )}
 
           {/* ===== SUCCESS ===== */}
-          {step === 'success' && (
+          {step === 'success' && pendingAgreement && !agreementRecord && (
+            <MemberAgreement
+              paymentId={pendingAgreement.paymentId}
+              client={clientInfo}
+              snapshot={pendingAgreement.snapshot}
+              onSigned={(record) => {
+                setAgreementRecord(record);
+                // Now that the user has signed, fire the upstream callback.
+                // App.tsx uses this to open PostPurchaseBooking. We delayed
+                // it until here so scheduling can't be reached without the
+                // signed agreement on file.
+                if (onPurchaseComplete && selectedPlan && selectedTrainer) {
+                  onPurchaseComplete(selectedPlan, selectedTrainer, clientInfo);
+                }
+              }}
+            />
+          )}
+
+          {step === 'success' && agreementRecord && (
             <div className="text-center py-8">
               <div className="w-20 h-20 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
                 <Check className="text-green-400" size={40} />
               </div>
-              <h3 className="text-xl font-semibold text-white mb-2">Purchase Successful!</h3>
+              <h3 className="text-xl font-semibold text-white mb-2">You're all set!</h3>
               <p className="text-white/70 mb-4">
-                Your {selectedPlan?.name} with {selectedTrainer?.name} is confirmed.
+                Welcome to Alex Davis Fitness, {agreementRecord.signedName.split(' ')[0]}.
+                Your {selectedPlan?.name} with {selectedTrainer?.name} is confirmed and your
+                agreement is on file.
               </p>
               <div className="bg-white/5 rounded-lg p-4 mb-4 inline-block">
-                <p className="text-white/60 text-sm">Amount Paid</p>
+                <p className="text-white/60 text-sm">Amount paid</p>
                 <p className="text-2xl font-bold text-white">{formatPrice(getCurrentPrice())}</p>
               </div>
-              <p className="text-white/50 text-sm mb-6">You can now book your sessions.</p>
+              {!agreementRecord.storedRemotely && (
+                <p className="text-yellow-300/80 text-xs mb-4 max-w-md mx-auto">
+                  Your signed agreement is saved locally and will sync to our server next
+                  time you open the site. You can continue with scheduling now.
+                </p>
+              )}
+              <p className="text-white/50 text-sm mb-6">
+                Pick your session times next, or close this and pick them later from your account.
+              </p>
               <button onClick={() => { onClose(); resetState(); }} className="btn-primary text-sm">
-                Done
+                Continue to Schedule
               </button>
             </div>
           )}

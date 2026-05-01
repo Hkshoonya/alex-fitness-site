@@ -203,6 +203,55 @@ function App() {
     }
   }, []);
 
+  // Retry queued member-agreement signatures. If the worker was unreachable
+  // when the user signed (signed offline, network blip, brief outage) the
+  // signature is queued as `pending_agreement_${paymentId}` in localStorage.
+  // On every load we try once to flush the queue. This is best-effort and
+  // silently drops the queued item only on a 200/idempotent response —
+  // anything else stays queued for the next attempt.
+  useEffect(() => {
+    const workerUrl = import.meta.env.VITE_WORKER_URL || '';
+    if (!workerUrl) return;
+    const PREFIX = 'pending_agreement_';
+    let cancelled = false;
+
+    const flush = async () => {
+      const keys: string[] = [];
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith(PREFIX)) keys.push(k);
+        }
+      } catch { return; }
+
+      for (const key of keys) {
+        if (cancelled) return;
+        let entry: { body: unknown; queuedAt: number } | null = null;
+        try {
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          entry = JSON.parse(raw);
+        } catch { localStorage.removeItem(key); continue; }
+        if (!entry?.body) { localStorage.removeItem(key); continue; }
+        try {
+          const resp = await fetch(`${workerUrl}/api/agreement/sign`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(entry.body),
+          });
+          if (resp.ok) {
+            try { localStorage.removeItem(key); } catch { /* ignore */ }
+          }
+        } catch {
+          // Worker still down — leave queued for next load.
+        }
+      }
+    };
+
+    flush();
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     const workerUrl = import.meta.env.VITE_WORKER_URL || '';
     if (!workerUrl) return;

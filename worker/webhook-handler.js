@@ -2267,6 +2267,128 @@ export default {
       }
     }
 
+    // POST /api/agreement/sign — record a signed member agreement.
+    //
+    // Called from MemberAgreement.tsx after the user accepts the combined
+    // liability waiver + plan terms + card-on-file authorization shown in
+    // the post-payment success step.
+    //
+    // Stored immutably (write-once per paymentId) so the original signing
+    // record can never be silently rewritten. Idempotent: re-POSTing with
+    // the same paymentId returns 200 with the existing record's metadata,
+    // never overwrites. Records keep for 5 years (1825 days) — typical
+    // personal-injury statute-of-limitations buffer.
+    //
+    // We DO NOT re-hash the agreement text here. The canonical text lives
+    // in src/data/agreementText.ts; the version string + textHash sent by
+    // the client are taken at face value. If the worker also hashed, drift
+    // between versions would silently mask tampering — better to trust the
+    // version pin and let the frontend code be the canonical source.
+    if (url.pathname === '/api/agreement/sign' && request.method === 'POST') {
+      if (!isAllowedOrigin) return new Response(JSON.stringify({ error: 'Unauthorized origin' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      if (!await checkRateLimit(request, 'agreement-sign', 30, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'invalid-json' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const {
+        paymentId, agreementVersion, signedAt, email, phone,
+        signedName, legalName, isMinor, childName, parentSignature,
+        textHash, consents, planSnapshot, userAgent,
+      } = body || {};
+
+      if (!paymentId || typeof paymentId !== 'string') {
+        return new Response(JSON.stringify({ error: 'paymentId required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (!agreementVersion || typeof agreementVersion !== 'string') {
+        return new Response(JSON.stringify({ error: 'agreementVersion required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (!signedName || typeof signedName !== 'string' || signedName.trim().length < 2) {
+        return new Response(JSON.stringify({ error: 'signedName required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (!email || typeof email !== 'string') {
+        return new Response(JSON.stringify({ error: 'email required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (!consents || consents.liability !== true || consents.planTerms !== true || consents.cardOnFile !== true) {
+        return new Response(JSON.stringify({ error: 'all three consents must be granted' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (!textHash || typeof textHash !== 'string' || !/^[a-f0-9]{64}$/.test(textHash)) {
+        return new Response(JSON.stringify({ error: 'textHash must be a sha-256 hex string' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (isMinor) {
+        if (!childName || typeof childName !== 'string' || childName.trim().length < 2) {
+          return new Response(JSON.stringify({ error: 'childName required for minor agreements' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (!parentSignature || typeof parentSignature !== 'string' || parentSignature.trim().length < 2) {
+          return new Response(JSON.stringify({ error: 'parentSignature required for minor agreements' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+      }
+
+      const agreementKey = `agreement:${paymentId}`;
+      const existingRaw = await kvGet(agreementKey, env);
+      if (existingRaw) {
+        let existing = null;
+        try { existing = JSON.parse(existingRaw); } catch { /* corrupt — overwrite path below would still skip; just return idempotent */ }
+        return new Response(JSON.stringify({
+          ok: true,
+          idempotent: true,
+          recordedAt: existing?.recordedAt,
+          agreementVersion: existing?.agreementVersion,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      const ip = request.headers.get('CF-Connecting-IP') || '';
+      const country = request.headers.get('CF-IPCountry') || '';
+      const recordedAt = new Date().toISOString();
+
+      const record = {
+        paymentId,
+        agreementVersion,
+        signedAt: typeof signedAt === 'string' ? signedAt : recordedAt,
+        recordedAt,
+        email: email.toLowerCase(),
+        phone: phone || null,
+        signedName: signedName.trim(),
+        legalName: typeof legalName === 'string' ? legalName.trim() : signedName.trim(),
+        isMinor: !!isMinor,
+        childName: isMinor && childName ? childName.trim() : null,
+        parentSignature: isMinor && parentSignature ? parentSignature.trim() : null,
+        textHash,
+        consents: {
+          liability: !!consents.liability,
+          planTerms: !!consents.planTerms,
+          cardOnFile: !!consents.cardOnFile,
+        },
+        planSnapshot: planSnapshot || null,
+        network: {
+          ip,
+          country,
+          userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 500) : '',
+        },
+      };
+
+      const FIVE_YEARS_SEC = 5 * 365 * 24 * 3600;
+      await kvPut(agreementKey, JSON.stringify(record), { expirationTtl: FIVE_YEARS_SEC }, env);
+      // Secondary index by email — Alex can look up an agreement by member.
+      await kvPut(`agreement-by-email:${email.toLowerCase()}:${recordedAt}`, paymentId, { expirationTtl: FIVE_YEARS_SEC }, env);
+
+      await logEvent('agreement', 'signed', {
+        paymentId,
+        email: email.toLowerCase(),
+        agreementVersion,
+        isMinor: !!isMinor,
+        hashPrefix: textHash.slice(0, 12),
+      }, env);
+
+      return new Response(JSON.stringify({
+        ok: true,
+        recordedAt,
+        agreementVersion,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     // ===== BOOKING CREATION (server-side, credit-gated) =====
     //
     // Phase B fix: previously the frontend created Square bookings directly

@@ -1488,13 +1488,22 @@ export default {
     }
     const isAllowedOrigin = ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes(refererOrigin);
 
-    const corsHeaders = {
-      // Reflect the client's origin ONLY if it's in the allowlist — never
-      // echo an attacker-controlled origin.
-      'Access-Control-Allow-Origin': isAllowedOrigin ? origin : ALLOWED_ORIGINS[0],
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Square-Version, X-Admin-Token',
-    };
+    // M-4 fix (audit 2026-05-01): when the request is from a disallowed
+    // origin, OMIT the Allow-Origin header entirely instead of reflecting
+    // the default origin. The browser will fail the CORS check on its end
+    // (which is what we want), and we don't accidentally suggest the
+    // request is partially welcome. The 403 we return separately for those
+    // requests is what stops the actual handler logic.
+    const corsHeaders = isAllowedOrigin
+      ? {
+          'Access-Control-Allow-Origin': origin,
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, Square-Version, X-Admin-Token',
+        }
+      : {
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, Square-Version, X-Admin-Token',
+        };
 
     // CORS preflight
     if (request.method === 'OPTIONS') {
@@ -3272,9 +3281,20 @@ export default {
         }
         const bd = await br.json();
         const ownedBy = bd.booking?.customer_id;
-        if (!ownedBy || ownedBy !== session.customerId) {
+        // M-3 fix (audit 2026-05-01): the session may have multiple Square
+        // customer IDs because Square sometimes creates duplicate Customer
+        // records when names/emails differ slightly across consults+plans.
+        // Cancel must succeed for any of the user's known customer IDs,
+        // not just the primary `customerId`. The fallback to `customerId`
+        // preserves back-compat with sessions issued before `customerIds[]`
+        // was added (those won't have the array set).
+        const allowedCustomerIds = Array.isArray(session.customerIds) && session.customerIds.length > 0
+          ? session.customerIds
+          : (session.customerId ? [session.customerId] : []);
+        if (!ownedBy || !allowedCustomerIds.includes(ownedBy)) {
           await logEvent('error', 'portal-cancel-ownership-mismatch', {
             sessionEmail: session.email, bookingId, ownedBy: ownedBy || 'unknown',
+            allowed: allowedCustomerIds,
           }, env);
           return new Response(JSON.stringify({ success: false, reason: 'not-your-booking' }), {
             status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -3326,6 +3346,25 @@ export default {
         return new Response(JSON.stringify({ error: 'Too many requests' }), {
           status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
+      }
+      // M-2 fix (audit 2026-05-01): per-IP daily cap for free-challenge
+      // joins. Existing per-email dedup stops same-email spam, but a bot
+      // rotating emails can still pollute KV with junk join records on
+      // free challenges (no payment friction). 5/day per IP is plenty for
+      // a household sharing one network and an order of magnitude tighter
+      // than the per-minute rate limit, which alone allows 14,400/day.
+      {
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+        const today = new Date().toISOString().slice(0, 10);
+        const ipCapKey = `challenge-join-ip-cap:${ip}:${today}`;
+        const c = parseInt(await kvGet(ipCapKey, env) || '0', 10) || 0;
+        if (c >= 5) {
+          await logEvent('challenge', 'join-ip-cap-hit', { ip, count: c }, env);
+          return new Response(JSON.stringify({ error: 'Daily join limit reached for this network' }), {
+            status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        await kvPut(ipCapKey, String(c + 1), { expirationTtl: 86400 }, env);
       }
       const id = url.pathname.split('/challenges/')[1].replace('/join', '');
       let body;
@@ -6315,6 +6354,30 @@ async function handleCreditPurchaseOrder(order, env) {
   }
   await kvPut(orderKey, 'processing', { expirationTtl: 5 * 60 }, env);
 
+  // M-1 fix (audit 2026-05-01): primary match by catalog_object_id. The
+  // legacy name-string heuristic below is preserved as a fallback so any
+  // existing Square Online configuration keeps working, but every fallback
+  // hit emits a warning log so a catalog rename surfaces immediately
+  // instead of silently zero-crediting future purchases.
+  //
+  // To pin credits to specific Square variations, set env.CREDIT_CATALOG_MAP
+  // to a JSON object keyed by Square variation ID:
+  //   {
+  //     "<variation_id>": { "credits": 4, "duration": 60 },
+  //     "<variation_id>": { "credits": 12, "duration": 60 }
+  //   }
+  // Any variation listed there is treated as authoritative; the name
+  // heuristic only runs for line items NOT in the map. Quantity multiplies
+  // the per-unit credits.
+  let creditMap = {};
+  if (env.CREDIT_CATALOG_MAP) {
+    try {
+      creditMap = JSON.parse(env.CREDIT_CATALOG_MAP) || {};
+    } catch (e) {
+      await logEvent('error', 'credit-map-parse-failed', { err: e?.message }, env);
+    }
+  }
+
   let totalCredits = 0;
   let duration = 60;
 
@@ -6322,17 +6385,37 @@ async function handleCreditPurchaseOrder(order, env) {
     const name = li.name || '';
     const qty = parseInt(li.quantity || '1');
     const varName = li.variation_name || '';
+    const variationId = li.catalog_object_id || '';
 
+    // Primary path: explicit catalog-ID match. Most stable across catalog
+    // edits — if Alex renames the product, the ID stays the same.
+    const mapped = variationId && creditMap[variationId];
+    if (mapped && Number.isFinite(mapped.credits)) {
+      totalCredits += qty * mapped.credits;
+      if (Number.isFinite(mapped.duration)) duration = mapped.duration;
+      continue;
+    }
+
+    // Fallback: name-string heuristic. Emit a warning so a future catalog
+    // rename or new credit-granting product is visible in logs.
     if (name.includes('Training Session Credits') || name.includes('Single Session')) {
       totalCredits += qty;
       if (varName.includes('30') || name.includes('30')) duration = 30;
       else if (varName.includes('90') || name.includes('90')) duration = 90;
+      await logEvent('warn', 'credit-match-by-name', {
+        orderId: order.id, name, variationId, qty, source: 'session-credits',
+        hint: 'Add this variation_id to env.CREDIT_CATALOG_MAP for stability',
+      }, env);
     } else if (name.includes('Training Plan') || name.includes('Training plan')) {
       if (name.includes('12 Week') || name.includes('13 Week')) totalCredits += 12;
       else if (varName.includes('2x/week')) totalCredits += qty * 4;
       else if (varName.includes('1x/week')) totalCredits += qty * 2;
       else totalCredits += qty * 4;
       if (name.includes('90')) duration = 90;
+      await logEvent('warn', 'credit-match-by-name', {
+        orderId: order.id, name, variationId, qty, source: 'training-plan',
+        hint: 'Add this variation_id to env.CREDIT_CATALOG_MAP for stability',
+      }, env);
     }
   }
 

@@ -1274,11 +1274,19 @@ function CoachesTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Admin view always bypasses Cloudflare's edge cache for photos so an
+  // upload appears immediately (public visitors continue to use the
+  // 5-min cached endpoint). The Square team list still respects its
+  // 24h localStorage cache here — coaches change rarely; what we need
+  // fresh is the photo overrides.
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [team, p] = await Promise.all([getTeamMembers(), getCoachPhotos()]);
+      const [team, p] = await Promise.all([
+        getTeamMembers(),
+        getCoachPhotos({ noCache: true }),
+      ]);
       setCoaches(team.filter(m => m.role !== 'consultation'));
       setPhotos(p);
     } catch {
@@ -1294,7 +1302,10 @@ function CoachesTab() {
     setError(null);
     try {
       await refreshTeamMembers();
-      const [team, p] = await Promise.all([getTeamMembers(), getCoachPhotos()]);
+      const [team, p] = await Promise.all([
+        getTeamMembers(),
+        getCoachPhotos({ noCache: true }),
+      ]);
       setCoaches(team.filter(m => m.role !== 'consultation'));
       setPhotos(p);
     } catch {

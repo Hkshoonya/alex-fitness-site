@@ -228,21 +228,37 @@ async function fetchTeamFromSquare(): Promise<TeamMember[]> {
  *
  * To force refresh: call refreshTeamMembers()
  */
+// Re-merge a cached team list with a fresh photo map. Pulled out so the
+// fast path (cache hit) and the slow path (cache miss) share the same
+// merge logic — admin-uploaded photo always wins over the cached image.
+function applyAdminPhotos(members: TeamMember[], adminPhotos: Record<string, string>): TeamMember[] {
+  return members.map(m => {
+    const photo = adminPhotos[m.id] || (m.squareTeamMemberId ? adminPhotos[m.squareTeamMemberId] : undefined);
+    return photo ? { ...m, image: photo } : m;
+  });
+}
+
 export async function getTeamMembers(): Promise<TeamMember[]> {
+  // Photos are ALWAYS fetched fresh — they're small, edge-cached at
+  // Cloudflare for 5 min, and change more often than the team list itself.
+  // Caching them in localStorage along with the team data caused
+  // admin-uploaded photos to take up to 24 h to appear on the site.
+  const adminPhotos = await getCoachPhotos().catch(() => ({} as Record<string, string>));
+
   if (isTeamCacheFresh()) {
     const raw = localStorage.getItem(TEAM_CACHE_KEY);
     if (raw) {
       const cache: TeamCache = JSON.parse(raw);
-      if (cache.members.length > 0) return cache.members;
+      if (cache.members.length > 0) {
+        // Re-apply admin photos to cached team — keeps the Square team
+        // fetch on its 24 h cycle while photos refresh on every load.
+        return applyAdminPhotos(cache.members, adminPhotos);
+      }
     }
   }
 
-  // Fetch in parallel — Square team list + admin-uploaded photo overrides.
-  // Photo merging happens after both resolve.
-  const [squareTeam, adminPhotos] = await Promise.all([
-    fetchTeamFromSquare(),
-    getCoachPhotos().catch(() => ({} as Record<string, string>)),
-  ]);
+  // Cache miss → fetch the team list from Square. Photos already in hand.
+  const squareTeam = await fetchTeamFromSquare();
 
   if (squareTeam.length > 0) {
     // Square is the source of truth for who exists. Enrich each result

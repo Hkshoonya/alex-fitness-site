@@ -21,11 +21,17 @@ function adminHeaders(): Record<string, string> {
   return headers;
 }
 
-/** Public — returns map of Square teamId → base64 data URL. */
-export async function getCoachPhotos(): Promise<CoachPhotoMap> {
+/** Public — returns map of Square teamId → base64 data URL.
+ *  Pass `noCache: true` to bypass Cloudflare's 5-min edge cache (use only
+ *  in admin contexts immediately after a write — public visitors should
+ *  use the cached endpoint to keep the read cheap). */
+export async function getCoachPhotos(opts: { noCache?: boolean } = {}): Promise<CoachPhotoMap> {
   if (!WORKER_URL) return {};
   try {
-    const r = await fetch(`${WORKER_URL}/coach-photos`);
+    const url = opts.noCache
+      ? `${WORKER_URL}/coach-photos?_=${Date.now()}`
+      : `${WORKER_URL}/coach-photos`;
+    const r = await fetch(url);
     if (!r.ok) return {};
     const json = await r.json();
     return (json && typeof json === 'object' && !Array.isArray(json)) ? json : {};

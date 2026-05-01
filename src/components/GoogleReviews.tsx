@@ -25,13 +25,14 @@ export default function GoogleReviews() {
     loadReviews();
   }, []);
 
-  const loadReviews = async () => {
+  // Function declaration (not arrow const) so it's hoisted above useEffect.
+  async function loadReviews() {
     const data = await getReviews();
     setReviews(data);
     setIsLive(hasLiveGoogleReviews());
     const status = getReviewCacheStatus();
     setLastFetched(status.lastFetched);
-  };
+  }
 
   const handleRefresh = async () => {
     setIsRefreshing(true);

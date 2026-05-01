@@ -24,7 +24,12 @@ export default function ChallengesSection({ onBooking: _onBooking }: ChallengesS
     loadChallenges();
   }, []);
 
-  const loadChallenges = async () => setChallenges(await getActiveChallenges());
+  // Function declaration (not arrow const) so this is hoisted above the
+  // useEffect call. Eliminates the "cannot access before declared" lint
+  // error and matches the pattern used elsewhere in the codebase.
+  async function loadChallenges() {
+    setChallenges(await getActiveChallenges());
+  }
 
   if (challenges.length === 0) return null;
 

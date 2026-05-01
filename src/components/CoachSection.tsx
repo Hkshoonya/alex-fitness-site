@@ -103,7 +103,8 @@ export default function CoachSection({ onBookCall, onBookMeeting }: CoachSection
     loadCoaches();
   }, []);
 
-  const loadCoaches = async () => {
+  // Function declaration (not arrow const) so it's hoisted above useEffect.
+  async function loadCoaches() {
     const team = await getTeamMembers();
 
     // Find Alex (owner) from Square to get his real team_member_id
@@ -123,7 +124,7 @@ export default function CoachSection({ onBookCall, onBookMeeting }: CoachSection
     // Alex always first, then others from Square
     // If a coach is removed in Square, they simply won't appear in `team` → won't be in `additional`
     setCoaches([alex, ...additional]);
-  };
+  }
 
   const coach = coaches[activeIndex];
   const hasMultiple = coaches.length > 1;

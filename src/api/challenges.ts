@@ -226,7 +226,12 @@ export interface JoinChallengeResult {
  */
 export async function joinChallenge(
   id: string,
-  participant: { name: string; email: string; phone?: string; paymentId?: string }
+  // cardToken: Square Web Payments SDK nonce. When present, the worker
+  // performs the charge server-side and derives the amount from challenge.price
+  // (no client-supplied amount). Replaces the old browser-side
+  // createGenericCardPayment flow that hit /api/square/payments through the
+  // proxy — that proxy entry was removed pre-launch (Phase 4 audit).
+  participant: { name: string; email: string; phone?: string; paymentId?: string; cardToken?: string }
 ): Promise<JoinChallengeResult> {
   if (!WORKER_URL) {
     return { ok: false, error: 'Challenge sign-up is not configured right now — please contact the coach directly.' };

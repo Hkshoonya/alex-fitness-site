@@ -2,7 +2,7 @@
 // Supports: Card, Apple Pay, Google Pay, Cash App Pay
 // Auto-detects device and shows available payment methods
 
-import { getSquareConfig, getSquareHeaders, SQUARE_API_BASE, SQUARE_WEB_SDK_URL } from '@/api/squareConfig';
+import { getSquareConfig, SQUARE_WEB_SDK_URL } from '@/api/squareConfig';
 
 const { applicationId: SQUARE_APPLICATION_ID, locationId: SQUARE_LOCATION_ID } = getSquareConfig();
 
@@ -114,57 +114,11 @@ export const initializeAllPaymentMethods = async (
   return methods;
 };
 
-/**
- * Generic card payment — used by flows that aren't tied to a training plan
- * (e.g. challenge entry fees). Returns the Square payment ID so the caller
- * can pass it to worker-side flows that need to verify a real charge
- * happened.
- */
-export const createGenericCardPayment = async (params: {
-  cardToken: string;
-  amountCents: number;
-  referenceId: string;
-  note: string;
-}): Promise<{ success: boolean; paymentId?: string; error?: string }> => {
-  if (!SQUARE_APPLICATION_ID) {
-    // Production safety: never auto-succeed a "payment" with a mock ID.
-    // A misconfigured prod deploy with no SQUARE_APPLICATION_ID would
-    // otherwise issue free entries to whatever flow used this — challenges,
-    // events, etc. Fail loud in prod, keep the mock for local dev.
-    if (import.meta.env.PROD) {
-      return { success: false, error: 'Payments are temporarily unavailable. Please try again shortly.' };
-    }
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    return { success: true, paymentId: `mock_payment_${Date.now()}` };
-  }
-  if (params.amountCents <= 0) {
-    return { success: false, error: 'Amount must be greater than zero' };
-  }
-
-  try {
-    const response = await fetch(`${SQUARE_API_BASE}/payments`, {
-      method: 'POST',
-      headers: getSquareHeaders(),
-      body: JSON.stringify({
-        source_id: params.cardToken,
-        idempotency_key: `pay_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        amount_money: { amount: params.amountCents, currency: 'USD' },
-        location_id: SQUARE_LOCATION_ID,
-        reference_id: params.referenceId.slice(0, 40),
-        note: params.note.slice(0, 500),
-        autocomplete: true,
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.errors?.[0]?.detail || 'Payment failed');
-    }
-    return { success: true, paymentId: data.payment.id };
-  } catch (error) {
-    console.error('Generic payment error:', error);
-    return { success: false, error: error instanceof Error ? error.message : 'Payment failed' };
-  }
-};
+// createGenericCardPayment was removed pre-launch (Phase 4 audit, 2026-05-01).
+// It POSTed directly to Square's /payments via the proxy — that proxy entry
+// is gone. Challenge entries now send `cardToken` to /challenges/{id}/join
+// and the worker performs the charge server-side, deriving the amount from
+// challenge.price (no client-supplied amount).
 
 // Plan purchases route through the worker's /checkout/charge endpoint. We
 // send only IDENTIFIERS (planId, frequencyIndex, trainerId) — never the

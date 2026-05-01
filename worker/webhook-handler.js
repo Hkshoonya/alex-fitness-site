@@ -1544,53 +1544,48 @@ export default {
 
       // Allowlist entries: [pattern, allowedMethods...].
       // ANYTHING that doesn't match exactly here will 403.
-      // SECURITY MODEL — defense-in-depth, NOT trust-the-Origin.
+      // SECURITY MODEL — paths in *_ALLOW are FULLY PUBLIC.
       //
-      // Origin/Referer headers are spoofable (curl, server-to-server, headless
-      // browser). Treat any path exposed here as PUBLIC. The allowlist is a
-      // surface-area minimizer — only entries strictly required by the browser
-      // bundle, where the worst-case outcome of a forged request is acceptable.
+      // RULE FOR ADDING A PATH HERE:
+      //   "Would I be fine if a curl with `Origin: https://hkshoonya.github.io`
+      //    from a stranger could hit this exact endpoint?"
+      //   If the answer is NO — DO NOT ADD IT. Origin/Referer headers are
+      //   trivially spoofable by any non-browser client. They are a CSRF
+      //   helper for browsers, not authentication. The proxy gate is
+      //   surface-minimization, not authorization.
       //
-      // Anything that mutates state for ANOTHER user, enumerates other users,
-      // or is gated by payment/admin authentication MUST live behind a
-      // dedicated worker endpoint with its own authorization (paymentId
-      // verification, admin token, etc.) — NEVER through this proxy.
+      // ANY path that needs admin gating, session gating, or payment gating
+      // MUST live behind a dedicated worker endpoint that enforces that
+      // gate explicitly (admin-token check, portal session token, paymentId
+      // verification against Square, etc.). Examples already in worker:
+      //   /admin/bookings, /admin/refund-credit, /portal/cancel-booking,
+      //   /credit-grant, /book-session, /book-consultation,
+      //   /challenges/{id}/join, /api/messages/send.
       //
-      // Pre-launch audit (2026-05-01) removed: customers/search (Square),
-      // user/find, user/setProfile, user/add, user/addTag, trainerNote/add,
-      // program/copyToUser, program/getList, appointment/add,
-      // appointment/getAppointmentTypeList (Trainerize). Forged-Origin curl
-      // to those previously reached production data; replaced with
-      // /credit-grant (server-side provisioning) and existing webhook paths.
+      // What's allowed below:
+      //   - bookings/availability/search — slot times, already shown publicly
+      //     on the booking page; no PII.
+      //   - catalog/list + catalog/object/{id} — plan prices + names; the
+      //     same data the marketing pages display.
+      //   - team-members/search — publicly-bookable trainers; same list as
+      //     the homepage's coach picker.
+      //
+      // Pre-launch audit history (Phase 1 2026-05-01): removed Trainerize
+      // entirely + Square customers/search. Phase 4 (2026-05-01): removed
+      // bookings GET + bookings/{id} (PII), customers POST + customers/{id}
+      // (PII + creation), payments POST + payments/{id} (merchant mutation),
+      // cards POST (dead), all subscriptions/* (dead).
       const SQUARE_ALLOW = [
-        // Bookings — POST removed Phase B (now via dedicated /book-session
-        // and /book-consultation endpoints with credit gating). GET stays
-        // for the calendar view; PUT/DELETE on individual bookings stay
-        // for reschedule/cancel flows that already pass through the
-        // signed-origin check.
-        [/^bookings$/,                              ['GET']],
-        [/^bookings\/[A-Za-z0-9_-]+$/,              ['GET', 'PUT', 'DELETE']],
+        // Slot search — used by the public booking page to list available
+        // times. Returns timestamps only, no PII. Same data appears on
+        // alexsfitness.com without any auth.
         [/^bookings\/availability\/search$/,        ['POST']],
-        // Cards (save card to customer)
-        [/^cards$/,                                 ['POST']],
-        // Catalog (read-only — list + single object)
+        // Read-only catalog (plan list + individual plan/discount objects).
+        // Same data the marketing pages render.
         [/^catalog\/list$/,                         ['GET']],
         [/^catalog\/object\/[A-Za-z0-9_-]+$/,       ['GET']],
-        // Customers — POST only on /customers (create), no GET (would enumerate)
-        // /customers/search REMOVED 2026-05-01: the frontend never used it,
-        // and forged Origin previously enumerated the full customer list.
-        [/^customers$/,                             ['POST']],
-        [/^customers\/[A-Za-z0-9_-]+$/,             ['GET', 'PUT']],
-        // Locations — REMOVED (audit C-01).
-        // Payments — POST one-off; GET single by ID for receipt verification
-        [/^payments$/,                              ['POST']],
-        [/^payments\/[A-Za-z0-9_-]+$/,              ['GET']],
-        // Subscriptions
-        [/^subscriptions$/,                                       ['POST']],
-        [/^subscriptions\/[A-Za-z0-9_-]+$/,                       ['GET']],
-        [/^subscriptions\/[A-Za-z0-9_-]+\/(cancel|pause|resume)$/,['POST']],
-        // Team members — search only. Returns publicly-bookable trainers
-        // (the same list the homepage shows); accepted residual exposure.
+        // Team-member search — public-bookable trainers. Same list shown
+        // on the homepage's coach picker.
         [/^team-members\/search$/,                  ['POST']],
       ];
       // TRAINERIZE_ALLOW — empty after pre-launch lockdown.
@@ -3637,8 +3632,57 @@ export default {
       // spot. Without this, anyone could POST `/join` and claim a paid slot
       // for free.
       const challengePrice = typeof challenge.price === 'number' ? challenge.price : 0;
-      const rawPaymentId = typeof body.paymentId === 'string' ? body.paymentId.trim() : '';
+      // Mutable so server-side card-token charges can populate it. Frontend
+      // now sends cardToken (Square Web Payments SDK single-use nonce) and
+      // the worker performs the charge — eliminates the prior browser-side
+      // hit on /api/square/payments which a forged-Origin curl could reach.
+      let rawPaymentId = typeof body.paymentId === 'string' ? body.paymentId.trim() : '';
+      const rawCardToken = typeof body.cardToken === 'string' ? body.cardToken.trim() : '';
       if (challengePrice > 0) {
+        // Server-side charge path: caller supplied a fresh card token. Worker
+        // derives the amount from the catalog (challengePrice) so the client
+        // can't influence what they pay. Idempotency key includes email so
+        // double-tap on the join button doesn't double-charge.
+        if (!rawPaymentId && rawCardToken) {
+          try {
+            const idemKey = `chal-${id}-${email}-${Math.floor(Date.now() / 60000)}`;
+            const charge = await fetch(`${getSquareApiBase(env)}/payments`, {
+              method: 'POST',
+              headers: { ...getSquareHeaders(env), 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                source_id: rawCardToken,
+                idempotency_key: idemKey,
+                amount_money: { amount: Math.round(challengePrice * 100), currency: 'USD' },
+                location_id: env.SQUARE_LOCATION_ID,
+                reference_id: `ch-${id}`.slice(0, 40),
+                note: `Challenge entry: ${(challenge.title || '').slice(0, 60)} — ${email}`.slice(0, 500),
+                autocomplete: true,
+              }),
+            });
+            const cd = await charge.json().catch(() => ({}));
+            if (!charge.ok) {
+              await logEvent('error', 'challenge-join-charge-failed', {
+                challengeId: id, email, status: charge.status,
+                err: (cd.errors?.[0]?.detail || '').slice(0, 200),
+              }, env);
+              return new Response(JSON.stringify({
+                error: cd.errors?.[0]?.detail || 'Card declined',
+              }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+            }
+            rawPaymentId = cd.payment?.id || '';
+            if (!rawPaymentId) {
+              await logEvent('error', 'challenge-join-charge-no-id', { challengeId: id, email }, env);
+              return new Response(JSON.stringify({ error: 'Payment succeeded but no ID returned. Contact support.' }), {
+                status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              });
+            }
+          } catch (e) {
+            await logEvent('error', 'challenge-join-charge-threw', { challengeId: id, email, err: e?.message }, env);
+            return new Response(JSON.stringify({ error: 'Could not process payment. Try again shortly.' }), {
+              status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+        }
         if (!rawPaymentId) {
           return new Response(JSON.stringify({
             error: `This challenge requires a $${challengePrice} entry fee. Payment is required.`,
@@ -4464,6 +4508,52 @@ export default {
       return new Response(JSON.stringify({ ok: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    }
+
+    // GET /admin/bookings — admin-token-gated bookings list.
+    //
+    // Replaces the prior browser-side GET /api/square/bookings (proxy path
+    // removed pre-launch — forged-Origin curl could read every booking +
+    // pivot into customer PII). The admin calendar still needs a way to
+    // fetch all bookings; this endpoint enforces token auth so an attacker
+    // who can fake an Origin header still hits a hard 401.
+    //
+    // Query params forwarded to Square: start_at_min, start_at_max,
+    // limit (default 100, capped 200), cursor (for paging).
+    if (url.pathname === '/admin/bookings' && request.method === 'GET') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || (request.headers.get('x-admin-token') || '') !== env.ADMIN_LOG_TOKEN) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      try {
+        const sqUrl = new URL(`${getSquareApiBase(env)}/bookings`);
+        sqUrl.searchParams.set('location_id', env.SQUARE_LOCATION_ID || '');
+        // Pass through optional time-window + paging from caller.
+        const passthrough = ['start_at_min', 'start_at_max', 'cursor', 'team_member_id', 'customer_id'];
+        for (const k of passthrough) {
+          const v = url.searchParams.get(k);
+          if (v) sqUrl.searchParams.set(k, v);
+        }
+        const limitRaw = parseInt(url.searchParams.get('limit') || '100', 10);
+        const limit = Math.min(Math.max(isNaN(limitRaw) ? 100 : limitRaw, 1), 200);
+        sqUrl.searchParams.set('limit', String(limit));
+        const r = await fetch(sqUrl.toString(), { headers: getSquareHeaders(env) });
+        const data = await r.json().catch(() => ({}));
+        return new Response(JSON.stringify(data), {
+          status: r.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        await logEvent('error', 'admin-bookings-failed', { err: e?.message }, env);
+        return new Response(JSON.stringify({ error: 'Failed to fetch bookings', detail: e?.message }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     // ===== ADMIN: refund a session credit =====

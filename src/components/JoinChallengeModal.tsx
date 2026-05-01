@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Trophy, Check, User, Mail, Phone, Loader2, CreditCard } from 'lucide-react';
 import { joinChallenge, parseChallengeDate, type Challenge } from '@/api/challenges';
-import { initializeAllPaymentMethods, createGenericCardPayment } from '@/api/squarePayments';
+import { initializeAllPaymentMethods } from '@/api/squarePayments';
 
 interface JoinChallengeModalProps {
   challenge: Challenge | null;
@@ -83,13 +83,18 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
     await submitJoin();
   };
 
-  const submitJoin = async (paymentId?: string) => {
+  // Single submit path. For free challenges we call without a cardToken;
+  // for paid ones we tokenize the card and let the worker do the charge
+  // server-side (it derives the amount from challenge.price, so the client
+  // can't influence what they pay). Replaces the old two-call flow that
+  // charged via /api/square/payments and then submitted the paymentId.
+  const submitJoin = async (cardToken?: string) => {
     setStep('sending');
     const result = await joinChallenge(challenge!.id, {
       name: name.trim(),
       email: email.trim(),
       phone: phone.trim(),
-      paymentId,
+      cardToken,
     });
     if (result.ok) {
       setFinalChallenge(result.challenge || challenge);
@@ -114,18 +119,7 @@ export default function JoinChallengeModal({ challenge, isOpen, onClose, onJoine
         setStep('error');
         return;
       }
-      const paymentResult = await createGenericCardPayment({
-        cardToken: tok.token,
-        amountCents: Math.round(price * 100),
-        referenceId: `ch-${challenge!.id}`,
-        note: `Challenge entry: ${challenge!.title} — ${email.trim()}`,
-      });
-      if (!paymentResult.success || !paymentResult.paymentId) {
-        setErrorMsg(paymentResult.error || 'Payment failed.');
-        setStep('error');
-        return;
-      }
-      await submitJoin(paymentResult.paymentId);
+      await submitJoin(tok.token);
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : 'Payment failed unexpectedly.');
       setStep('error');

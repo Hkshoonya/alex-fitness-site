@@ -539,6 +539,11 @@ function App() {
         <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-white/50 text-sm hero-scroll hidden lg:block">
           Scroll to explore
         </div>
+
+        {/* Announcement cards — overlay positioned at bottom-right of hero
+            with glass-morphism transparency. Stagger entrance + pulse on
+            high-priority. Returns null when no active announcements. */}
+        <AnnouncementCards openModal={openAnnouncementModal} />
       </section>
 
       {/* Section 2: Stronger Body, Stronger Mind */}
@@ -578,11 +583,6 @@ function App() {
           </div>
         </div>
       </section>
-
-      {/* Inline announcement cards — render only when admin posts a card-style
-          announcement. Sits between the value section and plans so offers
-          appear right where pricing decisions happen. Returns null otherwise. */}
-      <AnnouncementCards openModal={openAnnouncementModal} />
 
       {/* Section 3: Training Plans */}
       <section id="plans" ref={plansRef} className="relative min-h-screen flex items-center">

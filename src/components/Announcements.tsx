@@ -224,20 +224,46 @@ export function AnnouncementCards({ openModal, filter }: CardProps) {
 
   if (cards.length === 0) return null;
 
+  // Cap at 3 — beyond that the overlay starts to feel like a wall, not a hint.
+  const visible = cards.slice(0, 3);
+
   return (
-    <section
-      className={`
-        relative px-6 lg:px-[6vw] py-12 lg:py-16
-        transition-all duration-700 ease-out
-        ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}
-      `}
+    <div
+      // Absolute overlay positioned within the hero section.
+      //   Mobile: bottom-center (sm:right-6 = right-aligned on tablet+)
+      //   Desktop: bottom-right with larger gutters
+      // pointer-events-none on the wrapper so empty space doesn't block
+      // hero interactions (scroll hint, etc); each card opts back in.
+      className="
+        absolute z-20 pointer-events-none
+        bottom-24 left-1/2 -translate-x-1/2
+        sm:left-auto sm:right-6 sm:translate-x-0
+        lg:right-12 lg:bottom-32
+        w-[calc(100%-3rem)] max-w-xs sm:max-w-sm
+        space-y-3 sm:space-y-4
+      "
+      aria-label="Site announcements"
     >
-      <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
-        {cards.map(c => (
-          <AnnouncementCard key={c.id} announcement={c} openModal={openModal} />
-        ))}
-      </div>
-    </section>
+      {visible.map((c, i) => (
+        <div
+          key={c.id}
+          className={`
+            pointer-events-auto
+            transition-all duration-700 ease-out
+            ${mounted
+              ? 'opacity-100 translate-x-0 translate-y-0'
+              : 'opacity-0 translate-x-6 translate-y-2'
+            }
+          `}
+          // Stagger entrance — each card starts 120ms after the previous so
+          // the overlay materializes like a notification stack rather than
+          // appearing all at once.
+          style={{ transitionDelay: `${i * 120}ms` }}
+        >
+          <AnnouncementCard announcement={c} openModal={openModal} />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -256,40 +282,50 @@ function AnnouncementCard({
     setDismissed(true);
   };
 
-  const priorityAccent = a.priority === 'high' ? 'border-[#FF4D2E]/30' : 'border-white/[0.08]';
+  const isHigh = a.priority === 'high';
+  const priorityAccent = isHigh ? 'border-[#FF4D2E]/25' : 'border-white/[0.08]';
 
   return (
     <article
       className={`
         relative group
-        bg-white/[0.06] backdrop-blur-sm
+        bg-white/[0.04] backdrop-blur-xl
         border ${priorityAccent} hover:border-[#FF4D2E]/40
-        rounded-2xl p-7 lg:p-8
-        transition-all duration-300
+        rounded-2xl p-5 lg:p-6
+        transition-all duration-500
+        hover:bg-white/[0.07] hover:scale-[1.02]
+        shadow-[0_8px_32px_rgba(0,0,0,0.24)]
       `}
     >
-      {/* Asymmetric orange rule line — editorial signature */}
-      <div className="flex items-center gap-3 mb-5">
-        <span className="block h-px w-8 bg-[#FF4D2E]" />
-        <p className="text-[#FF4D2E] text-[0.65rem] uppercase tracking-[0.2em] font-semibold">
-          {a.priority === 'high' ? 'Limited Time' : 'Announcement'}
+      {/* Editorial signature: asymmetric orange rule line + eyebrow text.
+          High-priority gets a soft pulsing glow on the rule for ambient
+          motion that signals "live" without being noisy. */}
+      <div className="flex items-center gap-3 mb-4">
+        <span
+          className={`
+            block h-px w-8 bg-[#FF4D2E]
+            ${isHigh ? 'shadow-[0_0_8px_#FF4D2E] animate-pulse' : ''}
+          `}
+        />
+        <p className="text-[#FF4D2E] text-[0.6rem] uppercase tracking-[0.22em] font-semibold">
+          {isHigh ? 'Limited Time' : 'Announcement'}
         </p>
       </div>
 
-      <h3 className="font-display font-bold text-white text-2xl lg:text-3xl leading-tight mb-3">
+      <h3 className="font-display font-bold text-white text-lg lg:text-xl leading-tight mb-2">
         {a.title}
       </h3>
 
       {a.subtitle && (
-        <p className="text-white/70 text-sm lg:text-base leading-relaxed mb-5">
+        <p className="text-white/70 text-xs lg:text-sm leading-relaxed mb-4">
           {a.subtitle}
         </p>
       )}
 
       {a.discountCode && (
-        <div className="mb-5 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#FF4D2E]/10 border border-[#FF4D2E]/30">
-          <span className="text-[#FF4D2E]/80 text-[0.65rem] uppercase tracking-wider font-semibold">Code</span>
-          <span className="text-white font-mono text-sm tracking-wider">{a.discountCode}</span>
+        <div className="mb-4 inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#FF4D2E]/10 border border-[#FF4D2E]/30">
+          <span className="text-[#FF4D2E]/80 text-[0.6rem] uppercase tracking-wider font-semibold">Code</span>
+          <span className="text-white font-mono text-xs tracking-wider">{a.discountCode}</span>
         </div>
       )}
 
@@ -298,14 +334,14 @@ function AnnouncementCard({
           type="button"
           onClick={() => handleCtaClick(a.ctaTarget, openModal)}
           className="
-            inline-flex items-center gap-2
+            inline-flex items-center gap-1.5
             text-[#FF4D2E] hover:text-[#FF6B4A]
-            font-semibold text-sm uppercase tracking-wider
+            font-semibold text-xs uppercase tracking-[0.15em]
             transition-colors group/cta
           "
         >
           {a.ctaLabel}
-          <ArrowRight size={14} className="group-hover/cta:translate-x-0.5 transition-transform" />
+          <ArrowRight size={12} className="group-hover/cta:translate-x-1 transition-transform duration-300" />
         </button>
       )}
 
@@ -314,7 +350,7 @@ function AnnouncementCard({
         type="button"
         onClick={handleDismiss}
         aria-label="Dismiss announcement"
-        className="absolute top-4 right-4 text-white/25 hover:text-white/60 transition-colors p-1"
+        className="absolute top-3 right-3 text-white/25 hover:text-white/60 transition-colors p-1"
       >
         <X size={14} strokeWidth={1.5} />
       </button>

@@ -2,14 +2,13 @@ import { useEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { asset } from '@/lib/assets';
-import { 
-  Menu, 
-  X, 
-  Phone, 
-  Mail, 
-  MapPin, 
-  Clock, 
-  Instagram,
+import {
+  Menu,
+  X,
+  Phone,
+  Mail,
+  MapPin,
+  Clock,
   ChevronRight,
   Dumbbell,
   Users,
@@ -70,13 +69,63 @@ function consumePortalTokenFromHash(): string | null {
   return m[1];
 }
 
+// Instagram glyph using the official brand gradient (yellow → pink → purple).
+// Replacing the lucide single-color icon with this branded version everywhere
+// the Instagram logo appears. The gradient is defined once via a <linearGradient>
+// inside <defs>; multiple instances of the icon all reference the same id.
+function InstagramIcon({ size = 16, className = '' }: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-label="Instagram"
+      className={className}
+    >
+      <defs>
+        <linearGradient id="ig-brand-gradient" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#FED373" />
+          <stop offset="20%" stopColor="#F15245" />
+          <stop offset="50%" stopColor="#D92E7F" />
+          <stop offset="78%" stopColor="#9B36B7" />
+          <stop offset="100%" stopColor="#515ECF" />
+        </linearGradient>
+      </defs>
+      <rect x="2" y="2" width="20" height="20" rx="5.5" stroke="url(#ig-brand-gradient)" strokeWidth="2" />
+      <circle cx="12" cy="12" r="4" stroke="url(#ig-brand-gradient)" strokeWidth="2" />
+      <circle cx="17.5" cy="6.5" r="1.2" fill="url(#ig-brand-gradient)" />
+    </svg>
+  );
+}
+
 function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bookingModalOpen, setBookingModalOpen] = useState(false);
   const [bookNowModalOpen, setBookNowModalOpen] = useState(false);
   const [shopOpen, setShopOpen] = useState(false);
   const [postPurchaseOpen, setPostPurchaseOpen] = useState(false);
-  const [showAbout, setShowAbout] = useState(false);
+  // About page is hash-routed (#/about) so refresh + browser-back work
+  // natively. Initial state reads the URL on mount; the hashchange listener
+  // below keeps it in sync with hash navigation.
+  const [showAbout, setShowAbout] = useState(
+    typeof window !== 'undefined' && window.location.hash.startsWith('#/about')
+  );
+
+  // Navigate to About — saves the current home scroll position so it can be
+  // restored when the user returns. setShowAbout is driven by the hashchange
+  // listener (set up below), so we only set the hash here and let that flow.
+  const goToAbout = () => {
+    try { sessionStorage.setItem('home_scroll_y', String(window.scrollY)); } catch { /* private mode etc */ }
+    if (window.location.hash !== '#/about') window.location.hash = '#/about';
+  };
+
+  // Navigate home — clears the hash; the listener restores scroll if a saved
+  // position exists from the matching goToAbout call.
+  const goHome = () => {
+    if (window.location.hash !== '#/' && window.location.hash !== '') window.location.hash = '#/';
+  };
   const [messageModalOpen, setMessageModalOpen] = useState(false);
   const [purchasedPlan, setPurchasedPlan] = useState<TrainingPlan | undefined>();
   const [selectedTrainer, setSelectedTrainer] = useState<Trainer | undefined>();
@@ -110,6 +159,36 @@ function App() {
 
   useEffect(() => {
     const onHashChange = () => setIsAdminRoute(window.location.hash.startsWith('#/admin'));
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  // About route + scroll restoration. Going to About → scrollTo(0). Returning
+  // to home → restore the saved scrollY from goToAbout, but only if one exists
+  // (so a fresh load with no prior history starts at the top normally).
+  useEffect(() => {
+    const onHashChange = () => {
+      const isAbout = window.location.hash.startsWith('#/about');
+      setShowAbout(isAbout);
+      if (isAbout) {
+        window.scrollTo(0, 0);
+      } else {
+        try {
+          const saved = sessionStorage.getItem('home_scroll_y');
+          if (saved !== null) {
+            sessionStorage.removeItem('home_scroll_y');
+            // Wait two RAFs so layout/images/GSAP have had a chance to settle.
+            // Without this the scroll fires before the page has its final
+            // height and lands somewhere unexpected.
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                window.scrollTo({ top: parseInt(saved, 10) || 0, behavior: 'instant' as ScrollBehavior });
+              });
+            });
+          }
+        } catch { /* sessionStorage may throw in private mode */ }
+      }
+    };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
@@ -428,7 +507,7 @@ function App() {
     return (
       <>
         <AboutPage
-          onBack={() => { setShowAbout(false); window.scrollTo(0, 0); }}
+          onBack={() => goHome()}
           onBooking={() => setBookingModalOpen(true)}
         />
         <BookingModal isOpen={bookingModalOpen} onClose={() => setBookingModalOpen(false)} />
@@ -442,7 +521,7 @@ function App() {
     if (key === 'booking') setBookingModalOpen(true);
     else if (key === 'shop') setShopOpen(true);
     else if (key === 'message') setMessageModalOpen(true);
-    else if (key === 'about') setShowAbout(true);
+    else if (key === 'about') goToAbout();
   };
 
   return (
@@ -473,14 +552,14 @@ function App() {
             <button onClick={() => scrollToSection('transformations')} className="text-sm text-white/80 hover:text-white transition-colors">
               Results
             </button>
-            <button onClick={() => setShowAbout(true)} className="text-sm text-white/80 hover:text-white transition-colors">
+            <button onClick={() => goToAbout()} className="text-sm text-white/80 hover:text-white transition-colors">
               About
             </button>
             <button onClick={() => { setPortalToken(null); setClientPortalOpen(true); }} className="text-sm text-white/80 hover:text-white transition-colors">
               Client Login
             </button>
             <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-sm text-white/80 hover:text-white transition-colors flex items-center gap-1">
-              <Instagram size={16} />
+              <InstagramIcon size={16} />
             </a>
             <button onClick={() => setBookNowModalOpen(true)} className="btn-primary text-xs">
               Book Now
@@ -503,10 +582,10 @@ function App() {
               <button onClick={() => scrollToSection('plans')} className="text-left text-white/80 py-2">Training</button>
               <button onClick={() => scrollToSection('studio')} className="text-left text-white/80 py-2">Studio</button>
               <button onClick={() => scrollToSection('transformations')} className="text-left text-white/80 py-2">Results</button>
-              <button onClick={() => { setShowAbout(true); setMobileMenuOpen(false); }} className="text-left text-white/80 py-2">About</button>
+              <button onClick={() => { setMobileMenuOpen(false); goToAbout(); }} className="text-left text-white/80 py-2">About</button>
               <button onClick={() => { setPortalToken(null); setClientPortalOpen(true); setMobileMenuOpen(false); }} className="text-left text-white/80 py-2">Client Login</button>
               <a href="https://www.instagram.com/alexdavisfit/reels/" target="_blank" rel="noopener noreferrer" className="text-white/80 py-2 flex items-center gap-2">
-                <Instagram size={18} /> Follow on Instagram
+                <InstagramIcon size={18} /> Follow on Instagram
               </a>
               <button onClick={() => { setBookNowModalOpen(true); setMobileMenuOpen(false); }} className="btn-primary text-xs w-fit mt-2">Book Now</button>
             </div>
@@ -1020,7 +1099,7 @@ function App() {
             <button onClick={() => scrollToSection('plans')} className="text-white/60 hover:text-white text-sm transition-colors">Training</button>
             <button onClick={() => scrollToSection('studio')} className="text-white/60 hover:text-white text-sm transition-colors">Studio</button>
             <button onClick={() => scrollToSection('transformations')} className="text-white/60 hover:text-white text-sm transition-colors">Results</button>
-            <button onClick={() => setShowAbout(true)} className="text-white/60 hover:text-white text-sm transition-colors">About</button>
+            <button onClick={() => goToAbout()} className="text-white/60 hover:text-white text-sm transition-colors">About</button>
             <button onClick={() => scrollToSection('book')} className="text-white/60 hover:text-white text-sm transition-colors">Contact</button>
             <a
               href="https://www.instagram.com/alexdavisfit/reels/"
@@ -1028,7 +1107,7 @@ function App() {
               rel="noopener noreferrer"
               className="text-white/60 hover:text-white text-sm flex items-center gap-1 transition-colors"
             >
-              <Instagram size={16} />
+              <InstagramIcon size={16} />
               @alexdavisfit
             </a>
           </div>
@@ -1093,10 +1172,10 @@ function App() {
         href="https://www.instagram.com/alexdavisfit/reels/"
         target="_blank"
         rel="noopener noreferrer"
-        className="fixed bottom-5 left-5 z-50 w-10 h-10 rounded-full bg-white/[0.06] backdrop-blur-sm border border-white/[0.08] flex items-center justify-center text-white/40 hover:text-[#FF4D2E] hover:border-white/20 transition-all"
+        className="fixed bottom-5 left-5 z-50 w-10 h-10 rounded-full bg-white/[0.06] backdrop-blur-sm border border-white/[0.08] flex items-center justify-center hover:bg-white/[0.12] hover:border-white/30 hover:scale-110 transition-all"
         title="@alexdavisfit"
       >
-        <Instagram size={16} />
+        <InstagramIcon size={16} />
       </a>
 
       {/* Consultation Modal (all site buttons) */}

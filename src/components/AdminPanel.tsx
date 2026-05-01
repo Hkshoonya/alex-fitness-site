@@ -316,7 +316,7 @@ function AdminLogin({ onSuccess }: { onSuccess: () => void }) {
 
         <p className="text-white/30 text-xs text-center mt-6">
           The token is set in Cloudflare Worker → Variables → <code className="text-white/40">ADMIN_LOG_TOKEN</code>.
-          Your session stays signed in for 30 days.
+          Your session stays signed in until you sign out. After 180 days you'll see a rotation reminder — contact Kimi for a fresh token.
         </p>
       </form>
     </div>

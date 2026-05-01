@@ -228,16 +228,24 @@ export function AnnouncementCards({ openModal, filter }: CardProps) {
   return (
     <div
       // Absolute overlay positioned within the hero section.
-      //   Mobile: bottom-center (sm:right-6 = right-aligned on tablet+)
-      //   Desktop: bottom-right with larger gutters
+      //
+      // Hidden on mobile (<sm 640px) entirely. Mobile cognitive load on
+      // the hero should be one CTA — covering the conversion area with
+      // marketing chrome cuts into the Book Free Consultation funnel.
+      // Inline section (between Value and Plans) carries promotional
+      // content on mobile; cards re-appear on tablet+ where there's
+      // genuine room.
+      //
+      //   Tablet (sm): bottom-right, max-w-sm
+      //   Desktop (lg): bottom-right with larger gutters
       // pointer-events-none on the wrapper so empty space doesn't block
       // hero interactions (scroll hint, etc); each card opts back in.
       className="
+        hidden sm:block
         absolute z-20 pointer-events-none
-        bottom-24 left-1/2 -translate-x-1/2
-        sm:left-auto sm:right-6 sm:translate-x-0
+        sm:right-6 sm:bottom-24
         lg:right-12 lg:bottom-32
-        w-[calc(100%-3rem)] max-w-xs sm:max-w-sm
+        max-w-sm
         space-y-3 sm:space-y-4
       "
       aria-label="Site announcements"

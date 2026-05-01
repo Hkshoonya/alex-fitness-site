@@ -899,6 +899,9 @@ function AnnouncementRow({ announcement: a, onEdit, onToggle, onDelete }: {
           <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold ${statusStyles}`}>
             {status}
           </span>
+          <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold text-white/60 bg-white/5">
+            {a.style === 'banner' ? 'Hero overlay' : 'Inline section'}
+          </span>
           {a.priority === 'high' && (
             <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold text-[#FF4D2E] bg-[#FF4D2E]/10">
               High priority
@@ -1033,23 +1036,41 @@ function AnnouncementForm({
         />
       </FormField>
 
-      {/* Priority — display style is fixed to in-page card; banner variant
-          retired but kept in the data model for future flexibility. */}
-      <FormField label="Priority" hint="High shows an animated orange dot + accent border to grab attention.">
-        <div className="grid grid-cols-2 gap-2 max-w-sm">
-          <RadioPill
-            active={form.priority === 'normal'}
-            onClick={() => setField('priority', 'normal')}
-            label="Normal"
-          />
-          <RadioPill
-            active={form.priority === 'high'}
-            onClick={() => setField('priority', 'high')}
-            label="High"
-            hint="Pulse + accent"
-          />
-        </div>
-      </FormField>
+      {/* Display surface + Priority */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <FormField label="Display surface" hint="Where the announcement appears on the page.">
+          <div className="grid grid-cols-2 gap-2">
+            <RadioPill
+              active={form.style === 'banner'}
+              onClick={() => setField('style', 'banner')}
+              label="Hero overlay"
+              hint="Floating, top of page"
+            />
+            <RadioPill
+              active={form.style === 'card'}
+              onClick={() => setField('style', 'card')}
+              label="Inline section"
+              hint="Above plans"
+            />
+          </div>
+        </FormField>
+
+        <FormField label="Priority" hint="High shows pulsing orange accent.">
+          <div className="grid grid-cols-2 gap-2">
+            <RadioPill
+              active={form.priority === 'normal'}
+              onClick={() => setField('priority', 'normal')}
+              label="Normal"
+            />
+            <RadioPill
+              active={form.priority === 'high'}
+              onClick={() => setField('priority', 'high')}
+              label="High"
+              hint="Pulse + accent"
+            />
+          </div>
+        </FormField>
+      </div>
 
       {/* CTA */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

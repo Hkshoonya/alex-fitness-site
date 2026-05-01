@@ -194,6 +194,9 @@ interface CardProps {
   filter?: (a: Announcement) => boolean;
 }
 
+// Hero overlay variant — compact glass cards, bottom-right of hero.
+// Filters to announcements with `style: 'banner'` (legacy field name kept
+// for backwards compat; semantically these are "Hero overlay").
 export function AnnouncementCards({ openModal, filter }: CardProps) {
   const [cards, setCards] = useState<Announcement[]>([]);
   const [mounted, setMounted] = useState(false);
@@ -202,12 +205,8 @@ export function AnnouncementCards({ openModal, filter }: CardProps) {
     let cancelled = false;
     (async () => {
       const all = await getActiveAnnouncements();
-      // Render every active announcement as a card — the page is the only
-      // surface now (sticky-banner variant retired for being too popup-y).
-      // The `style` field stays in the data model as a future-proof hint.
-      let list = all.filter(a => !isAnnouncementDismissed(a.id));
+      let list = all.filter(a => a.style === 'banner' && !isAnnouncementDismissed(a.id));
       if (filter) list = list.filter(filter);
-      // Sort by priority high-first, then created descending
       list.sort((a, b) => {
         if (a.priority !== b.priority) return a.priority === 'high' ? -1 : 1;
         return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
@@ -218,7 +217,6 @@ export function AnnouncementCards({ openModal, filter }: CardProps) {
       }
     })();
     return () => { cancelled = true; };
-  // Live updates without page reload aren't needed for this surface.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -351,6 +349,152 @@ function AnnouncementCard({
         onClick={handleDismiss}
         aria-label="Dismiss announcement"
         className="absolute top-3 right-3 text-white/25 hover:text-white/60 transition-colors p-1"
+      >
+        <X size={14} strokeWidth={1.5} />
+      </button>
+    </article>
+  );
+}
+
+// ============================================================
+// Inline section variant — full editorial poster, sits between
+// content sections. Filters to `style: 'card'`. Larger, more
+// prominent treatment for context-relevant promotions.
+// ============================================================
+
+export function AnnouncementSection({ openModal, filter }: CardProps) {
+  const [cards, setCards] = useState<Announcement[]>([]);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const all = await getActiveAnnouncements();
+      let list = all.filter(a => a.style === 'card' && !isAnnouncementDismissed(a.id));
+      if (filter) list = list.filter(filter);
+      list.sort((a, b) => {
+        if (a.priority !== b.priority) return a.priority === 'high' ? -1 : 1;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+      if (!cancelled) {
+        setCards(list);
+        requestAnimationFrame(() => setMounted(true));
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (cards.length === 0) return null;
+
+  return (
+    <section
+      className={`
+        relative px-6 lg:px-[6vw] py-12 lg:py-16
+        transition-all duration-700 ease-out
+        ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}
+      `}
+      aria-label="Featured announcements"
+    >
+      <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
+        {cards.map((c, i) => (
+          <div
+            key={c.id}
+            className={`
+              transition-all duration-700 ease-out
+              ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3'}
+            `}
+            style={{ transitionDelay: `${i * 100}ms` }}
+          >
+            <AnnouncementSectionCard announcement={c} openModal={openModal} />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// Bigger editorial card for inline section placement — more presence,
+// more breathing room, more typography hierarchy than the hero overlay.
+function AnnouncementSectionCard({
+  announcement: a,
+  openModal,
+}: {
+  announcement: Announcement;
+  openModal?: (key: string) => void;
+}) {
+  const [dismissed, setDismissed] = useState(false);
+  if (dismissed) return null;
+
+  const handleDismiss = () => {
+    dismissAnnouncement(a.id);
+    setDismissed(true);
+  };
+
+  const isHigh = a.priority === 'high';
+  const priorityAccent = isHigh ? 'border-[#FF4D2E]/30' : 'border-white/[0.08]';
+
+  return (
+    <article
+      className={`
+        relative group h-full
+        bg-white/[0.06] backdrop-blur-sm
+        border ${priorityAccent} hover:border-[#FF4D2E]/40
+        rounded-2xl p-7 lg:p-8
+        transition-all duration-300
+        hover:bg-white/[0.08]
+      `}
+    >
+      <div className="flex items-center gap-3 mb-5">
+        <span
+          className={`
+            block h-px w-8 bg-[#FF4D2E]
+            ${isHigh ? 'shadow-[0_0_8px_#FF4D2E] animate-pulse' : ''}
+          `}
+        />
+        <p className="text-[#FF4D2E] text-[0.65rem] uppercase tracking-[0.2em] font-semibold">
+          {isHigh ? 'Limited Time' : 'Announcement'}
+        </p>
+      </div>
+
+      <h3 className="font-display font-bold text-white text-2xl lg:text-3xl leading-tight mb-3">
+        {a.title}
+      </h3>
+
+      {a.subtitle && (
+        <p className="text-white/70 text-sm lg:text-base leading-relaxed mb-5">
+          {a.subtitle}
+        </p>
+      )}
+
+      {a.discountCode && (
+        <div className="mb-5 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#FF4D2E]/10 border border-[#FF4D2E]/30">
+          <span className="text-[#FF4D2E]/80 text-[0.65rem] uppercase tracking-wider font-semibold">Code</span>
+          <span className="text-white font-mono text-sm tracking-wider">{a.discountCode}</span>
+        </div>
+      )}
+
+      {a.ctaLabel && a.ctaTarget && (
+        <button
+          type="button"
+          onClick={() => handleCtaClick(a.ctaTarget, openModal)}
+          className="
+            inline-flex items-center gap-2
+            text-[#FF4D2E] hover:text-[#FF6B4A]
+            font-semibold text-sm uppercase tracking-wider
+            transition-colors group/cta
+          "
+        >
+          {a.ctaLabel}
+          <ArrowRight size={14} className="group-hover/cta:translate-x-1 transition-transform duration-300" />
+        </button>
+      )}
+
+      <button
+        type="button"
+        onClick={handleDismiss}
+        aria-label="Dismiss announcement"
+        className="absolute top-4 right-4 text-white/25 hover:text-white/60 transition-colors p-1"
       >
         <X size={14} strokeWidth={1.5} />
       </button>

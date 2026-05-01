@@ -29,7 +29,7 @@ import CoachSection from '@/components/CoachSection';
 import ChallengesSection from '@/components/ChallengesSection';
 import AdminPanel from '@/components/AdminPanel';
 import ClientPortalModal from '@/components/ClientPortalModal';
-import { AnnouncementCards } from '@/components/Announcements';
+import { AnnouncementCards, AnnouncementSection } from '@/components/Announcements';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -583,6 +583,11 @@ function App() {
           </div>
         </div>
       </section>
+
+      {/* Inline announcement section — full editorial poster between Value
+          and Plans. Filters to announcements with style='card'. Returns
+          null when no inline-style announcements are active. */}
+      <AnnouncementSection openModal={openAnnouncementModal} />
 
       {/* Section 3: Training Plans */}
       <section id="plans" ref={plansRef} className="relative min-h-screen flex items-center">

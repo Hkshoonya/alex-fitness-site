@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { X, ChevronLeft, ChevronRight, Clock, Calendar, Check, Phone, Mail, User, MapPin, Video, Dumbbell, Users } from 'lucide-react';
 import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date-fns';
 import { getAvailability, getTeamMembers, createBooking, CANCEL_NOTICE_HOURS, type TimeSlot, type TeamMember } from '@/api/squareAvailability';
+import { CoachAvatar } from '@/components/CoachAvatar';
 import { createMeetEvent, type MeetingDetails } from '@/api/googleMeet';
 import { DEFAULT_TEAM_MEMBER_ID, getConsultationServiceId, getServiceId } from '@/api/squareConfig';
 import { getPurchases } from '@/api/squarePayments';
@@ -388,7 +389,12 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
                   onClick={() => handleCoachSelect(coach)}
                   className="w-full flex items-center gap-4 p-4 rounded-xl border border-white/10 bg-white/5 hover:border-[#FF4D2E]/30 hover:bg-white/[0.07] transition-all text-left group"
                 >
-                  <img src={coach.image} alt={coach.name} className="w-14 h-14 rounded-xl object-cover object-top" />
+                  <CoachAvatar
+                    name={coach.name}
+                    image={coach.image}
+                    isHeadCoach={coach.role === 'head-coach'}
+                    className="w-14 h-14"
+                  />
                   <div className="flex-1">
                     <p className="text-white font-semibold flex items-center gap-2 group-hover:text-[#FF4D2E] transition-colors">
                       {coach.name}

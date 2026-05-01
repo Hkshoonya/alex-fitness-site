@@ -10,7 +10,9 @@ const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 // Bump the suffix when COACH_IMAGE_MAP changes so existing visitors with
 // stale cached team data refresh and see new photos on next load instead
 // of waiting 24h for natural expiry.
-const TEAM_CACHE_KEY = 'alex_fitness_team_v2';
+// v3 invalidates legacy caches that contained the fake "Alex Martinez"
+// placeholder + the orphaned "consultation" pseudo-coach record.
+const TEAM_CACHE_KEY = 'alex_fitness_team_v3';
 const AVAILABILITY_CACHE_KEY = 'alex_fitness_availability';
 const TEAM_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24h for team members
 const AVAILABILITY_CACHE_DURATION = 15 * 60 * 1000; // 15 min for availability
@@ -22,7 +24,12 @@ export interface TeamMember {
   name: string;
   role: 'head-coach' | 'coach' | 'consultation';
   title: string;
-  image: string;
+  /** Optional. Undefined → caller renders initials avatar via CoachAvatar.
+   *  Square Team Members API doesn't store custom photos, so we layer an
+   *  override map (COACH_IMAGE_MAP below) — anything outside the map is
+   *  surfaced as initials, which keeps new coaches looking professional
+   *  the moment they're added in Square. */
+  image?: string;
   specialties: string[];
   squareTeamMemberId?: string;
 }
@@ -64,6 +71,16 @@ interface AvailabilityCache {
 
 // ===== FALLBACK DATA =====
 
+// Local enrichment data for coaches whose names match Square Team Members.
+// This is NOT a source of truth for who exists — Square's API is. These
+// records only carry photo + specialties + role/title overrides for
+// matching names, and act as a degraded-mode fallback if the Square API
+// is unreachable (so the homepage doesn't render coach-less).
+//
+// To add a real coach: just add them in Square. Their record + photo
+// (if mapped via COACH_IMAGE_MAP) appears automatically on next 24h
+// cache refresh. No code change required for the coach to *exist* — only
+// for their photo and specialties to override the auto-generated defaults.
 const FALLBACK_TEAM: TeamMember[] = [
   {
     id: 'alex-davis',
@@ -72,22 +89,6 @@ const FALLBACK_TEAM: TeamMember[] = [
     title: 'Head Coach & Founder',
     image: asset('/images/alex-portrait.jpg'),
     specialties: ['Strength Training', 'Body Transformation', 'Corrective Exercise'],
-  },
-  {
-    id: 'consultation',
-    name: 'Free Consultation',
-    role: 'consultation',
-    title: 'Free 30-min Assessment',
-    image: asset('/images/logo-circle.png'),
-    specialties: ['Goal Setting', 'Fitness Assessment', 'Program Planning'],
-  },
-  {
-    id: 'alex-martinez',
-    name: 'Alex Martinez',
-    role: 'coach',
-    title: 'Associate Trainer',
-    image: asset('/images/coach-portrait.jpg'),
-    specialties: ['HIIT', 'Boxing', 'Functional Fitness'],
   },
 ];
 
@@ -175,23 +176,30 @@ async function fetchTeamFromSquare(): Promise<TeamMember[]> {
     const data = await response.json();
     const members = data.team_members || [];
 
-    // First-name → photo map. Square Team API doesn't store custom photos,
-    // so we override here. Add a coach by dropping their photo at
-    // `public/images/<firstname>.jpg` and adding the lowercase first name
-    // to this map.
+    // First-name → photo override. OPTIONAL — coaches not in this map
+    // render an initials avatar via CoachAvatar instead of a generic stock
+    // photo, so they still look professional. To add a real photo for a
+    // coach: drop the file at `public/images/<firstname>.jpg` and add the
+    // lowercase first name → path entry below. Owner is also mapped here
+    // (alex → alex-portrait.jpg) so the head coach looks consistent even
+    // if the Square API blip drops the local fallback record.
     const COACH_IMAGE_MAP: Record<string, string> = {
+      alex: '/images/alex-portrait.jpg',
       eun: '/images/eun.jpg',
     };
 
     return members.map((m: any) => {
       const name = `${m.given_name || ''} ${m.family_name || ''}`.trim();
       const firstName = name.toLowerCase().split(' ')[0];
+      const mappedPath = COACH_IMAGE_MAP[firstName];
       return {
         id: m.id,
         name,
         role: m.is_owner ? 'head-coach' as const : 'coach' as const,
         title: m.is_owner ? 'Head Coach & Founder' : 'Trainer',
-        image: asset(COACH_IMAGE_MAP[firstName] || '/images/coach-portrait.jpg'),
+        // Only set image when we have a real one. Undefined → CoachAvatar
+        // renders initials.
+        image: mappedPath ? asset(mappedPath) : undefined,
         specialties: [],
         squareTeamMemberId: m.id,
       };
@@ -230,31 +238,39 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
   const squareTeam = await fetchTeamFromSquare();
 
   if (squareTeam.length > 0) {
-    // Square is source of truth — only show coaches active in Square.
-    // Enrich with fallback data (images, specialties) only on a FULL-name match.
-    // First-name substring matching caused wrong-coach enrichment: e.g.
-    // "Alex Thompson" would inherit "Alex Davis" image/role.
+    // Square is the source of truth for who exists. Enrich each result
+    // with optional local data (specialties / role / title) when the name
+    // matches FALLBACK_TEAM exactly (full-name match — first-name
+    // substring matching caused wrong-coach enrichment historically, e.g.
+    // "Alex Thompson" inheriting "Alex Davis" data).
     const enriched = squareTeam.map(sq => {
       const fallback = FALLBACK_TEAM.find(f =>
         f.name.toLowerCase().trim() === sq.name.toLowerCase().trim()
       );
       if (fallback) {
-        return { ...sq, image: fallback.image, specialties: fallback.specialties, role: fallback.role, title: fallback.title };
+        return {
+          ...sq,
+          // Square's image (or undefined for initials avatar) wins unless
+          // the local fallback has one — that handles the API-blip case.
+          image: sq.image ?? fallback.image,
+          specialties: fallback.specialties,
+          role: fallback.role,
+          title: fallback.title,
+        };
       }
-      // New coach from Square with no local fallback — uses defaults
+      // No local fallback — use Square data as-is. New coach added in
+      // Square shows up with their initials avatar (until a photo is
+      // added to COACH_IMAGE_MAP).
       return sq;
     });
-
-    // Always include consultation entry (not a real coach)
-    const hasConsult = enriched.some(m => m.role === 'consultation');
-    if (!hasConsult) enriched.push(FALLBACK_TEAM.find(f => f.role === 'consultation')!);
 
     const cache: TeamCache = { members: enriched, fetchedAt: new Date().toISOString() };
     localStorage.setItem(TEAM_CACHE_KEY, JSON.stringify(cache));
     return enriched;
   }
 
-  // API not configured or failed — use fallback (Alex is always present)
+  // API not configured / failed — degraded mode: only Alex (the owner)
+  // is guaranteed-known so the site doesn't render coach-less.
   const cache: TeamCache = { members: FALLBACK_TEAM, fetchedAt: new Date().toISOString() };
   localStorage.setItem(TEAM_CACHE_KEY, JSON.stringify(cache));
   return FALLBACK_TEAM;

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Target, Dumbbell, Users, Phone, Calendar } from 'lucide-react';
 import { getTeamMembers, type TeamMember } from '@/api/squareAvailability';
 import { asset } from '@/lib/assets';
+import { CoachAvatar } from '@/components/CoachAvatar';
 
 interface CoachSectionProps {
   onBookCall: () => void;
@@ -32,7 +33,8 @@ interface CoachProfile {
   id: string;
   name: string;
   title: string;
-  image: string;
+  /** Optional. Undefined → CoachAvatar renders initials. */
+  image?: string;
   bio: string;
   stats: { value: string; label: string }[];
   credentials: { icon: string; title: string; subtitle: string }[];
@@ -131,10 +133,12 @@ export default function CoachSection({ onBookCall, onBookMeeting }: CoachSection
 
   return (
     <>
-      {/* Background */}
+      {/* Background — heavily blurred coach portrait or a neutral fallback
+          when the active coach has no photo (so the section still has the
+          dark editorial atmosphere instead of an empty void). */}
       <div className="absolute inset-0 coach-bg">
         <img
-          src={coach.image}
+          src={coach.image ?? asset('/images/alex-portrait.jpg')}
           alt=""
           aria-hidden="true"
           className="w-full h-full object-cover blur-3xl scale-125 opacity-50 transition-opacity duration-500"
@@ -163,7 +167,13 @@ export default function CoachSection({ onBookCall, onBookMeeting }: CoachSection
                       : 'bg-white/[0.06] text-white/50 hover:bg-white/10 hover:text-white'
                   }`}
                 >
-                  <img src={c.image} alt="" className="w-6 h-6 rounded-full object-cover object-top" />
+                  <CoachAvatar
+                    name={c.name}
+                    image={c.image}
+                    isHeadCoach={!!c.isHead}
+                    className="w-6 h-6 rounded-full"
+                    textClassName="text-[0.6rem]"
+                  />
                   <span className="hidden sm:inline">{c.name.split(' ')[0]}</span>
                   {c.isHead && <span className="text-[9px] bg-white/20 px-1.5 py-0.5 rounded-full hidden sm:inline">HEAD</span>}
                 </button>
@@ -177,14 +187,25 @@ export default function CoachSection({ onBookCall, onBookMeeting }: CoachSection
         )}
 
         <div className="grid lg:grid-cols-2 gap-12 items-center">
-          {/* Left: Coach portrait */}
+          {/* Left: Coach portrait. Falls back to a large initials monogram
+              when the coach has no uploaded photo — keeps the layout
+              visually balanced (no empty space) and still feels editorial. */}
           <div className="hidden lg:flex items-center justify-center">
             <div className="coach-photo rounded-2xl overflow-hidden">
-              <img
-                src={coach.image}
-                alt={coach.name}
-                className="max-h-[78vh] w-auto object-contain rounded-2xl transition-opacity duration-300"
-              />
+              {coach.image ? (
+                <img
+                  src={coach.image}
+                  alt={coach.name}
+                  className="max-h-[78vh] w-auto object-contain rounded-2xl transition-opacity duration-300"
+                />
+              ) : (
+                <CoachAvatar
+                  name={coach.name}
+                  isHeadCoach={!!coach.isHead}
+                  className="w-[28rem] h-[36rem] max-h-[78vh] rounded-2xl"
+                  textClassName="text-[8rem]"
+                />
+              )}
             </div>
           </div>
 

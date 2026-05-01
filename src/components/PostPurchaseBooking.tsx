@@ -284,34 +284,42 @@ export default function PostPurchaseBooking({ isOpen, onClose, plan, trainer, cl
         onClick={onClose}
       />
 
-      {/* Modal */}
-      <div className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden">
+      {/* Modal — flex column with min(90vh, 90dvh) max-height. dvh excludes
+          the mobile URL bar so the modal fits the actual visible viewport;
+          vh is the fallback for older browsers. shrink-0 header + flex-1
+          content guarantees the action buttons inside the scroll area can
+          always be reached without magic 140px math. */}
+      <div
+        className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-3xl flex flex-col overflow-hidden"
+        style={{ maxHeight: 'min(90vh, 90dvh)' }}
+      >
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-white/10">
-          <div>
-            <h2 className="text-2xl font-display font-bold text-white">
+        <div className="shrink-0 flex items-center justify-between p-4 sm:p-6 border-b border-white/10">
+          <div className="min-w-0 flex-1 pr-3">
+            <h2 className="text-xl sm:text-2xl font-display font-bold text-white truncate">
               {step === 'select' && 'Book Your Sessions'}
               {step === 'calendar' && 'Select Date & Time'}
               {step === 'confirm' && 'Confirm Booking'}
               {step === 'success' && (bookingResults.failed === 0 ? 'Booked!' : bookingResults.succeeded === 0 ? 'Couldn\'t book' : 'Partially booked')}
             </h2>
             {trainer && (
-              <p className="text-white/60 text-sm mt-1 flex items-center gap-2">
-                <User size={14} />
+              <p className="text-white/60 text-sm mt-1 flex items-center gap-2 truncate">
+                <User size={14} className="shrink-0" />
                 Training with {trainer.name}
               </p>
             )}
           </div>
-          <button 
+          <button
             onClick={onClose}
-            className="text-white/60 hover:text-white transition-colors"
+            className="shrink-0 text-white/60 hover:text-white transition-colors"
           >
             <X size={24} />
           </button>
         </div>
 
-        {/* Content */}
-        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+        {/* Content — flex-1 + min-h-0 so it shrinks to fit available space
+            and scrolls when content overflows. */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
           {/* Session Selection */}
           {step === 'select' && (
             <div>

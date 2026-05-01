@@ -309,20 +309,33 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={handleClose} />
 
-      <div className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden">
+      {/*
+        Mobile-safe modal: uses flex column with shrink-0 header/footer +
+        flex-1 scrollable content. Replaces the previous hardcoded
+        max-h-[calc(90vh-140px)] math which clipped the footer on mobile
+        when the title wrapped or the URL bar shifted vh values.
+        max-h: min(90vh, 90dvh) — dvh excludes the mobile URL bar so the
+        modal actually fits the visible viewport; vh is the fallback for
+        Safari < 15.4.
+      */}
+      <div
+        className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-2xl flex flex-col overflow-hidden"
+        style={{ maxHeight: 'min(90vh, 90dvh)' }}
+      >
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-white/10">
-          <div>
-            <h2 className="text-2xl font-display font-bold text-white">{getTitle()}</h2>
+        <div className="shrink-0 flex items-center justify-between p-4 sm:p-6 border-b border-white/10">
+          <div className="min-w-0 flex-1 pr-3">
+            <h2 className="text-xl sm:text-2xl font-display font-bold text-white truncate">{getTitle()}</h2>
             {getSubtitle() && <p className="text-white/60 text-sm mt-1">{getSubtitle()}</p>}
           </div>
-          <button onClick={handleClose} className="text-white/60 hover:text-white transition-colors">
+          <button onClick={handleClose} className="shrink-0 text-white/60 hover:text-white transition-colors">
             <X size={24} />
           </button>
         </div>
 
-        {/* Content */}
-        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+        {/* Content — flex-1 + min-h-0 lets it shrink to fit; overflow-y-auto
+            scrolls when content exceeds available space. */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
 
           {/* ===== CHOOSE: Session or Consultation ===== */}
           {step === 'choose' && (
@@ -676,10 +689,12 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
           )}
         </div>
 
-        {/* Footer */}
+        {/* Footer — shrink-0 so the action buttons are always visible
+            even when the content above is taller than the viewport.
+            Reduced padding on mobile so the buttons fit comfortably. */}
         {step !== 'success' && step !== 'choose' && (
-          <div className="p-6 border-t border-white/10 flex gap-3">
-            <button onClick={handleBack} className="flex-shrink-0 py-3 px-5 bg-white/5 hover:bg-white/10 text-white rounded-lg transition-colors text-sm">
+          <div className="shrink-0 p-4 sm:p-6 border-t border-white/10 flex gap-3 bg-[#0B0B0D]">
+            <button onClick={handleBack} className="flex-shrink-0 py-3 px-4 sm:px-5 bg-white/5 hover:bg-white/10 text-white rounded-lg transition-colors text-sm">
               ← Back
             </button>
 

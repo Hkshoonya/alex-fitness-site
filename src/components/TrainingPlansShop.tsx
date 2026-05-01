@@ -338,11 +338,17 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/90 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden">
+      {/* Modal — flex column with min(90vh, 90dvh) max-height (dvh = mobile
+          viewport excluding URL bar). Header/footer can't be clipped by
+          stale 140px math; content scrolls within the available space. */}
+      <div
+        className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-4xl flex flex-col overflow-hidden"
+        style={{ maxHeight: 'min(90vh, 90dvh)' }}
+      >
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-white/10">
-          <div>
-            <h2 className="text-2xl font-display font-bold text-white">
+        <div className="shrink-0 flex items-center justify-between p-4 sm:p-6 border-b border-white/10">
+          <div className="min-w-0 flex-1 pr-3">
+            <h2 className="text-xl sm:text-2xl font-display font-bold text-white truncate">
               {step === 'browse' && 'Training Plans'}
               {step === 'configure' && 'Choose Frequency'}
               {step === 'trainer' && 'Choose Your Trainer'}
@@ -350,16 +356,16 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
               {step === 'success' && 'Purchase Complete!'}
             </h2>
             {selectedPlan && step !== 'browse' && step !== 'success' && (
-              <p className="text-white/60 text-sm mt-1">{selectedPlan.name}</p>
+              <p className="text-white/60 text-sm mt-1 truncate">{selectedPlan.name}</p>
             )}
           </div>
-          <button onClick={onClose} className="text-white/60 hover:text-white transition-colors">
+          <button onClick={onClose} className="shrink-0 text-white/60 hover:text-white transition-colors">
             <X size={24} />
           </button>
         </div>
 
-        {/* Content */}
-        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+        {/* Content — flex-1 + min-h-0 so it shrinks to fit + scrolls */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
 
           {/* ===== BROWSE PLANS ===== */}
           {step === 'browse' && (

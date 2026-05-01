@@ -179,7 +179,12 @@ export default function ClientPortalModal({ isOpen, onClose, initialToken, onBoo
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-lg overflow-hidden max-h-[90vh] flex flex-col">
+      {/* min(90vh, 90dvh) — dvh excludes the mobile URL bar so the modal
+          fits the actual visible viewport on phones; vh is the fallback. */}
+      <div
+        className="relative bg-[#0B0B0D] border border-white/10 rounded-2xl w-full max-w-lg overflow-hidden flex flex-col"
+        style={{ maxHeight: 'min(90vh, 90dvh)' }}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-white/10 flex-shrink-0">
           <div className="flex items-center gap-3">

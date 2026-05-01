@@ -787,8 +787,12 @@ function App() {
 
           {/* Real client success photos — admin-managed cycling gallery
               with optional caption overlay. Falls back to the original
-              alex-with-client.jpg when no admin uploads exist. */}
-          <div className="mb-12 rounded-xl overflow-hidden relative aspect-[16/9] bg-black">
+              alex-with-client.jpg when no admin uploads exist.
+              Aspect 4:5 + object-contain matches the original photo's
+              natural ratio (1620×2025) and lets any admin upload show
+              uncropped — taller container = portraits fit fully, side
+              letterbox on landscapes (rare for client gym photos). */}
+          <div className="mb-12 rounded-xl overflow-hidden relative aspect-[4/5] max-w-2xl mx-auto bg-black">
             {clientPhotos.length > 0 ? (
               clientPhotos.map((p, i) => (
                 <div
@@ -798,10 +802,10 @@ function App() {
                   <img
                     src={p.dataUrl}
                     alt={p.caption || 'Client transformation'}
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-contain"
                   />
                   {p.caption && (
-                    <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7 bg-gradient-to-t from-black/85 via-black/40 to-transparent">
+                    <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7 bg-gradient-to-t from-black/90 via-black/55 to-transparent">
                       <p className="text-white text-base sm:text-lg lg:text-xl font-medium leading-snug max-w-3xl">
                         "{p.caption}"
                       </p>
@@ -813,7 +817,7 @@ function App() {
               <img
                 src={asset("/images/alex-with-client.jpg")}
                 alt="Alex with June 2024 Fitness Challenge Winner"
-                className="w-full h-full object-cover"
+                className="w-full h-full object-contain"
               />
             )}
             {/* Indicator dots — only when >1 admin photo exists */}

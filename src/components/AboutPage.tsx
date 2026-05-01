@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { asset } from '@/lib/assets';
+import { getStudioPhotos, type StudioPhoto } from '@/api/studioPhotos';
 import {
   ArrowLeft,
   Calendar,
@@ -25,7 +26,10 @@ interface AboutPageProps {
   onBooking: () => void;
 }
 
-const studioImages = [
+// Default gallery — used when no admin-uploaded photos exist. Once Alex
+// uploads via the admin Studio tab, those photos take over (newest
+// first). Keeps the page from going blank during the first-upload window.
+const DEFAULT_STUDIO_IMAGES = [
   asset('/images/studio-1.jpg'),
   asset('/images/studio-2.jpg'),
   asset('/images/studio-3.jpg'),
@@ -110,19 +114,51 @@ const values = [
 export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
   const [studioIndex, setStudioIndex] = useState(0);
   const [aboutHeroIndex, setAboutHeroIndex] = useState(0);
+  const [adminStudioPhotos, setAdminStudioPhotos] = useState<StudioPhoto[]>([]);
   const heroRef = useRef<HTMLDivElement>(null);
   const storyRef = useRef<HTMLDivElement>(null);
   const studioRef = useRef<HTMLDivElement>(null);
   const valuesRef = useRef<HTMLDivElement>(null);
 
+  // Fetch admin-uploaded studio photos on mount. Falls back silently to
+  // the default gallery on any error, so the page never goes blank.
+  useEffect(() => {
+    let cancelled = false;
+    getStudioPhotos()
+      .then(list => {
+        if (!cancelled && list.length > 0) {
+          setAdminStudioPhotos(list);
+          setStudioIndex(0); // reset cursor when source array changes
+        }
+      })
+      .catch(() => { /* silent fallback */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Admin photos take priority — newest first (worker returns them
+  // in that order). Otherwise fall back to the bundled defaults so the
+  // gallery is always populated.
+  const studioImages = useMemo(
+    () => (adminStudioPhotos.length > 0
+      ? adminStudioPhotos.map(p => p.dataUrl)
+      : DEFAULT_STUDIO_IMAGES),
+    [adminStudioPhotos],
+  );
+
   const nextStudio = () => setStudioIndex((p) => (p + 1) % studioImages.length);
   const prevStudio = () => setStudioIndex((p) => (p - 1 + studioImages.length) % studioImages.length);
 
-  // Auto-advance studio gallery
+  // Auto-advance studio gallery. studioImages.length is in the dep array
+  // because if admin photos load mid-session and shrink the array, the
+  // captured interval would compute modulo the stale length and could
+  // index past the end.
   useEffect(() => {
-    const timer = setInterval(nextStudio, 3500);
+    if (studioImages.length <= 1) return; // nothing to cycle
+    const timer = setInterval(() => {
+      setStudioIndex(p => (p + 1) % studioImages.length);
+    }, 3500);
     return () => clearInterval(timer);
-  }, []);
+  }, [studioImages.length]);
 
   // Auto-advance the about-hero gym ↔ dojo cycle
   useEffect(() => {
@@ -314,7 +350,7 @@ export default function AboutPage({ onBack, onBooking }: AboutPageProps) {
             <div className="relative aspect-[16/9] rounded-2xl overflow-hidden">
               {studioImages.map((src, i) => (
                 <img
-                  key={src}
+                  key={i}
                   src={src}
                   alt={`Studio view ${i + 1}`}
                   className="absolute inset-0 w-full h-full object-cover transition-opacity duration-700"

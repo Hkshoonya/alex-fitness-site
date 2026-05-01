@@ -3055,6 +3055,100 @@ export default {
       });
     }
 
+    // ===== STUDIO PHOTOS API =====
+    // GET /studio-photos — public, returns [{ id, dataUrl, createdAt }, ...]
+    // POST /admin/studio-photo — admin, body { dataUrl }
+    // DELETE /admin/studio-photo/:id — admin
+
+    if (url.pathname === '/studio-photos' && request.method === 'GET') {
+      if (!await checkRateLimit(request, 'studio-photos-get', 240, env)) {
+        return new Response('Too many requests', { status: 429, headers: corsHeaders });
+      }
+      const photos = await getAllStudioPhotos(env);
+      return new Response(JSON.stringify(photos), {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          // Edge cache 5 min — admin uploads propagate within a minute and
+          // payloads can be ~16MB at full capacity; caching matters for cost.
+          'Cache-Control': 'public, max-age=300',
+        },
+      });
+    }
+
+    if (url.pathname === '/admin/studio-photo' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      let data;
+      try { data = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const dataUrl = String(data?.dataUrl || '');
+      if (!STUDIO_PHOTO_PREFIX_RE.test(dataUrl)) {
+        return new Response(JSON.stringify({ error: 'dataUrl must be a base64 image (jpeg/png/webp)' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (dataUrl.length > MAX_STUDIO_PHOTO_BYTES) {
+        return new Response(JSON.stringify({
+          error: `Image too large (${Math.round(dataUrl.length / 1024)}KB). Max ${Math.round(MAX_STUDIO_PHOTO_BYTES / 1024)}KB after compression.`,
+        }), { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const photo = {
+        id: `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        dataUrl,
+        createdAt: new Date().toISOString(),
+      };
+      const lock = await withLock('lock:studio-photos-write', 15, env, () => addStudioPhoto(photo, env));
+      if (!lock.ok) {
+        return new Response(JSON.stringify({ error: 'Studio photos are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (lock.value?.error) {
+        return new Response(JSON.stringify({ error: lock.value.error }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(photo), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname.startsWith('/admin/studio-photo/') && request.method === 'DELETE') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const id = url.pathname.split('/admin/studio-photo/')[1];
+      if (!id) {
+        return new Response(JSON.stringify({ error: 'id required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const delLock = await withLock('lock:studio-photos-write', 10, env, () => removeStudioPhoto(id, env));
+      if (!delLock.ok) {
+        return new Response(JSON.stringify({ error: 'Studio photos are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ deleted: id }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== ADMIN: list Trainerize appointment types =====
     // GET /admin/trainerize-appointment-types — returns types available to
     // this API key so Alex can pick the in-person ID and set
@@ -6177,6 +6271,49 @@ async function removeCoachPhoto(teamId, env) {
   const all = await getAllCoachPhotos(env);
   delete all[teamId];
   await kvPut('coach-photos:index', JSON.stringify(all), {}, env);
+}
+
+// ============================================================
+// STUDIO PHOTOS — admin-managed gallery for /about Studio section.
+// Single KV key 'studio-photos:list' holds an array of records,
+// newest first. Browser-side compression caps each at ~800KB so
+// 20 photos × 800KB = 16MB stays under KV's 25MB value limit.
+// ============================================================
+
+const MAX_STUDIO_PHOTO_BYTES = 800_000;
+const MAX_STUDIO_PHOTOS = 20;
+const STUDIO_PHOTO_PREFIX_RE = /^data:image\/(jpeg|png|webp);base64,/;
+
+async function getAllStudioPhotos(env) {
+  if (!env.CHALLENGES_KV) return [];
+  try {
+    const raw = await kvGet('studio-photos:list', env);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addStudioPhoto(photo, env) {
+  if (!env.CHALLENGES_KV) return { error: 'Storage unavailable' };
+  const all = await getAllStudioPhotos(env);
+  if (all.length >= MAX_STUDIO_PHOTOS) {
+    return { error: `Limit ${MAX_STUDIO_PHOTOS} photos reached. Delete one first.` };
+  }
+  all.unshift(photo); // newest first — drives display order
+  await kvPut('studio-photos:list', JSON.stringify(all), {}, env);
+  return { ok: true, photo };
+}
+
+async function removeStudioPhoto(id, env) {
+  if (!env.CHALLENGES_KV) return false;
+  const all = await getAllStudioPhotos(env);
+  const filtered = all.filter(p => p.id !== id);
+  if (filtered.length === all.length) return false;
+  await kvPut('studio-photos:list', JSON.stringify(filtered), {}, env);
+  return true;
 }
 
 /**

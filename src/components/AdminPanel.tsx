@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Shield, LogOut, Plus, X, Check, Trash2, Pencil, Calendar, Users, Tag,
   Mail, Phone, ChevronDown, Loader2, AlertCircle, Award, ExternalLink,
-  Megaphone, Upload,
+  Megaphone, Upload, Image as ImageIcon,
 } from 'lucide-react';
 import {
   isAdminTokenFresh, verifyAdminToken, saveAdminSession, clearAdminSession,
@@ -22,10 +22,14 @@ import {
 } from '@/api/announcements';
 import { getTeamMembers, refreshTeamMembers, type TeamMember } from '@/api/squareAvailability';
 import { getCoachPhotos, uploadCoachPhoto, deleteCoachPhoto } from '@/api/coachPhotos';
+import {
+  getStudioPhotos, uploadStudioPhoto, deleteStudioPhoto,
+  type StudioPhoto,
+} from '@/api/studioPhotos';
 import { compressImage } from '@/lib/imageUpload';
 import { CoachAvatar } from '@/components/CoachAvatar';
 
-type Tab = 'challenges' | 'announcements' | 'coaches' | 'signups';
+type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'signups';
 
 export default function AdminPanel() {
   const [authed, setAuthed] = useState(isAdminTokenFresh());
@@ -76,6 +80,7 @@ export default function AdminPanel() {
           <TabButton active={tab === 'challenges'} onClick={() => setTab('challenges')} label="Challenges" />
           <TabButton active={tab === 'announcements'} onClick={() => setTab('announcements')} label="Announcements" />
           <TabButton active={tab === 'coaches'} onClick={() => setTab('coaches')} label="Coaches" />
+          <TabButton active={tab === 'studio'} onClick={() => setTab('studio')} label="Studio" />
           <TabButton active={tab === 'signups'} onClick={() => setTab('signups')} label="Signups" />
         </nav>
       </header>
@@ -84,6 +89,7 @@ export default function AdminPanel() {
         {tab === 'challenges' && <ChallengesTab />}
         {tab === 'announcements' && <AnnouncementsTab />}
         {tab === 'coaches' && <CoachesTab />}
+        {tab === 'studio' && <StudioTab />}
         {tab === 'signups' && <SignupsTab />}
       </main>
 
@@ -1475,6 +1481,155 @@ function CoachPhotoCard({ coach, hasAdminPhoto, displayedImage, onChange, onErro
             </button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// STUDIO TAB — admin-managed gallery for the About page Studio
+// section. Upload, list, delete. Order is creation order (newest
+// first) — no reorder UI by design; if Alex wants a specific photo
+// first he can delete + re-upload.
+// ============================================================
+
+function StudioTab() {
+  const [photos, setPhotos] = useState<StudioPhoto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Admin always bypasses Cloudflare's 5-min edge cache so uploads
+  // appear immediately. Public visitors keep using the cached path.
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await getStudioPhotos({ noCache: true });
+      setPhotos(list);
+    } catch {
+      setError('Could not load studio photos. Try refreshing.');
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleFile = async (file: File) => {
+    setError(null);
+    setUploading(true);
+    try {
+      // 1200px max — these display full-width on desktop. Quality stays
+      // at 0.85 default; the hard 800KB cap in compressImage will kick
+      // down to 0.5 for oversized DSLR shots.
+      const result = await compressImage(file, { maxEdge: 1200, quality: 0.85, maxBytes: 780_000 });
+      const res = await uploadStudioPhoto(result.dataUrl);
+      if (!res.ok) {
+        setError(res.error || 'Upload failed.');
+        setUploading(false);
+        return;
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not process image.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Remove this studio photo? Visitors will no longer see it on the About page.')) return;
+    setError(null);
+    const ok = await deleteStudioPhoto(id);
+    if (!ok) setError('Delete failed. Try again.');
+    await load();
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div>
+          <h2 className="font-display font-bold text-2xl mb-1">Studio Photos</h2>
+          <p className="text-white/40 text-sm max-w-2xl">
+            Photos in this gallery cycle on the <span className="text-white/70">About → The Studio</span> section.
+            Newest uploads appear first. If no photos are uploaded, the page falls back to the default studio gallery.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-white/40 text-xs">{photos.length} {photos.length === 1 ? 'photo' : 'photos'}</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+              e.target.value = '';
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="text-xs flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#FF4D2E]/15 border border-[#FF4D2E]/30 text-[#FF4D2E] hover:bg-[#FF4D2E]/25 disabled:opacity-50 transition-colors"
+          >
+            {uploading ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+            {uploading ? 'Uploading…' : 'Upload Photo'}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" /> {error}
+        </p>
+      )}
+
+      {loading && photos.length === 0 && (
+        <div className="text-white/50 text-sm flex items-center gap-2 py-12 justify-center">
+          <Loader2 size={16} className="animate-spin" /> Loading studio photos...
+        </div>
+      )}
+
+      {!loading && photos.length === 0 && (
+        <div className="border border-dashed border-white/10 rounded-2xl p-12 text-center">
+          <ImageIcon size={28} className="mx-auto mb-3 text-white/30" />
+          <p className="text-white/50 text-sm mb-1">No studio photos uploaded yet.</p>
+          <p className="text-white/30 text-xs">
+            The About page is showing the default gallery until you upload here.
+          </p>
+        </div>
+      )}
+
+      {photos.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+          {photos.map((p) => (
+            <StudioPhotoCard key={p.id} photo={p} onDelete={() => handleDelete(p.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StudioPhotoCard({ photo, onDelete }: { photo: StudioPhoto; onDelete: () => void }) {
+  return (
+    <div className="group relative aspect-[4/3] rounded-xl overflow-hidden border border-white/10 bg-white/[0.02]">
+      <img src={photo.dataUrl} alt="" className="w-full h-full object-cover" />
+      {/* Hover overlay with delete button — desktop. On mobile/tap the
+          button is always at 70% opacity so it's reachable without hover. */}
+      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-end justify-end p-2">
+        <button
+          type="button"
+          onClick={onDelete}
+          className="opacity-70 group-hover:opacity-100 text-xs flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-red-500/80 hover:bg-red-500 text-white backdrop-blur-sm transition-all"
+          title="Delete photo"
+        >
+          <Trash2 size={12} />
+          Delete
+        </button>
       </div>
     </div>
   );

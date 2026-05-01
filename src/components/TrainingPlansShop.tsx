@@ -942,14 +942,13 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
               client={clientInfo}
               snapshot={pendingAgreement.snapshot}
               onSigned={(record) => {
+                // Just record the signing here. We do NOT fire onPurchaseComplete
+                // yet — that closes the shop modal, which would unmount the
+                // success view before the user can see "You're all set!".
+                // Instead, the explicit "Continue to Schedule" button below
+                // owns that transition. Either way the agreement is already
+                // saved server-side at this point.
                 setAgreementRecord(record);
-                // Now that the user has signed, fire the upstream callback.
-                // App.tsx uses this to open PostPurchaseBooking. We delayed
-                // it until here so scheduling can't be reached without the
-                // signed agreement on file.
-                if (onPurchaseComplete && selectedPlan && selectedTrainer) {
-                  onPurchaseComplete(selectedPlan, selectedTrainer, clientInfo);
-                }
               }}
             />
           )}
@@ -978,7 +977,20 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
               <p className="text-white/50 text-sm mb-6">
                 Pick your session times next, or close this and pick them later from your account.
               </p>
-              <button onClick={() => { onClose(); resetState(); }} className="btn-primary text-sm">
+              <button
+                onClick={() => {
+                  // Fire the upstream callback that opens PostPurchaseBooking,
+                  // then close + reset. App.tsx's handlePurchaseComplete already
+                  // closes the shop AND opens the scheduler, so resetState here
+                  // is just defensive in case the parent skips the close.
+                  if (onPurchaseComplete && selectedPlan && selectedTrainer) {
+                    onPurchaseComplete(selectedPlan, selectedTrainer, clientInfo);
+                  }
+                  onClose();
+                  resetState();
+                }}
+                className="btn-primary text-sm"
+              >
                 Continue to Schedule
               </button>
             </div>

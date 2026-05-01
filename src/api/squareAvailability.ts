@@ -95,7 +95,6 @@ const FALLBACK_TEAM: TeamMember[] = [
 ];
 
 // Trainerize sync — imported lazily to avoid circular deps
-import { syncNewClient, syncBooking } from '@/api/trainerize';
 
 // ===== BOOKING BUFFER =====
 
@@ -582,8 +581,9 @@ export async function createBooking(
     localStorage.setItem('bookings', JSON.stringify(existing));
     localStorage.removeItem(AVAILABILITY_CACHE_KEY);
 
-    // Sync to Trainerize (fire-and-forget)
-    syncToTrainerize(customerInfo, startAt, duration, teamMemberId);
+    // No browser-side Trainerize sync. The Square `booking.created` webhook
+    // (server-side) already creates the Trainerize appointment. Frontend
+    // proxy access to /api/trainerize/* was removed pre-launch.
 
     return { success: true, bookingId };
   }
@@ -681,67 +681,6 @@ export async function createBooking(
       error: error instanceof Error ? error.message : 'Booking failed',
     };
   }
-}
-
-/**
- * Sync booking to Trainerize — called automatically from createBooking
- * Sends client + booking data so Trainerize calendar and client list stay in sync
- */
-function syncToTrainerize(
-  customerInfo: { name: string; email: string; phone: string; goals?: string },
-  startAt: string,
-  duration: number,
-  teamMemberId: string
-) {
-  const nameParts = customerInfo.name.trim().split(' ');
-  const startDate = new Date(startAt);
-  const isVirtual = (customerInfo.goals || '').includes('[Virtual]');
-  const meetMatch = (customerInfo.goals || '').match(/Meet: (https:\/\/[^\s]+)/);
-
-  // Sync client
-  syncNewClient({
-    email: customerInfo.email,
-    firstName: nameParts[0] || '',
-    lastName: nameParts.slice(1).join(' ') || '',
-    phone: customerInfo.phone,
-    tags: ['website-booking'],
-    notes: customerInfo.goals?.replace(/\[.*?\]/g, '').trim(),
-  });
-
-  // Sync booking.
-  // startAt is the full Square UTC ISO — apiCreateBooking uses it directly so
-  // there's no local→UTC drift. date/time are kept for Zapier webhook consumers
-  // (filled from the user's local clock so "time" reads naturally for humans).
-  syncBooking({
-    clientEmail: customerInfo.email,
-    startAt,
-    date: `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}`,
-    time: formatTime(startDate.getHours(), startDate.getMinutes()),
-    duration,
-    type: isVirtual ? 'virtual' : 'in-studio',
-    coachName: resolveCoachName(teamMemberId),
-    service: `${duration} Min ${isVirtual ? 'Virtual' : 'In-Studio'} Session`,
-    meetLink: meetMatch?.[1],
-  });
-}
-
-/**
- * Resolve team member ID to a human-readable coach name.
- * Checks cached team members first, falls back to known names.
- */
-function resolveCoachName(teamMemberId: string): string {
-  // Check cached team members
-  const raw = localStorage.getItem(TEAM_CACHE_KEY);
-  if (raw) {
-    try {
-      const cache: TeamCache = JSON.parse(raw);
-      const match = cache.members.find(m => m.id === teamMemberId);
-      if (match) return match.name;
-    } catch { /* ignore */ }
-  }
-  // Known fallbacks
-  if (teamMemberId === 'alex-davis' || teamMemberId === 'TMr0PTR22KYH_0QK') return 'Alex Davis';
-  return 'Coach';
 }
 
 /**

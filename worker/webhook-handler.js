@@ -1544,6 +1544,24 @@ export default {
 
       // Allowlist entries: [pattern, allowedMethods...].
       // ANYTHING that doesn't match exactly here will 403.
+      // SECURITY MODEL — defense-in-depth, NOT trust-the-Origin.
+      //
+      // Origin/Referer headers are spoofable (curl, server-to-server, headless
+      // browser). Treat any path exposed here as PUBLIC. The allowlist is a
+      // surface-area minimizer — only entries strictly required by the browser
+      // bundle, where the worst-case outcome of a forged request is acceptable.
+      //
+      // Anything that mutates state for ANOTHER user, enumerates other users,
+      // or is gated by payment/admin authentication MUST live behind a
+      // dedicated worker endpoint with its own authorization (paymentId
+      // verification, admin token, etc.) — NEVER through this proxy.
+      //
+      // Pre-launch audit (2026-05-01) removed: customers/search (Square),
+      // user/find, user/setProfile, user/add, user/addTag, trainerNote/add,
+      // program/copyToUser, program/getList, appointment/add,
+      // appointment/getAppointmentTypeList (Trainerize). Forged-Origin curl
+      // to those previously reached production data; replaced with
+      // /credit-grant (server-side provisioning) and existing webhook paths.
       const SQUARE_ALLOW = [
         // Bookings — POST removed Phase B (now via dedicated /book-session
         // and /book-consultation endpoints with credit gating). GET stays
@@ -1559,40 +1577,33 @@ export default {
         [/^catalog\/list$/,                         ['GET']],
         [/^catalog\/object\/[A-Za-z0-9_-]+$/,       ['GET']],
         // Customers — POST only on /customers (create), no GET (would enumerate)
+        // /customers/search REMOVED 2026-05-01: the frontend never used it,
+        // and forged Origin previously enumerated the full customer list.
         [/^customers$/,                             ['POST']],
         [/^customers\/[A-Za-z0-9_-]+$/,             ['GET', 'PUT']],
-        [/^customers\/search$/,                     ['POST']],
-        // Locations — REMOVED. The frontend doesn't read /locations; LOCATION_ID
-        // is hardcoded in the worker. Audit C-01 reproducer: spoofed Origin
-        // returned 200 + merchant_id from /locations. Closed by removing the
-        // entry entirely. Server-to-server uses Square's API directly with the
-        // hardcoded LOCATION_ID.
+        // Locations — REMOVED (audit C-01).
         // Payments — POST one-off; GET single by ID for receipt verification
         [/^payments$/,                              ['POST']],
         [/^payments\/[A-Za-z0-9_-]+$/,              ['GET']],
         // Subscriptions
-        //   POST /subscriptions          — create
-        //   GET  /subscriptions/{id}     — read
-        //   POST /subscriptions/{id}/cancel | /pause | /resume — lifecycle
-        // (POST on /subscriptions/{id} bare was a stale mismatch — Square's
-        //  UpdateSubscription is PUT, not POST, and no UI was using it.)
         [/^subscriptions$/,                                       ['POST']],
         [/^subscriptions\/[A-Za-z0-9_-]+$/,                       ['GET']],
         [/^subscriptions\/[A-Za-z0-9_-]+\/(cancel|pause|resume)$/,['POST']],
-        // Team members (coach picker uses search; never list everyone)
+        // Team members — search only. Returns publicly-bookable trainers
+        // (the same list the homepage shows); accepted residual exposure.
         [/^team-members\/search$/,                  ['POST']],
       ];
-      const TRAINERIZE_ALLOW = [
-        [/^appointment\/add$/,         ['POST']],
-        [/^appointment\/getAppointmentTypeList$/, ['POST']], // admin-only via /admin/* but allow for diagnostics
-        [/^program\/copyToUser$/,      ['POST']],
-        [/^program\/getList$/,         ['POST']],
-        [/^trainerNote\/add$/,         ['POST']],
-        [/^user\/add$/,                ['POST']],
-        [/^user\/addTag$/,             ['POST']],
-        [/^user\/find$/,               ['POST']],
-        [/^user\/setProfile$/,         ['POST']],
-      ];
+      // TRAINERIZE_ALLOW — empty after pre-launch lockdown.
+      //
+      // All Trainerize writes/reads now flow through dedicated worker
+      // endpoints (/credit-grant for purchase provisioning, Square webhooks
+      // for booking sync, /admin/* for coach tools). Frontend never directly
+      // calls api.trainerize.com via this proxy.
+      //
+      // Leaving the array in place (vs. removing the proxy block) so any
+      // accidental future addition is forced to think about the auth model
+      // explicitly. The allowed-checker still 403s every Trainerize subpath.
+      const TRAINERIZE_ALLOW = [];
       const allowlist = service === 'square' ? SQUARE_ALLOW : TRAINERIZE_ALLOW;
 
       // OPTIONS preflights are always allowed (handled by CORS earlier).
@@ -2198,6 +2209,16 @@ export default {
       // the customer at invoice time.
       const squareCustomerId = typeof body.squareCustomerId === 'string' ? body.squareCustomerId.trim().slice(0, 80) : '';
       const squareCardId = typeof body.squareCardId === 'string' ? body.squareCardId.trim().slice(0, 80) : '';
+      // Optional — name + phone for first-time-purchaser provisioning.
+      // When present, an empty Trainerize match triggers an inline user/add
+      // here (server-side, payment-verified) instead of just deferring until
+      // their first booking. Replaces the old browser-side
+      // `provisionNewClientWithPlan` call which hit /api/trainerize/user/add
+      // through the proxy — that proxy entry was removed pre-launch because
+      // forged Origin reached it. Trimmed length-limits keep the body small.
+      const firstName = typeof body.firstName === 'string' ? body.firstName.trim().slice(0, 80) : '';
+      const lastName  = typeof body.lastName === 'string'  ? body.lastName.trim().slice(0, 80)  : '';
+      const phone     = typeof body.phone === 'string'     ? body.phone.trim().slice(0, 40)     : '';
 
       if (!paymentId || !email) {
         return new Response(JSON.stringify({ error: 'paymentId and email are required' }), {
@@ -2352,11 +2373,57 @@ export default {
         });
       }
       let userId = await findTrainerizeUserByEmail(email, env);
+
+      // First-time-purchaser inline provisioning. Replaces the deleted
+      // browser-side `provisionNewClientWithPlan` flow. Only runs when the
+      // caller supplied a first name; without one we can't sensibly create
+      // a Trainerize record. Failure here is non-fatal — we fall through to
+      // the existing deferred path so the customer's payment is still
+      // recorded and the daily people-sync cron can reconcile.
+      let createdInline = false;
+      if (!userId && firstName) {
+        try {
+          const addResp = await trainerizePost('/user/add', {
+            user: {
+              firstName,
+              lastName,
+              fullName: `${firstName} ${lastName}`.trim() || email,
+              email,
+              phone,
+              type: 'client',
+              trainerID: getTrainerizeTrainerId(env),
+            },
+            sendMail: true,   // Trainerize sends activation invite to client
+            isSetup: false,
+          }, env);
+          if (addResp.ok) {
+            const addData = await addResp.json().catch(() => ({}));
+            const newId = addData.userID || addData.id || addData.result?.userID || null;
+            if (newId) {
+              userId = newId;
+              createdInline = true;
+              await logEvent('credit', `credit-grant: created Trainerize user ${userId} for ${email}`, {
+                paymentId, userId, planName,
+              }, env);
+            }
+          } else {
+            const errText = await addResp.text().catch(() => '');
+            await logEvent('error', 'credit-grant-tz-add-failed', {
+              paymentId, email, status: addResp.status, err: errText.slice(0, 200),
+            }, env);
+          }
+        } catch (e) {
+          await logEvent('error', 'credit-grant-tz-add-threw', {
+            paymentId, email, err: e?.message,
+          }, env);
+        }
+      }
+
       if (!userId) {
-        // Client isn't in Trainerize yet (first-time purchaser). Log and
-        // return accepted — when they next book via Square, the booking
-        // webhook will create their Trainerize user and the next cron
-        // pass can reconcile.
+        // Client isn't in Trainerize yet (first-time purchaser without a
+        // name supplied, OR user/add 5xx'd). Log and return accepted — the
+        // daily people-sync cron will create their Trainerize user the next
+        // time it runs and the credits will get applied.
         await logEvent('credit', 'credit-grant-deferred-no-tz-user', {
           paymentId, email, sessions, planName,
         }, env);
@@ -2443,8 +2510,49 @@ export default {
           console.error('credit-grant Trainerize tag best-effort failed:', e);
         }
 
+        // Best-effort program assignment. Replaces the deleted browser-side
+        // `apiAssignProgram` flow which hit /api/trainerize/program/getList +
+        // /program/copyToUser through the proxy (both removed pre-launch).
+        // Match logic mirrors the old client-side: case-insensitive substring
+        // on the planName's leading "before-the-dash" segment. Failure here
+        // is silent — the coach can still assign manually in Trainerize, and
+        // credits + activation invite have already shipped to the client.
+        let programAssigned = false;
+        try {
+          const programsResp = await trainerizePost('/program/getList', {
+            type: '1', start: 0, count: 100,
+          }, env);
+          if (programsResp.ok) {
+            const programsData = await programsResp.json().catch(() => ({}));
+            const programs = programsData.programs || programsData.result || [];
+            const needle = String(planName || '').toLowerCase().split(' - ')[0].trim();
+            const match = Array.isArray(programs) && needle
+              ? programs.find(p => String(p?.name || '').toLowerCase().includes(needle))
+              : null;
+            const programId = match?.id ?? match?.programID ?? null;
+            if (programId) {
+              const copyResp = await trainerizePost('/program/copyToUser', {
+                id: programId,
+                userID: userId,
+                startDate: new Date().toISOString().split('T')[0],
+                forceMerge: false,
+              }, env);
+              if (copyResp.ok) {
+                programAssigned = true;
+                await logEvent('credit', `credit-grant: program ${programId} assigned to ${userId}`, {
+                  paymentId, userId, programId, planName,
+                }, env);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('credit-grant program-copy best-effort failed:', e);
+        }
+
         return new Response(JSON.stringify({
-          ok: true, userId, remaining: creditData.remaining, total: creditData.total,
+          ok: true, userId,
+          remaining: creditData.remaining, total: creditData.total,
+          createdInline, programAssigned,
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } finally {
         try { await env.CHALLENGES_KV.delete(lockKey); } catch { /* best-effort */ }

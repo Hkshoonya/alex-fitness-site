@@ -9,7 +9,6 @@ import {
 } from '@/data/trainingPlans';
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus, getLastCatalogError } from '@/api/squareCatalog';
 import { initializeAllPaymentMethods, createCardPayment, storePurchase, validateCoupon, type PaymentMethods } from '@/api/squarePayments';
-import { provisionNewClientWithPlan } from '@/api/trainerize';
 import { getTeamMembers, type TeamMember } from '@/api/squareAvailability';
 import { asset } from '@/lib/assets';
 import MemberAgreement, { type MemberAgreementSnapshot, type SignedAgreementRecord } from '@/components/MemberAgreement';
@@ -427,12 +426,17 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         couponDiscountAmount: appliedCoupon ? appliedCoupon.discountAmountCents / 100 : undefined,
       });
 
-      // Register the purchase in worker KV. We send only paymentId + email
-      // + (optionally) the saved card IDs. The worker re-fetches the Square
-      // payment, parses the plan claim from its note field, and re-derives
-      // sessions from the same authoritative catalog used at /checkout/charge.
+      // Register the purchase in worker KV AND provision the Trainerize
+      // account inline. We send paymentId + email + saved-card IDs + the
+      // client's name/phone — the worker re-verifies the Square payment,
+      // re-derives sessions from the catalog, then (server-side) creates
+      // the Trainerize user, sends the activation invite, and assigns the
+      // matching program. The browser no longer talks to /api/trainerize/*
+      // directly (the proxy entries were removed pre-launch — forged Origin
+      // previously reached user/add and program/copyToUser).
       // Fire-and-forget — purchase already succeeded; KV reconciles on retry.
       if (WORKER_URL && paymentId && !paymentId.startsWith('mock_')) {
+        const nameParts = clientInfo.name.trim().split(' ');
         fetch(`${WORKER_URL}/credit-grant`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -441,6 +445,9 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
             email: clientInfo.email,
             squareCustomerId,
             squareCardId,
+            firstName: nameParts[0] || '',
+            lastName: nameParts.slice(1).join(' ') || '',
+            phone: clientInfo.phone || '',
           }),
         }).catch(e => console.error('credit-grant call failed:', e));
       }
@@ -472,35 +479,10 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
 
       setStep('success');
 
-      // Provision client in Trainerize (fire-and-forget)
-      // Creates client account → generates ID + password → sends activation email → assigns plan
-      const nameParts = clientInfo.name.trim().split(' ');
-      provisionNewClientWithPlan(
-        {
-          email: clientInfo.email,
-          firstName: nameParts[0] || '',
-          lastName: nameParts.slice(1).join(' ') || '',
-          phone: clientInfo.phone,
-          tags: ['purchased', selectedPlan.category],
-        },
-        selectedPlan.name,
-        {
-          clientEmail: clientInfo.email,
-          amount: serverAmount,
-          currency: 'USD',
-          planName: serverPlanName,
-          paymentId,
-          date: new Date().toISOString(),
-        },
-        {
-          clientEmail: clientInfo.email,
-          planName: serverPlanName,
-          totalSessions: serverSessions,
-          sessionsUsed: 0,
-          sessionsRemaining: serverSessions,
-          validUntil: serverValidUntil,
-        }
-      );
+      // Trainerize provisioning happens server-side inside /credit-grant
+      // (the fire-and-forget POST above). The worker creates the user,
+      // sends the activation invite via Trainerize's sendMail flag, and
+      // assigns the matching program — payment-verified, no proxy exposure.
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Payment failed');
     } finally {

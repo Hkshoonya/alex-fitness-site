@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Shield, LogOut, Plus, X, Check, Trash2, Pencil, Calendar, Users, Tag,
   Mail, Phone, ChevronDown, Loader2, AlertCircle, Award, ExternalLink,
-  Megaphone, Upload, Image as ImageIcon,
+  Megaphone, Upload, Image as ImageIcon, Lightbulb,
 } from 'lucide-react';
 import {
   isAdminTokenFresh, verifyAdminToken, saveAdminSession, clearAdminSession,
@@ -131,6 +131,63 @@ function TabButton({ active, onClick, label }: { active: boolean; onClick: () =>
 }
 
 // ============================================================
+// ADMIN TIPS BOX — consistent guidance card shown at the top of
+// each tab. Specs render as a small grid (aspect / size / format
+// labels), tips render as bullet points. Both blocks optional so
+// the same component fits tabs that need only one.
+// ============================================================
+
+function AdminTipsBox({
+  specs,
+  tips,
+  examples,
+}: {
+  specs?: Array<{ label: string; value: string }>;
+  tips?: string[];
+  examples?: string[];
+}) {
+  if (!specs && !tips && !examples) return null;
+  return (
+    <div className="bg-[#FF4D2E]/[0.06] border border-[#FF4D2E]/20 rounded-xl p-4 mb-6">
+      <div className="flex items-center gap-2 mb-3">
+        <Lightbulb size={14} className="text-[#FF4D2E]" />
+        <p className="text-[#FF4D2E] text-xs uppercase tracking-wider font-semibold">Best Practices</p>
+      </div>
+      {specs && specs.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
+          {specs.map((s, i) => (
+            <div key={i}>
+              <p className="text-white/40 text-[10px] uppercase tracking-wider mb-0.5">{s.label}</p>
+              <p className="text-white/85 text-sm font-medium">{s.value}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {tips && tips.length > 0 && (
+        <ul className="space-y-1.5 text-white/65 text-sm">
+          {tips.map((t, i) => (
+            <li key={i} className="flex gap-2">
+              <span className="text-[#FF4D2E]/70 mt-0.5">•</span>
+              <span>{t}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {examples && examples.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-white/5">
+          <p className="text-white/40 text-[10px] uppercase tracking-wider mb-1.5">Caption examples</p>
+          <ul className="space-y-1 text-white/55 text-xs italic">
+            {examples.map((e, i) => (
+              <li key={i}>"{e}"</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // LOGIN
 // ============================================================
 
@@ -244,6 +301,16 @@ function ChallengesTab() {
           </button>
         )}
       </div>
+
+      <AdminTipsBox
+        tips={[
+          'Free or paid — toggle the price on/off. Paid challenges collect signups and require manual program assignment.',
+          'Set spots wisely. Once full, signups close automatically and the challenge shows as "FILLED" on the public site.',
+          'Dates are inclusive — set end date as the LAST day of the challenge, not the day after.',
+          'Tags help visitors find the right challenge (e.g. "fat-loss", "strength", "beginners-welcome").',
+          'To remove a challenge mid-cycle, edit it and uncheck "Active" rather than deleting (preserves signup history).',
+        ]}
+      />
 
       {showAddForm && (
         <ChallengeForm
@@ -550,6 +617,15 @@ function SignupsTab() {
         <p className="text-white/50 text-sm">Everyone who joined a challenge, with client status and 1-click Trainerize program assignment.</p>
       </div>
 
+      <AdminTipsBox
+        tips={[
+          'Status badges: NEW = signed up but not yet a Trainerize client. EXISTING = already in Trainerize. Filter or scan accordingly.',
+          'Click "Assign Program" on any signup → pick a master program → Trainerize creates a copy linked to that user. Takes ~5 seconds.',
+          'NEW signups need a Trainerize client account first. Create one in Trainerize, then come back — the row will flip to EXISTING.',
+          'Email + phone are clickable for quick outreach.',
+        ]}
+      />
+
       {loadingChallenges && <div className="text-white/50 text-sm flex items-center gap-2 py-12 justify-center"><Loader2 size={16} className="animate-spin" /> Loading challenges...</div>}
 
       {!loadingChallenges && challenges.length === 0 && (
@@ -835,6 +911,16 @@ function AnnouncementsTab() {
           </button>
         )}
       </div>
+
+      <AdminTipsBox
+        tips={[
+          'Style: BANNER = floating cards over the hero (high impact, keep ≤2 active). CARD = inline section after Value (more detail, good for promos).',
+          'Priority HIGH adds a subtle pulse animation + orange shadow — use sparingly so it stays attention-grabbing.',
+          'Schedule with Starts/Ends dates. Past announcements auto-hide; future ones queue up. No need to remember to disable.',
+          'CTA Target presets: "View Plans" / "Book Consultation" / "Sign In" cover the common cases. Use "Custom" to point at any URL or hash route.',
+          'Discount codes are just text labels — they don\'t enforce anything; Square Checkout still applies the actual code.',
+        ]}
+      />
 
       {showAddForm && (
         <AnnouncementForm
@@ -1352,6 +1438,20 @@ function CoachesTab() {
         </button>
       </div>
 
+      <AdminTipsBox
+        specs={[
+          { label: 'Aspect', value: 'Square (1:1)' },
+          { label: 'Min size', value: '600 × 600 px' },
+          { label: 'Format', value: 'JPG, PNG, WebP' },
+        ]}
+        tips={[
+          'Center the face — coach photos display as circular avatars (Gmail/Slack style).',
+          'Bright, even lighting. Solid or gym-themed background reads cleanly at small sizes.',
+          'Photos compress automatically to ~150KB before upload — no need to pre-resize.',
+          'No upload? Coaches show with a clean orange-tinted initials avatar (auto-generated).',
+        ]}
+      />
+
       {error && (
         <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
           <AlertCircle size={16} className="shrink-0 mt-0.5" /> {error}
@@ -1593,6 +1693,20 @@ function StudioTab() {
         </div>
       </div>
 
+      <AdminTipsBox
+        specs={[
+          { label: 'Aspect', value: 'Landscape 16:9' },
+          { label: 'Min size', value: '1200 × 675 px' },
+          { label: 'Format', value: 'JPG, PNG, WebP' },
+        ]}
+        tips={[
+          'Wide angles read best — shoot from a corner showing equipment + space.',
+          'Bright, even lighting. Avoid harsh shadows or extreme contrast.',
+          'Mix variety: weight floor, dojo / open mat, cardio area, recovery zone.',
+          'Photos compress automatically to ~150KB before upload — no need to pre-resize.',
+        ]}
+      />
+
       {error && (
         <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
           <AlertCircle size={16} className="shrink-0 mt-0.5" /> {error}
@@ -1764,6 +1878,26 @@ function StoriesTab() {
           )}
         </div>
       </div>
+
+      <AdminTipsBox
+        specs={[
+          { label: 'Aspect', value: 'Portrait 4:5' },
+          { label: 'Min size', value: '1000 × 1250 px' },
+          { label: 'Format', value: 'JPG, PNG, WebP' },
+        ]}
+        tips={[
+          'Portrait crop works best — the homepage container is 4:5. Square or taller is fine; landscape gets letterboxed.',
+          'Caption is your storytelling hook. Lead with the result, then the name.',
+          'Use first name + last initial (privacy-friendly, still feels personal).',
+          'Captions are capped at 140 characters — short and punchy beats long.',
+        ]}
+        examples={[
+          'Lost 35 lbs in 12 weeks. — Sarah M.',
+          "Dropped 4 dress sizes for the wedding. — Jenna K.",
+          "PR'd squat at 405. — Mike R.",
+          'From couch to first 5K in 8 weeks. — David L.',
+        ]}
+      />
 
       {error && (
         <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
@@ -1962,6 +2096,20 @@ function TransformationsTab() {
           </button>
         </div>
       </div>
+
+      <AdminTipsBox
+        specs={[
+          { label: 'Aspect', value: 'Side-by-side composite' },
+          { label: 'Min width', value: '1400 px' },
+          { label: 'Format', value: 'JPG, PNG, WebP' },
+        ]}
+        tips={[
+          'Build the before/after as a single image (Canva, Photoshop, or any photo editor with split layout).',
+          'Same lighting, pose, and angle for both halves — the comparison is the story.',
+          "Keep the subject centered. The homepage carousel uses object-contain — nothing's cropped.",
+          'Get written client consent before posting transformations publicly.',
+        ]}
+      />
 
       {error && (
         <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">

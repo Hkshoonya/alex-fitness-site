@@ -120,20 +120,31 @@ const PLAN_CREDITS = {
 // client-supplied amounts or session counts; that was the C-02 exploit fixed
 // here (browser could display $2880 but charge $720 base).
 //
+// PLAN_CATALOG defines the SHAPE of each plan (frequencies, sessions
+// granted, plan duration). The PRICES below are FALLBACKS — at charge
+// time the worker fetches Square's authoritative price by squareItemId
+// + variation ordinal (see resolveSquareItemPrice). Square is the
+// single source of truth; this hardcoded copy only fires when Square
+// is unreachable, so checkout never fully breaks during a Square
+// outage. Keep the fallbacks loosely in sync with Square as a defense
+// against drift during outages.
+//
 // Mirror of src/data/trainingPlans.ts. If you change one, change both.
 const PLAN_CATALOG = {
   '4week-30min': {
     name: '4 Week Plan - 30 Min Sessions', duration: 30, planWeeks: 4,
+    squareItemId: '4LBY7LMMLFNTQ7JBT5JB77UB',
     frequency: [
-      { perWeek: 1, totalSessions: 4,  totalPrice: 160 },
-      { perWeek: 2, totalSessions: 8,  totalPrice: 320 },
-      { perWeek: 3, totalSessions: 12, totalPrice: 480 },
-      { perWeek: 4, totalSessions: 16, totalPrice: 640 },
-      { perWeek: 5, totalSessions: 20, totalPrice: 800 },
+      { perWeek: 1, totalSessions: 4,  totalPrice: 180 },
+      { perWeek: 2, totalSessions: 8,  totalPrice: 360 },
+      { perWeek: 3, totalSessions: 12, totalPrice: 540 },
+      { perWeek: 4, totalSessions: 16, totalPrice: 720 },
+      { perWeek: 5, totalSessions: 20, totalPrice: 900 },
     ],
   },
   '4week-60min': {
     name: '4 Week Plan - 60 Min Sessions', duration: 60, planWeeks: 4,
+    squareItemId: 'EJNN7ZDCWSTFDZ3E3YAE26FM',
     frequency: [
       { perWeek: 1, totalSessions: 4,  totalPrice: 280 },
       { perWeek: 2, totalSessions: 8,  totalPrice: 560 },
@@ -144,6 +155,7 @@ const PLAN_CATALOG = {
   },
   '4week-90min': {
     name: '4 Week Plan - 90 Min Sessions', duration: 90, planWeeks: 4,
+    squareItemId: 'QXPJJDXCLMMON2Y54MMBU4H4',
     frequency: [
       { perWeek: 1, totalSessions: 4,  totalPrice: 400 },
       { perWeek: 2, totalSessions: 8,  totalPrice: 800 },
@@ -154,6 +166,7 @@ const PLAN_CATALOG = {
   },
   '12week-30min': {
     name: '12 Week Plan - 30 Min Sessions', duration: 30, planWeeks: 12,
+    squareItemId: 'JDIHBQ3BBI3GIAQXP7CA7CPL',
     frequency: [
       { perWeek: 1, totalSessions: 12, totalPrice: 420 },
       { perWeek: 2, totalSessions: 24, totalPrice: 840 },
@@ -164,6 +177,7 @@ const PLAN_CATALOG = {
   },
   '12week-60min': {
     name: '12 Week Plan - 60 Min Sessions', duration: 60, planWeeks: 12,
+    squareItemId: 'TNXGQIAK2O7TDVHFO6LJ27BR',
     frequency: [
       { perWeek: 1, totalSessions: 12, totalPrice: 720 },
       { perWeek: 2, totalSessions: 24, totalPrice: 1440 },
@@ -174,6 +188,7 @@ const PLAN_CATALOG = {
   },
   '12week-90min': {
     name: '12 Week Plan - 90 Min Sessions', duration: 90, planWeeks: 12,
+    squareItemId: 'Q2E6JC7H4QDUO6AKOBKOR2AJ',
     frequency: [
       { perWeek: 1, totalSessions: 12, totalPrice: 1080 },
       { perWeek: 2, totalSessions: 24, totalPrice: 2160 },
@@ -187,15 +202,18 @@ const PLAN_CATALOG = {
   // /checkout/charge for the card-on-file save, but no Trainerize credits flow.
   'app-only': {
     name: 'Fitness App (No Coaching)', duration: 0, planWeeks: 4,
-    flatPrice: 10, sessionsGranted: 0,
+    squareItemId: 'LGZJ2MDG22SJNBDBTCI66ASJ',
+    flatPrice: 15, sessionsGranted: 0,
   },
   'online-monthly': {
     name: 'Custom Online Training - Monthly', duration: 0, planWeeks: 4,
-    flatPrice: 100, sessionsGranted: 0,
+    squareItemId: 'OGIRJ5JEALSEZW2R57WLFLAI',
+    flatPrice: 150, sessionsGranted: 0,
   },
   'online-3month': {
     name: 'Custom Online Training - 3 Months', duration: 0, planWeeks: 12,
-    flatPrice: 250, sessionsGranted: 0,
+    squareItemId: '2QPCQRDSC5QD3UPRCG5TFE7U',
+    flatPrice: 300, sessionsGranted: 0,
   },
 };
 
@@ -321,14 +339,70 @@ async function resolveCoupon(env, couponCode, planId, baseAmountCents) {
   };
 }
 
+// ===== SQUARE CATALOG ITEM PRICE LOOKUP =====
+//
+// Square is the authoritative source for plan prices. We fetch the full
+// ITEM catalog (cached 5 min in module memory) and look up the variation
+// price by `ordinal` — Square's per-variation index, which lines up
+// 1:1 with the frontend's `frequencyIndex`.
+//
+// If Square is unreachable or the item/variation is missing, callers
+// fall back to PLAN_CATALOG.totalPrice / .flatPrice so checkout never
+// fully breaks during a Square outage. Hardcoded fallbacks are kept
+// loosely in sync with Square as defense in depth.
+
+let _itemsCache = null;
+let _itemsCacheAt = 0;
+const ITEMS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function getActiveCatalogItems(env) {
+  const now = Date.now();
+  if (_itemsCache && (now - _itemsCacheAt) < ITEMS_CACHE_TTL_MS) {
+    return _itemsCache;
+  }
+  try {
+    const resp = await fetch(`${getSquareApiBase(env)}/catalog/list?types=ITEM`, {
+      headers: getSquareHeaders(env),
+    });
+    if (!resp.ok) return _itemsCache || [];
+    const data = await resp.json();
+    const objects = (data.objects || []).filter(o => o.type === 'ITEM' && !o.is_deleted);
+    _itemsCache = objects;
+    _itemsCacheAt = now;
+    return objects;
+  } catch {
+    return _itemsCache || [];
+  }
+}
+
+// Returns the variation price (cents) for a Square item at a given ordinal,
+// or null if the item / variation isn't found or has no price. Sorts by
+// ordinal so the index is stable regardless of catalog mutation order.
+async function getSquareItemPriceCents(env, squareItemId, ordinal) {
+  if (!squareItemId) return null;
+  const items = await getActiveCatalogItems(env);
+  const item = items.find(o => o.id === squareItemId);
+  if (!item) return null;
+  const variations = (item.item_data?.variations || []).slice();
+  variations.sort((a, b) =>
+    (a.item_variation_data?.ordinal ?? 99) - (b.item_variation_data?.ordinal ?? 99));
+  const v = variations[ordinal];
+  const cents = Number(v?.item_variation_data?.price_money?.amount);
+  return Number.isFinite(cents) && cents > 0 ? cents : null;
+}
+
 /**
  * Resolve a {planId, frequencyIndex, trainerId} tuple to the authoritative
  * amount, session count, and metadata. Returns { ok: false, error } for any
- * unknown ID or out-of-range frequency. Used by /checkout/charge and
- * /credit-grant — both endpoints derive money/credits from the same source so
- * they cannot disagree.
+ * unknown ID or out-of-range frequency. Used by /checkout/charge,
+ * /checkout/validate-coupon, and /credit-grant — all derive money/credits
+ * from the same source so they cannot disagree.
+ *
+ * Async: fetches the live Square price by squareItemId + variation ordinal.
+ * Falls back to PLAN_CATALOG hardcoded `totalPrice` / `flatPrice` if Square
+ * is unreachable. The trainer multiplier still applies on top.
  */
-function resolvePurchase({ planId, frequencyIndex, trainerId }) {
+async function resolvePurchase({ planId, frequencyIndex, trainerId }, env) {
   const plan = PLAN_CATALOG[planId];
   if (!plan) return { ok: false, error: `Unknown planId: ${planId}` };
   const multiplier = TRAINER_MULTIPLIERS[trainerId];
@@ -338,13 +412,14 @@ function resolvePurchase({ planId, frequencyIndex, trainerId }) {
 
   // Flat-price plans (app-only, online-*) ignore frequencyIndex and trainer.
   if (plan.flatPrice !== undefined) {
+    const liveCents = env ? await getSquareItemPriceCents(env, plan.squareItemId, 0) : null;
     return {
       ok: true,
       planName: plan.name,
       duration: plan.duration,
       planWeeks: plan.planWeeks,
       sessions: plan.sessionsGranted,
-      amountCents: plan.flatPrice * 100,
+      amountCents: liveCents != null ? liveCents : Math.round(plan.flatPrice * 100),
       isFlat: true,
     };
   }
@@ -358,13 +433,15 @@ function resolvePurchase({ planId, frequencyIndex, trainerId }) {
     };
   }
   const freq = plan.frequency[idx];
+  const liveCents = env ? await getSquareItemPriceCents(env, plan.squareItemId, idx) : null;
+  const baseCents = liveCents != null ? liveCents : Math.round(freq.totalPrice * 100);
   return {
     ok: true,
     planName: plan.name,
     duration: plan.duration,
     planWeeks: plan.planWeeks,
     sessions: freq.totalSessions,
-    amountCents: Math.round(freq.totalPrice * multiplier * 100),
+    amountCents: Math.round(baseCents * multiplier),
     isFlat: false,
   };
 }
@@ -1679,8 +1756,9 @@ export default {
       }
 
       // Resolve price + sessions from the authoritative catalog. NEVER trust
-      // a client-supplied amount.
-      const purchase = resolvePurchase({ planId, frequencyIndex, trainerId });
+      // a client-supplied amount. Live Square price wins; PLAN_CATALOG is
+      // fallback if Square is unreachable.
+      const purchase = await resolvePurchase({ planId, frequencyIndex, trainerId }, env);
       if (!purchase.ok) {
         await logEvent('error', 'checkout-resolve-failed', {
           email, planId, frequencyIndex, trainerId, err: purchase.error,
@@ -1882,7 +1960,7 @@ export default {
       }
       // Resolve plan price first (uniform 'alex1' pricing slot — coupon
       // preview doesn't need the actual coach selection).
-      const purchase = resolvePurchase({ planId, frequencyIndex, trainerId: 'alex1' });
+      const purchase = await resolvePurchase({ planId, frequencyIndex, trainerId: 'alex1' }, env);
       if (!purchase.ok) {
         return new Response(JSON.stringify({ valid: false, error: purchase.error }), {
           status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -2019,11 +2097,11 @@ export default {
       // Re-derive the authoritative amount + sessions from the catalog using
       // the planId baked into the payment note. This is the C-02 fix: the
       // session count comes from server-side data, NOT from the request body.
-      const purchase = resolvePurchase({
+      const purchase = await resolvePurchase({
         planId: claim.planId,
         frequencyIndex: claim.frequencyIndex,
         trainerId: claim.trainerId,
-      });
+      }, env);
       if (!purchase.ok) {
         await logEvent('error', 'credit-grant-resolve-failed', { paymentId, email, claim, err: purchase.error }, env);
         return new Response(JSON.stringify({ error: `Could not resolve plan: ${purchase.error}` }), {

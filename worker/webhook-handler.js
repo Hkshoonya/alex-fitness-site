@@ -3149,6 +3149,105 @@ export default {
       });
     }
 
+    // ===== CLIENT SUCCESS PHOTOS API =====
+    // GET /client-photos — public, returns [{ id, dataUrl, caption?, createdAt }, ...]
+    // POST /admin/client-photo — admin, body { dataUrl, caption? }
+    // DELETE /admin/client-photo/:id — admin
+
+    if (url.pathname === '/client-photos' && request.method === 'GET') {
+      if (!await checkRateLimit(request, 'client-photos-get', 240, env)) {
+        return new Response('Too many requests', { status: 429, headers: corsHeaders });
+      }
+      const photos = await getAllClientPhotos(env);
+      return new Response(JSON.stringify(photos), {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=300',
+        },
+      });
+    }
+
+    if (url.pathname === '/admin/client-photo' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      let data;
+      try { data = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const dataUrl = String(data?.dataUrl || '');
+      const caption = String(data?.caption || '').trim();
+      if (!CLIENT_PHOTO_PREFIX_RE.test(dataUrl)) {
+        return new Response(JSON.stringify({ error: 'dataUrl must be a base64 image (jpeg/png/webp)' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (dataUrl.length > MAX_CLIENT_PHOTO_BYTES) {
+        return new Response(JSON.stringify({
+          error: `Image too large (${Math.round(dataUrl.length / 1024)}KB). Max ${Math.round(MAX_CLIENT_PHOTO_BYTES / 1024)}KB after compression.`,
+        }), { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (caption.length > MAX_CLIENT_PHOTO_CAPTION) {
+        return new Response(JSON.stringify({
+          error: `Caption too long (${caption.length} chars). Max ${MAX_CLIENT_PHOTO_CAPTION}.`,
+        }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const photo = {
+        id: `cp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        dataUrl,
+        caption: caption || undefined,
+        createdAt: new Date().toISOString(),
+      };
+      const lock = await withLock('lock:client-photos-write', 15, env, () => addClientPhoto(photo, env));
+      if (!lock.ok) {
+        return new Response(JSON.stringify({ error: 'Client photos are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (lock.value?.error) {
+        return new Response(JSON.stringify({ error: lock.value.error }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(photo), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname.startsWith('/admin/client-photo/') && request.method === 'DELETE') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const id = url.pathname.split('/admin/client-photo/')[1];
+      if (!id) {
+        return new Response(JSON.stringify({ error: 'id required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const delLock = await withLock('lock:client-photos-write', 10, env, () => removeClientPhoto(id, env));
+      if (!delLock.ok) {
+        return new Response(JSON.stringify({ error: 'Client photos are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ deleted: id }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== ADMIN: list Trainerize appointment types =====
     // GET /admin/trainerize-appointment-types — returns types available to
     // this API key so Alex can pick the in-person ID and set
@@ -6313,6 +6412,50 @@ async function removeStudioPhoto(id, env) {
   const filtered = all.filter(p => p.id !== id);
   if (filtered.length === all.length) return false;
   await kvPut('studio-photos:list', JSON.stringify(filtered), {}, env);
+  return true;
+}
+
+// ============================================================
+// CLIENT SUCCESS PHOTOS — admin-curated stories above testimonials.
+// Each record carries an optional caption (≤140 chars) since these
+// images are storytelling, not just decoration. Storage mirrors
+// studio photos: single KV array, newest first.
+// ============================================================
+
+const MAX_CLIENT_PHOTO_BYTES = 800_000;
+const MAX_CLIENT_PHOTOS = 30;
+const MAX_CLIENT_PHOTO_CAPTION = 140;
+const CLIENT_PHOTO_PREFIX_RE = /^data:image\/(jpeg|png|webp);base64,/;
+
+async function getAllClientPhotos(env) {
+  if (!env.CHALLENGES_KV) return [];
+  try {
+    const raw = await kvGet('client-photos:list', env);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addClientPhoto(photo, env) {
+  if (!env.CHALLENGES_KV) return { error: 'Storage unavailable' };
+  const all = await getAllClientPhotos(env);
+  if (all.length >= MAX_CLIENT_PHOTOS) {
+    return { error: `Limit ${MAX_CLIENT_PHOTOS} stories reached. Delete one first.` };
+  }
+  all.unshift(photo);
+  await kvPut('client-photos:list', JSON.stringify(all), {}, env);
+  return { ok: true, photo };
+}
+
+async function removeClientPhoto(id, env) {
+  if (!env.CHALLENGES_KV) return false;
+  const all = await getAllClientPhotos(env);
+  const filtered = all.filter(p => p.id !== id);
+  if (filtered.length === all.length) return false;
+  await kvPut('client-photos:list', JSON.stringify(filtered), {}, env);
   return true;
 }
 

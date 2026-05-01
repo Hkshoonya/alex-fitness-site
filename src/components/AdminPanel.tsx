@@ -26,10 +26,14 @@ import {
   getStudioPhotos, uploadStudioPhoto, deleteStudioPhoto,
   type StudioPhoto,
 } from '@/api/studioPhotos';
+import {
+  getClientPhotos, uploadClientPhoto, deleteClientPhoto,
+  type ClientPhoto,
+} from '@/api/clientPhotos';
 import { compressImage } from '@/lib/imageUpload';
 import { CoachAvatar } from '@/components/CoachAvatar';
 
-type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'signups';
+type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'stories' | 'signups';
 
 export default function AdminPanel() {
   const [authed, setAuthed] = useState(isAdminTokenFresh());
@@ -81,6 +85,7 @@ export default function AdminPanel() {
           <TabButton active={tab === 'announcements'} onClick={() => setTab('announcements')} label="Announcements" />
           <TabButton active={tab === 'coaches'} onClick={() => setTab('coaches')} label="Coaches" />
           <TabButton active={tab === 'studio'} onClick={() => setTab('studio')} label="Studio" />
+          <TabButton active={tab === 'stories'} onClick={() => setTab('stories')} label="Stories" />
           <TabButton active={tab === 'signups'} onClick={() => setTab('signups')} label="Signups" />
         </nav>
       </header>
@@ -90,6 +95,7 @@ export default function AdminPanel() {
         {tab === 'announcements' && <AnnouncementsTab />}
         {tab === 'coaches' && <CoachesTab />}
         {tab === 'studio' && <StudioTab />}
+        {tab === 'stories' && <StoriesTab />}
         {tab === 'signups' && <SignupsTab />}
       </main>
 
@@ -1630,6 +1636,231 @@ function StudioPhotoCard({ photo, onDelete }: { photo: StudioPhoto; onDelete: ()
           <Trash2 size={12} />
           Delete
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// STORIES TAB — admin-curated client success photos with optional
+// captions. Cycles above the testimonials section on the homepage.
+// Caption is the storytelling hook — kept short (≤140) so it
+// reads well as an overlay.
+// ============================================================
+
+const MAX_CAPTION_LEN = 140;
+
+function StoriesTab() {
+  const [photos, setPhotos] = useState<ClientPhoto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingPreview, setPendingPreview] = useState<string | null>(null);
+  const [pendingCaption, setPendingCaption] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await getClientPhotos({ noCache: true });
+      setPhotos(list);
+    } catch {
+      setError('Could not load stories. Try refreshing.');
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Two-step upload: pick file (shows preview + caption field), then
+  // submit. This lets Alex compose the caption while looking at the
+  // photo, instead of being dropped a "what's the caption?" prompt
+  // mid-upload after the file dialog closes.
+  const handlePickFile = (file: File) => {
+    setError(null);
+    setPendingFile(file);
+    setPendingCaption('');
+    const reader = new FileReader();
+    reader.onload = () => setPendingPreview(typeof reader.result === 'string' ? reader.result : null);
+    reader.readAsDataURL(file);
+  };
+
+  const handleCancelPending = () => {
+    setPendingFile(null);
+    setPendingPreview(null);
+    setPendingCaption('');
+  };
+
+  const handleSubmit = async () => {
+    if (!pendingFile) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const result = await compressImage(pendingFile, { maxEdge: 1200, quality: 0.85, maxBytes: 780_000 });
+      const res = await uploadClientPhoto(result.dataUrl, pendingCaption.trim() || undefined);
+      if (!res.ok) {
+        setError(res.error || 'Upload failed.');
+        setUploading(false);
+        return;
+      }
+      handleCancelPending();
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not process image.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Remove this story? Visitors will no longer see it on the homepage.')) return;
+    setError(null);
+    const ok = await deleteClientPhoto(id);
+    if (!ok) setError('Delete failed. Try again.');
+    await load();
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div>
+          <h2 className="font-display font-bold text-2xl mb-1">Client Success Stories</h2>
+          <p className="text-white/40 text-sm max-w-2xl">
+            These photos cycle above the <span className="text-white/70">What Clients Say</span> section.
+            Captions are optional but recommended — they're the storytelling hook
+            (e.g. "Lost 35 lbs in 12 weeks. — Sarah M.").
+            If no stories are uploaded, the homepage falls back to the original photo.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-white/40 text-xs">{photos.length} {photos.length === 1 ? 'story' : 'stories'}</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0];
+              if (f) handlePickFile(f);
+              e.target.value = '';
+            }}
+          />
+          {!pendingFile && (
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="text-xs flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#FF4D2E]/15 border border-[#FF4D2E]/30 text-[#FF4D2E] hover:bg-[#FF4D2E]/25 transition-colors"
+            >
+              <Upload size={13} /> Add Story
+            </button>
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" /> {error}
+        </p>
+      )}
+
+      {/* Pending upload composer — visible only after a file is picked */}
+      {pendingFile && pendingPreview && (
+        <div className="bg-white/[0.04] border border-[#FF4D2E]/30 rounded-2xl p-5 mb-6">
+          <div className="grid sm:grid-cols-[200px_1fr] gap-5 items-start">
+            <div className="aspect-[4/3] rounded-xl overflow-hidden bg-black">
+              <img src={pendingPreview} alt="Pending upload" className="w-full h-full object-cover" />
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-white/60 text-xs uppercase tracking-wider mb-1.5">
+                  Caption <span className="text-white/30 normal-case tracking-normal">(optional, {MAX_CAPTION_LEN} char max)</span>
+                </label>
+                <textarea
+                  value={pendingCaption}
+                  onChange={e => setPendingCaption(e.target.value.slice(0, MAX_CAPTION_LEN))}
+                  rows={2}
+                  placeholder='e.g. "Lost 35 lbs in 12 weeks. — Sarah M."'
+                  className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] resize-none"
+                />
+                <p className="text-white/30 text-[10px] mt-1">
+                  {pendingCaption.length} / {MAX_CAPTION_LEN}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleSubmit}
+                  disabled={uploading}
+                  className="text-xs flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#FF4D2E] hover:bg-[#FF4D2E]/90 text-white disabled:opacity-50 transition-colors font-semibold"
+                >
+                  {uploading ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                  {uploading ? 'Uploading…' : 'Save Story'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelPending}
+                  disabled={uploading}
+                  className="text-xs flex items-center gap-1.5 px-3 py-2 rounded-lg border border-white/10 text-white/60 hover:text-white hover:border-white/30 disabled:opacity-50 transition-colors"
+                >
+                  <X size={13} /> Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading && photos.length === 0 && (
+        <div className="text-white/50 text-sm flex items-center gap-2 py-12 justify-center">
+          <Loader2 size={16} className="animate-spin" /> Loading stories...
+        </div>
+      )}
+
+      {!loading && photos.length === 0 && !pendingFile && (
+        <div className="border border-dashed border-white/10 rounded-2xl p-12 text-center">
+          <ImageIcon size={28} className="mx-auto mb-3 text-white/30" />
+          <p className="text-white/50 text-sm mb-1">No client stories uploaded yet.</p>
+          <p className="text-white/30 text-xs">
+            The homepage is showing the original client photo until you upload here.
+          </p>
+        </div>
+      )}
+
+      {photos.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {photos.map((p) => (
+            <StoryPhotoCard key={p.id} photo={p} onDelete={() => handleDelete(p.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StoryPhotoCard({ photo, onDelete }: { photo: ClientPhoto; onDelete: () => void }) {
+  return (
+    <div className="group rounded-xl overflow-hidden border border-white/10 bg-white/[0.02] flex flex-col">
+      <div className="relative aspect-[4/3] bg-black">
+        <img src={photo.dataUrl} alt={photo.caption || ''} className="w-full h-full object-cover" />
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-end justify-end p-2">
+          <button
+            type="button"
+            onClick={onDelete}
+            className="opacity-70 group-hover:opacity-100 text-xs flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-red-500/80 hover:bg-red-500 text-white backdrop-blur-sm transition-all"
+            title="Delete story"
+          >
+            <Trash2 size={12} /> Delete
+          </button>
+        </div>
+      </div>
+      <div className="p-3 min-h-[3.5rem]">
+        {photo.caption ? (
+          <p className="text-white/80 text-sm leading-snug">"{photo.caption}"</p>
+        ) : (
+          <p className="text-white/30 text-xs italic">No caption</p>
+        )}
       </div>
     </div>
   );

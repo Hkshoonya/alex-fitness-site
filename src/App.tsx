@@ -30,6 +30,7 @@ import ChallengesSection from '@/components/ChallengesSection';
 import AdminPanel from '@/components/AdminPanel';
 import ClientPortalModal from '@/components/ClientPortalModal';
 import { AnnouncementCards, AnnouncementSection } from '@/components/Announcements';
+import { getClientPhotos, type ClientPhoto } from '@/api/clientPhotos';
 import type { TrainingPlan, Trainer } from '@/data/trainingPlans';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -89,6 +90,11 @@ function App() {
   const [heroIndex, setHeroIndex] = useState(0);
   // Studio section cycle — gym ↔ dojo. Image + headline + sub rotate together.
   const [studioIndex, setStudioIndex] = useState(0);
+  // Client success stories cycle above testimonials. Loaded from the worker
+  // on mount; falls back silently to the bundled alex-with-client.jpg when
+  // none uploaded so the section never renders blank.
+  const [clientPhotos, setClientPhotos] = useState<ClientPhoto[]>([]);
+  const [clientPhotoIndex, setClientPhotoIndex] = useState(0);
   // Client portal — themed modal replacing the old window.open to Square's
   // login page. `portalToken` is non-null when the visitor arrived via a
   // magic-link email (#/portal?token=...) and the modal opens straight to
@@ -140,6 +146,34 @@ function App() {
     }, STUDIO_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);
+
+  // Fetch client success stories on mount. Empty list is the "no admin
+  // content" signal — the testimonials section then shows the bundled
+  // alex-with-client.jpg fallback. Errors are swallowed silently for the
+  // same reason: page never goes blank because of a transient worker hiccup.
+  useEffect(() => {
+    let cancelled = false;
+    getClientPhotos()
+      .then(list => {
+        if (!cancelled && list.length > 0) {
+          setClientPhotos(list);
+          setClientPhotoIndex(0);
+        }
+      })
+      .catch(() => { /* silent fallback to bundled image */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Auto-advance the client success cycle. Skipped when ≤1 photo exists
+  // (nothing to cycle). length is in the dep array so the modular index
+  // doesn't go stale if the photos array changes mid-session.
+  useEffect(() => {
+    if (clientPhotos.length <= 1) return;
+    const id = setInterval(() => {
+      setClientPhotoIndex(i => (i + 1) % clientPhotos.length);
+    }, 5500);
+    return () => clearInterval(id);
+  }, [clientPhotos.length]);
 
   const heroRef = useRef<HTMLDivElement>(null);
   const valueRef = useRef<HTMLDivElement>(null);
@@ -751,13 +785,55 @@ function App() {
             <p className="text-white/60 mb-12">Honest feedback from real sessions.</p>
           </div>
 
-          {/* Real client success photo */}
-          <div className="mb-12 rounded-xl overflow-hidden">
-            <img
-              src={asset("/images/alex-with-client.jpg")}
-              alt="Alex with June 2024 Fitness Challenge Winner"
-              className="w-full h-auto object-cover"
-            />
+          {/* Real client success photos — admin-managed cycling gallery
+              with optional caption overlay. Falls back to the original
+              alex-with-client.jpg when no admin uploads exist. */}
+          <div className="mb-12 rounded-xl overflow-hidden relative aspect-[16/9] bg-black">
+            {clientPhotos.length > 0 ? (
+              clientPhotos.map((p, i) => (
+                <div
+                  key={p.id}
+                  className={`absolute inset-0 transition-opacity duration-700 ${i === clientPhotoIndex ? 'opacity-100' : 'opacity-0'}`}
+                >
+                  <img
+                    src={p.dataUrl}
+                    alt={p.caption || 'Client transformation'}
+                    className="w-full h-full object-cover"
+                  />
+                  {p.caption && (
+                    <div className="absolute inset-x-0 bottom-0 p-5 sm:p-7 bg-gradient-to-t from-black/85 via-black/40 to-transparent">
+                      <p className="text-white text-base sm:text-lg lg:text-xl font-medium leading-snug max-w-3xl">
+                        "{p.caption}"
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ))
+            ) : (
+              <img
+                src={asset("/images/alex-with-client.jpg")}
+                alt="Alex with June 2024 Fitness Challenge Winner"
+                className="w-full h-full object-cover"
+              />
+            )}
+            {/* Indicator dots — only when >1 admin photo exists */}
+            {clientPhotos.length > 1 && (
+              <div className="absolute bottom-3 right-4 flex gap-1.5">
+                {clientPhotos.map((_, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setClientPhotoIndex(i)}
+                    aria-label={`Show story ${i + 1}`}
+                    className={`h-1.5 rounded-full transition-all ${
+                      i === clientPhotoIndex
+                        ? 'w-6 bg-[#FF4D2E]'
+                        : 'w-1.5 bg-white/40 hover:bg-white/60'
+                    }`}
+                  />
+                ))}
+              </div>
+            )}
           </div>
 
           <GoogleReviews />

@@ -65,9 +65,7 @@ export default function MemberAgreement({
   const url = workerUrl ?? WORKER_URL;
 
   const [isMinor, setIsMinor] = useState(false);
-  const [acceptWaiver, setAcceptWaiver] = useState(false);
-  const [acceptPlan, setAcceptPlan] = useState(false);
-  const [acceptCard, setAcceptCard] = useState(false);
+  const [accepted, setAccepted] = useState(false);
   const [signatureName, setSignatureName] = useState('');
   const [childName, setChildName] = useState('');
   const [parentName, setParentName] = useState('');
@@ -82,7 +80,13 @@ export default function MemberAgreement({
     if (!signatureName && client.name) setSignatureName(client.name);
   }, [client.name, signatureName]);
 
-  const allConsentsTicked = acceptWaiver && acceptPlan && acceptCard;
+  // Single combined accept covers all three sections. We send all three
+  // consents=true to the worker for backwards compatibility — the user's
+  // intent is identical (one act of acceptance covers the bundle), and
+  // the worker's existing validation is unchanged. Legal weight comes from
+  // the typed signature + version-pinned text hash + IP, not the number of
+  // checkboxes.
+  const allConsentsTicked = accepted;
 
   const adultSignatureValid =
     !isMinor && signatureName.trim().length >= 2;
@@ -130,9 +134,9 @@ export default function MemberAgreement({
       parentSignature: isMinor ? parentSignature.trim() : null,
       textHash,
       consents: {
-        liability: acceptWaiver,
-        planTerms: acceptPlan,
-        cardOnFile: acceptCard,
+        liability: accepted,
+        planTerms: accepted,
+        cardOnFile: accepted,
       },
       planSnapshot: snapshot,
       userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
@@ -261,41 +265,38 @@ export default function MemberAgreement({
         </label>
       </div>
 
-      {/* Section 1 — Liability Waiver */}
-      <AgreementSection
-        icon={<Shield size={18} className="text-[#FF4D2E]" />}
-        title="1. Personal Training Liability Waiver"
-        body={LIABILITY_WAIVER_TEXT}
-      />
-      <ConsentRow
-        checked={acceptWaiver}
-        onChange={setAcceptWaiver}
-        label="I have read and agree to the liability waiver above."
-      />
+      {/* Three sections, collapsed by default. Each shows a one-line preview;
+          click "Read full text" to expand. The reader who wants to read it
+          all can; the reader who doesn't isn't buried in 30 paragraphs. */}
+      <div className="space-y-2">
+        <AgreementSection
+          icon={<Shield size={18} className="text-[#FF4D2E]" />}
+          title="1. Personal Training Liability Waiver"
+          preview="Voluntary participation in training; release of liability for injury, illness, and related risks."
+          body={LIABILITY_WAIVER_TEXT}
+        />
+        <AgreementSection
+          icon={<FileText size={18} className="text-[#FF4D2E]" />}
+          title="2. Fitness Plan & Cancellation Terms"
+          preview="One-time charge for this plan, 24-hour session cancellation rule, 7-day plan-pause notice."
+          body={PLAN_TERMS_TEXT}
+        />
+        <AgreementSection
+          icon={<CreditCard size={18} className="text-[#FF4D2E]" />}
+          title="3. Card-on-File Authorization"
+          preview="Card stays on file for future renewals — each future charge still requires your explicit confirmation."
+          body={CARD_AUTHORIZATION_TEXT}
+        />
+      </div>
 
-      {/* Section 2 — Plan Terms */}
-      <AgreementSection
-        icon={<FileText size={18} className="text-[#FF4D2E]" />}
-        title="2. Fitness Plan & Cancellation Terms"
-        body={PLAN_TERMS_TEXT}
-      />
-      <ConsentRow
-        checked={acceptPlan}
-        onChange={setAcceptPlan}
-        label="I agree to the plan terms and cancellation policy."
-      />
-
-      {/* Section 3 — Card on File */}
-      <AgreementSection
-        icon={<CreditCard size={18} className="text-[#FF4D2E]" />}
-        title="3. Card-on-File Authorization"
-        body={CARD_AUTHORIZATION_TEXT}
-      />
-      <ConsentRow
-        checked={acceptCard}
-        onChange={setAcceptCard}
-        label="I authorize Alex Davis Athletics Co. to keep my card on file under the terms above."
-      />
+      {/* Single combined acceptance — covers all three sections above. */}
+      <div className="bg-[#FF4D2E]/[0.06] border border-[#FF4D2E]/20 rounded-xl p-4">
+        <ConsentRow
+          checked={accepted}
+          onChange={setAccepted}
+          label="I have read and accept all three sections above — the liability waiver, the plan terms, and the card-on-file authorization."
+        />
+      </div>
 
       {/* Signature block — adult or minor variant */}
       <div className="bg-white/5 border border-white/10 rounded-xl p-5">
@@ -392,7 +393,7 @@ export default function MemberAgreement({
       {!canSubmit && !submitting && (
         <p className="text-white/40 text-xs text-center">
           {!allConsentsTicked
-            ? 'Tick all three boxes above to enable.'
+            ? 'Tick the acceptance box above to enable.'
             : isMinor
               ? 'Fill in the child\'s name, parent name, and parent signature.'
               : 'Type your full legal name to sign.'}
@@ -424,21 +425,45 @@ export default function MemberAgreement({
 function AgreementSection({
   icon,
   title,
+  preview,
   body,
 }: {
   icon: React.ReactNode;
   title: string;
+  preview: string;
   body: string;
 }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="bg-white/[0.03] border border-white/10 rounded-xl p-5">
-      <div className="flex items-center gap-2 mb-3">
-        {icon}
-        <h4 className="text-white font-semibold">{title}</h4>
-      </div>
-      <div className="text-white/70 text-sm leading-relaxed whitespace-pre-line max-h-56 overflow-y-auto pr-2">
-        {body}
-      </div>
+    <div className="bg-white/[0.03] border border-white/10 rounded-xl overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-3 p-4 text-left hover:bg-white/[0.02] transition-colors"
+        aria-expanded={open}
+      >
+        <span className="shrink-0">{icon}</span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-white font-semibold text-sm">{title}</span>
+          <span className="block text-white/50 text-xs mt-0.5 line-clamp-1">
+            {preview}
+          </span>
+        </span>
+        <span className="shrink-0 text-white/60 text-xs flex items-center gap-1">
+          {open ? 'Hide' : 'Read'}
+          <span
+            className={`inline-block transition-transform ${open ? 'rotate-180' : ''}`}
+            aria-hidden
+          >
+            ▾
+          </span>
+        </span>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 -mt-1 text-white/70 text-sm leading-relaxed whitespace-pre-line border-t border-white/5 pt-3">
+          {body}
+        </div>
+      )}
     </div>
   );
 }
@@ -453,7 +478,7 @@ function ConsentRow({
   label: string;
 }) {
   return (
-    <label className="flex items-start gap-3 cursor-pointer p-3 rounded-lg hover:bg-white/[0.03] transition-colors -mt-3">
+    <label className="flex items-start gap-3 cursor-pointer">
       <span className="relative shrink-0 mt-0.5">
         <input
           type="checkbox"
@@ -469,7 +494,7 @@ function ConsentRow({
           {checked && <Check size={14} className="text-white" strokeWidth={3} />}
         </span>
       </span>
-      <span className="text-white/80 text-sm leading-snug">{label}</span>
+      <span className="text-white/90 text-sm leading-snug font-medium">{label}</span>
     </label>
   );
 }

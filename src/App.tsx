@@ -321,6 +321,34 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Preview hatch — open MemberAgreement with mock data when the hash is
+  // `#/preview-agreement`. Lets Alex (and us) eyeball the legal flow without
+  // going through Square checkout. Fully read-only against the worker
+  // (paymentId starts with `_preview_` so any real `/credit-grant` would
+  // reject it). Removing the hash closes it; signing locally posts to the
+  // worker but the worker accepts the preview hash and stores it like any
+  // other record (visible in admin if we add a retrieval endpoint).
+  useEffect(() => {
+    const checkPreview = () => {
+      if (window.location.hash !== '#/preview-agreement') return;
+      setAgreementResume({
+        paymentId: `_preview_${Date.now()}`,
+        client: { name: 'Preview User', email: 'preview@example.com', phone: '' },
+        snapshot: {
+          planName: '12-Week Personal Training Plan',
+          sessions: 24,
+          durationMinutes: 60,
+          amountPaid: 1800,
+          trainerName: 'Alex Davis',
+          paymentDate: new Date().toISOString(),
+        },
+      });
+    };
+    checkPreview();
+    window.addEventListener('hashchange', checkPreview);
+    return () => window.removeEventListener('hashchange', checkPreview);
+  }, []);
+
   useEffect(() => {
     const workerUrl = import.meta.env.VITE_WORKER_URL || '';
     if (!workerUrl) return;

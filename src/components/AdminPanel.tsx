@@ -50,7 +50,7 @@ export default function AdminPanel() {
   return (
     <div className="min-h-screen bg-[#0B0B0D] text-white">
       <header className="border-b border-white/10 bg-black/40 backdrop-blur sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between relative">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 bg-[#FF4D2E]/15 border border-[#FF4D2E]/30 rounded-lg flex items-center justify-center">
               <Shield size={18} className="text-[#FF4D2E]" />
@@ -60,6 +60,19 @@ export default function AdminPanel() {
               <p className="text-white/50 text-xs leading-tight">Alex's Fitness Training</p>
             </div>
           </div>
+          {/* Center attribution — absolute-positioned so left/right stay anchored
+              regardless of their widths, and the middle stays perfectly centered.
+              Hidden on small screens because the header is already busy there. */}
+          <a
+            href="https://github.com/Hkshoonya"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden lg:flex absolute left-1/2 -translate-x-1/2 items-center gap-1.5 text-white/40 hover:text-white/70 text-[11px] uppercase tracking-[0.18em] transition-colors"
+            title="DocZeus — designed and built this admin panel"
+          >
+            <span>Designed and Made by</span>
+            <span className="text-[#FF4D2E] font-semibold tracking-[0.12em]">DocZeus</span>
+          </a>
           <div className="flex items-center gap-2">
             {/*
               Back-to-site uses hash-route navigation. `href="/"` would jump
@@ -105,11 +118,32 @@ export default function AdminPanel() {
         {tab === 'signups' && <SignupsTab />}
       </main>
 
-      <footer className="max-w-6xl mx-auto px-6 py-8 text-white/30 text-xs flex items-center justify-between border-t border-white/5 mt-8">
-        <span>Admin token expires after 30 days of inactivity.</span>
-        <a href="#/" className="hover:text-white/60 flex items-center gap-1">
-          <ExternalLink size={11} /> Back to site
-        </a>
+      <footer className="max-w-6xl mx-auto px-6 py-8 text-white/30 text-xs border-t border-white/5 mt-8">
+        <div className="flex items-center justify-between">
+          <span>Admin token expires after 30 days of inactivity.</span>
+          <a href="#/" className="hover:text-white/60 flex items-center gap-1">
+            <ExternalLink size={11} /> Back to site
+          </a>
+        </div>
+
+        {/* DocZeus attribution — same wordmark + glyph used on the public
+            site footer (AboutPage), so the brand mark stays consistent
+            wherever DocZeus is credited. */}
+        <div className="mt-6 pt-4 border-t border-white/5 flex justify-center">
+          <a
+            href="https://github.com/Hkshoonya"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex flex-col items-center gap-2 text-white/20 hover:text-white/40 transition-colors group"
+          >
+            <span className="text-[10px] uppercase tracking-[0.2em]">Built by</span>
+            <svg viewBox="0 0 200 48" width="100" height="24" aria-label="DocZeus" className="opacity-40 group-hover:opacity-70 transition-opacity">
+              <rect x="2" y="8" width="32" height="32" rx="8" fill="none" stroke="#FF4D2E" strokeWidth="3"/>
+              <circle cx="18" cy="24" r="6" fill="#FF4D2E"/>
+              <text x="40" y="34" fontFamily="system-ui, -apple-system, sans-serif" fontSize="28" fontWeight="bold" fill="currentColor" letterSpacing="1">oczeus</text>
+            </svg>
+          </a>
+        </div>
       </footer>
     </div>
   );

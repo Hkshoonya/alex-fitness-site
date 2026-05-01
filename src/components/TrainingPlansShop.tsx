@@ -10,6 +10,7 @@ import {
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus, getLastCatalogError } from '@/api/squareCatalog';
 import { initializeAllPaymentMethods, createCardPayment, storePurchase, type PaymentMethods } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
+import { getTeamMembers, type TeamMember } from '@/api/squareAvailability';
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 // Recurring auto-pay (purchaseAndSubscribe) is deferred — see handlePayment.
@@ -35,6 +36,12 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   const [selectedPlan, setSelectedPlan] = useState<TrainingPlan | null>(null);
   const [selectedFrequency, setSelectedFrequency] = useState<number>(0);
   const [selectedTrainer, setSelectedTrainer] = useState<Trainer>(trainers[0]);
+  // Live trainer cards shown in the trainer-selection step. Starts as the
+  // static catalog (instant render + offline fallback) and gets enriched on
+  // mount with real Square Team Member data (name, photo, title, specialties).
+  // The catalog `id` ('alex1' / 'alex2') is preserved so the worker pricing
+  // contract (TRAINER_MULTIPLIERS) keeps validating.
+  const [liveTrainers, setLiveTrainers] = useState<Trainer[]>(trainers);
   const [step, setStep] = useState<'browse' | 'configure' | 'trainer' | 'payment' | 'success'>('browse');
   const [cardElement, setCardElement] = useState<any>(null);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethods | null>(null);
@@ -54,6 +61,43 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
       resetState();
     }
     return () => { document.body.style.overflow = 'unset'; };
+  }, [isOpen]);
+
+  // Sync trainer cards from Square Team Members. Same source of truth as
+  // BookingModal — head coach fills the alex1 slot, first non-head coach fills
+  // alex2. Slot id stays catalog-bound (worker pricing contract). If Square
+  // has no associate coach, the alex2 card is hidden so we never render
+  // placeholder photos for a coach who doesn't actually exist.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const team = await getTeamMembers();
+        if (cancelled) return;
+        const head = team.find((m: TeamMember) => m.role === 'head-coach');
+        const associate = team.find((m: TeamMember) => m.role !== 'head-coach' && m.role !== 'consultation');
+        const merged = trainers
+          .map((catalog) => {
+            const sq = catalog.id === 'alex1' ? head : associate;
+            if (!sq) return catalog;
+            return {
+              ...catalog,
+              name: sq.name || catalog.name,
+              title: sq.title || catalog.title,
+              image: sq.image || catalog.image,
+              specialties: sq.specialties.length > 0 ? sq.specialties : catalog.specialties,
+            };
+          })
+          .filter((t) => t.id !== 'alex2' || !!associate);
+        if (merged.length === 0) return;
+        setLiveTrainers(merged);
+        setSelectedTrainer((prev) => merged.find((t) => t.id === prev.id) || merged[0]);
+      } catch {
+        // Stay on the static fallback — already set as initial state.
+      }
+    })();
+    return () => { cancelled = true; };
   }, [isOpen]);
 
   // Initialize Square payment SDK when entering payment step; tear it down
@@ -135,7 +179,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     setPaymentMethods(null);
     setSelectedPlan(null);
     setSelectedFrequency(0);
-    setSelectedTrainer(trainers[0]);
+    setSelectedTrainer(liveTrainers[0] || trainers[0]);
     setStep('browse');
     setError(null);
     setClientInfo({ name: '', email: '', phone: '' });
@@ -528,7 +572,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
               <p className="text-white/60 mb-6">Choose who you want to train with:</p>
 
               <div className="space-y-4">
-                {trainers.map((trainer) => (
+                {liveTrainers.map((trainer) => (
                   <div
                     key={trainer.id}
                     onClick={() => handleTrainerSelect(trainer)}

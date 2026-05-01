@@ -202,7 +202,10 @@ export function AnnouncementCards({ openModal, filter }: CardProps) {
     let cancelled = false;
     (async () => {
       const all = await getActiveAnnouncements();
-      let list = all.filter(a => a.style === 'card' && !isAnnouncementDismissed(a.id));
+      // Render every active announcement as a card — the page is the only
+      // surface now (sticky-banner variant retired for being too popup-y).
+      // The `style` field stays in the data model as a future-proof hint.
+      let list = all.filter(a => !isAnnouncementDismissed(a.id));
       if (filter) list = list.filter(filter);
       // Sort by priority high-first, then created descending
       list.sort((a, b) => {
@@ -215,7 +218,6 @@ export function AnnouncementCards({ openModal, filter }: CardProps) {
       }
     })();
     return () => { cancelled = true; };
-  // We re-run only on first mount; the banner handles refresh similarly.
   // Live updates without page reload aren't needed for this surface.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

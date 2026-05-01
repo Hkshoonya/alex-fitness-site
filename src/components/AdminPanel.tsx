@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import {
   isAdminTokenFresh, verifyAdminToken, saveAdminSession, clearAdminSession,
+  getAdminTokenAgeWarning,
   getChallengeSignups, getTrainerizePrograms, assignTrainerizeProgram,
   describeTrainerizeReason, refundCredit,
   getCreditMap, clearCreditMap,
@@ -48,6 +49,12 @@ export default function AdminPanel() {
   if (!authed) {
     return <AdminLogin onSuccess={() => setAuthed(true)} />;
   }
+
+  // Soft rotation reminder. The token doesn't auto-expire (Alex can't
+  // realistically re-login weekly) but a >180-day-old token represents a
+  // long stale exposure window — surface a banner that nudges him to
+  // contact Kimi for a fresh one. Hidden when the token is fresh.
+  const tokenAge = getAdminTokenAgeWarning();
 
   return (
     <div className="min-h-screen bg-[#0B0B0D] text-white">
@@ -111,6 +118,23 @@ export default function AdminPanel() {
           <TabButton active={tab === 'system'} onClick={() => setTab('system')} label="System" />
         </nav>
       </header>
+
+      {tokenAge?.shouldWarn && (
+        <div className="max-w-6xl mx-auto px-6 pt-6">
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 flex items-start gap-3">
+            <AlertCircle size={18} className="text-amber-400 shrink-0 mt-0.5" />
+            <div className="text-sm">
+              <p className="text-amber-200 font-medium">
+                Heads up — your admin token has been active for {tokenAge.daysOld} days.
+              </p>
+              <p className="text-amber-100/80 mt-1">
+                For account safety, contact Kimi to issue a fresh token. You won't be locked out;
+                this is a routine rotation reminder.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-6xl mx-auto px-6 py-8">
         {tab === 'challenges' && <ChallengesTab />}

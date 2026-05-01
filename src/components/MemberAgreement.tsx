@@ -120,11 +120,10 @@ export default function MemberAgreement({
     const textHash = await hashAgreementText();
     const signedAt = new Date().toISOString();
 
-    // Body sent to /api/agreement/sign. Worker stores all of this immutably.
-    // We send `agreementText` alongside `textHash` so the worker can re-hash
-    // server-side and verify integrity (defense-in-depth) AND can embed the
-    // exact signed text in the notification email + KV record without having
-    // to maintain a duplicate copy of the legal text.
+    // Body sent to /api/agreement/sign. Worker holds the canonical legal
+    // text by version (Phase 5 fix) — agreementText/textHash here are
+    // sanity-checked server-side against the worker's canonical copy.
+    // Stored record uses the worker's canonical text, never this client copy.
     const body = {
       paymentId,
       agreementVersion: AGREEMENT_VERSION,
@@ -150,39 +149,61 @@ export default function MemberAgreement({
     const localKey = `pending_agreement_${paymentId}`;
     const localPayload = JSON.stringify({ body, queuedAt: Date.now() });
 
-    let storedRemotely = false;
-
-    if (url) {
+    // Phase 5 fix: BLOCK the user from proceeding until the worker confirms
+    // it has the signature. Previously we marked the purchase signed locally
+    // even on remote failure — if the user then cleared browsing data or
+    // switched devices before the App.tsx retry flushed, no durable server-
+    // side waiver existed. Now: hard-fail with a retry button on remote
+    // error. The localStorage queue is still written as a safety net for
+    // the App.tsx mount-time retry, but it's no longer the primary path.
+    if (!url) {
+      // Dev / mock mode — no worker. Queue and proceed (DEV ONLY).
+      if (import.meta.env.PROD) {
+        setSubmitError('Signing is unavailable right now. Please try again in a moment.');
+        setSubmitting(false);
+        return;
+      }
+      try { localStorage.setItem(localKey, localPayload); } catch { /* ignore */ }
+    } else {
+      let response;
       try {
-        const response = await fetch(`${url}/api/agreement/sign`, {
+        response = await fetch(`${url}/api/agreement/sign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-        if (response.ok) {
-          storedRemotely = true;
-          // Clean up any prior queued attempt for this payment.
-          try { localStorage.removeItem(localKey); } catch { /* ignore */ }
-        } else {
-          // Queue for App.tsx mount-time retry. The user paid — we don't
-          // block them on a transient worker error, but we don't lose the
-          // signature either.
-          try { localStorage.setItem(localKey, localPayload); } catch { /* ignore */ }
-          console.warn('Agreement remote save failed, queued locally:', response.status);
-        }
       } catch (err) {
+        // Network error — queue for retry, surface to user, do NOT proceed.
         try { localStorage.setItem(localKey, localPayload); } catch { /* ignore */ }
-        console.warn('Agreement remote save errored, queued locally:', err);
+        console.warn('Agreement remote save errored:', err);
+        setSubmitError("Couldn't save your signature — please check your connection and try again.");
+        setSubmitting(false);
+        return;
       }
-    } else {
-      // No worker URL — dev / mock mode. Queue locally.
-      try { localStorage.setItem(localKey, localPayload); } catch { /* ignore */ }
+      if (!response.ok) {
+        // Worker rejected (4xx) or had an internal error (5xx). Queue for
+        // safety, surface, do NOT proceed. Reading the response body lets
+        // us show "please reload" for canonical-hash-mismatch errors that
+        // a stale tab can hit after the legal text was updated.
+        try { localStorage.setItem(localKey, localPayload); } catch { /* ignore */ }
+        let serverMsg = '';
+        try {
+          const data = await response.json();
+          serverMsg = typeof data?.error === 'string' ? data.error : '';
+        } catch { /* non-JSON */ }
+        setSubmitError(
+          serverMsg ||
+          "Couldn't save your signature — please try again. If this keeps happening, contact Alex directly."
+        );
+        setSubmitting(false);
+        return;
+      }
+      // Confirmed remote save. Clean up any prior queued attempt.
+      try { localStorage.removeItem(localKey); } catch { /* ignore */ }
     }
 
-    // Mark the local purchase record as signed regardless of remote-store
-    // outcome — local UI gates use this flag and the worker retry effect
-    // in App.tsx will eventually flush a queued POST. Either way the
-    // signature exists at least on this device.
+    // Only reached after a confirmed remote save (or DEV-mode local queue).
+    // Now safe to mark the purchase as signed and advance the UI.
     try { markAgreementSigned(paymentId); } catch { /* purchases storage may be wiped */ }
 
     setSubmitting(false);
@@ -196,7 +217,7 @@ export default function MemberAgreement({
       childName: body.childName || undefined,
       parentSignature: body.parentSignature || undefined,
       textHash,
-      storedRemotely,
+      storedRemotely: !!url,
     });
   };
 

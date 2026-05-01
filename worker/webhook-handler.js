@@ -1619,19 +1619,64 @@ export default {
     }
 
     // ===== GOOGLE MEET API (server-side — secrets never exposed to frontend) =====
+    //
+    // Pre-launch defense-in-depth (audit 2026-05-01): a forged-Origin curl
+    // could previously fire 20/min × 1440 min = 28,800 calendar invites/day
+    // per attacker IP, polluting Alex's calendar and burning Google Calendar
+    // API quota with no booking ever placed. Multi-layer caps now:
+    //   - 5/min per IP    (was 20)  — short bursts
+    //   - 30/day per IP             — sustained from one attacker
+    //   - 20/day per attendee email — bots rotating IPs but blasting one inbox
+    // Real flow: BookingModal fires Meet creation once per booking. Daily
+    // caps far exceed any honest user.
+    //
+    // Post-launch refactor: move Meet creation INSIDE /book-session and
+    // /book-consultation so it only fires after a booking is confirmed.
+    // Removes the pre-booking attack vector entirely.
     if (url.pathname === '/api/google/meet' && request.method === 'POST') {
       if (!isAllowedOrigin) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 403, headers: corsHeaders });
       }
-      // Origin is spoofable from non-browser clients. Rate-limit per IP so a
-      // script can't burn Google Calendar API quota even with a forged Origin.
-      if (!await checkRateLimit(request, 'google-meet', 20, env)) {
+      if (!await checkRateLimit(request, 'google-meet', 5, env)) {
         return new Response(JSON.stringify({ error: 'Too many requests' }), {
           status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const today = new Date().toISOString().slice(0, 10);
+      // Per-IP daily cap.
+      {
+        const key = `meet-ip-cap:${ip}:${today}`;
+        const c = parseInt(await kvGet(key, env) || '0', 10) || 0;
+        if (c >= 30) {
+          await logEvent('booking', 'meet-ip-cap-hit', { ip, count: c }, env);
+          return new Response(JSON.stringify({ success: false, error: 'Too many meeting links from this network today.' }), {
+            status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        await kvPut(key, String(c + 1), { expirationTtl: 86400 }, env);
+      }
+      // Parse early so we can apply the per-attendee-email cap.
+      let params;
+      try { params = await request.json(); }
+      catch {
+        return new Response(JSON.stringify({ success: false, error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const attendeeEmail = (params?.attendeeEmail || '').toString().trim().toLowerCase().slice(0, 254);
+      if (attendeeEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendeeEmail)) {
+        const key = `meet-email-cap:${attendeeEmail}:${today}`;
+        const c = parseInt(await kvGet(key, env) || '0', 10) || 0;
+        if (c >= 20) {
+          await logEvent('booking', 'meet-email-cap-hit', { attendeeEmail, count: c }, env);
+          return new Response(JSON.stringify({ success: false, error: 'Too many meeting links for this email today.' }), {
+            status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        await kvPut(key, String(c + 1), { expirationTtl: 86400 }, env);
+      }
       try {
-        const params = await request.json();
         const meeting = await createGoogleMeetEvent(params, env);
         return new Response(JSON.stringify(meeting), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -2554,6 +2599,67 @@ export default {
       }
     }
 
+    // ===== CANONICAL AGREEMENT TEXTS (server-authoritative) =====
+    //
+    // Pre-launch hardening (audit 2026-05-01): the worker previously stored
+    // the agreementText supplied by the client. An attacker could edit
+    // FULL_AGREEMENT_TEXT in their browser bundle, recompute the hash, and
+    // submit both — the worker's hash check passed (text matched its own
+    // hash) but the stored "official" record was tampered, undermining
+    // evidentiary value if the agreement is ever needed in court.
+    //
+    // FIX: Worker holds a copy of the canonical legal text per version.
+    // Client supplies `agreementVersion` only; worker rebuilds hash from
+    // its own canonical text. Stored record uses canonical text, NEVER the
+    // client's supplied copy. The client may still send `agreementText`
+    // (back-compat with old bundles) but it's verified against canonical
+    // and discarded if it doesn't match.
+    //
+    // MAINTENANCE RULE: when src/data/agreementText.ts changes, you MUST:
+    //   1. Bump AGREEMENT_VERSION (e.g. 'v1' -> 'v2') on the frontend
+    //   2. Add the new version's text to CANONICAL_AGREEMENT_TEXTS below
+    //   3. Keep the OLD version present so old signed records remain
+    //      retrievable with their original text intact
+    // Without (2), new sign-in attempts return 400 'unknown-version' and
+    // the purchase flow blocks at the agreement step. The discipline cost
+    // is small; the legal-record integrity gain is large.
+    const CANONICAL_AGREEMENT_TEXTS = {
+      v1: [
+        '# Liability Waiver',
+        "I am voluntarily starting personal training with Alex Davis Fitness. I understand that fitness training carries real risk — including physical or psychological injury, illness, temporary or permanent disability, and in extreme cases death. This risk extends to traveling to and from sessions.",
+        '',
+        "In exchange for the right to participate, I release Alex Davis, Alex Davis Athletics Co., and its trainers, agents, staff, and representatives from any and all claims, lawsuits, or causes of action arising out of my participation in training — including claims based on negligence.",
+        '',
+        "This release binds me, my heirs, my executors, and my representatives. I voluntarily give up the right to bring legal action for personal injury or property damage related to my training.",
+        '',
+        "I have read this waiver and I understand it is a release of liability.",
+        '',
+        '# Fitness Plan & Cancellation Terms',
+        "I am enrolling in the plan listed above. Today's payment is a one-time charge for this plan — no recurring charges happen automatically without my explicit confirmation.",
+        '',
+        'Cancellation policy',
+        "• Sessions — I will give at least 24 hours' notice to reschedule. Sessions cancelled inside 24 hours are forfeit and will not be rescheduled.",
+        "• Plans — I may pause or cancel my plan at any time by contacting Alex with at least 7 days' written notice. Sessions I have already used are not refunded.",
+        "• Refunds — Refunds for unused sessions are at Alex's discretion and are not guaranteed.",
+        '',
+        'I understand that scheduling conflicts and emergencies happen and Alex will work with me in good faith on those.',
+        '',
+        '# Card-on-File Authorization',
+        'I authorize Alex Davis Athletics Co. to keep the card I used today on file for future use. By signing below I confirm:',
+        '',
+        '• Alex may charge this card for additional sessions or plan renewals only after I confirm each charge (by email, text, or in-person).',
+        '• Alex will not charge this card automatically without my explicit confirmation for each individual charge.',
+        '• I may revoke this authorization at any time by contacting Alex; revocation does not refund any past charge already authorized and processed.',
+        '• The card I used today belongs to me, or I am authorized to use it on behalf of the cardholder.',
+        '• I understand my card details (full number, CVV) are stored securely by Square — Alex does not see or store them. Only the last four digits and the brand are visible to Alex.',
+      ].join('\n'),
+    };
+
+    async function sha256Hex(s) {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
     // POST /api/agreement/sign — record a signed member agreement.
     //
     // Called from MemberAgreement.tsx after the user accepts the combined
@@ -2566,11 +2672,12 @@ export default {
     // never overwrites. Records keep for 5 years (1825 days) — typical
     // personal-injury statute-of-limitations buffer.
     //
-    // We DO NOT re-hash the agreement text here. The canonical text lives
-    // in src/data/agreementText.ts; the version string + textHash sent by
-    // the client are taken at face value. If the worker also hashed, drift
-    // between versions would silently mask tampering — better to trust the
-    // version pin and let the frontend code be the canonical source.
+    // The worker holds CANONICAL_AGREEMENT_TEXTS keyed by version (defined
+    // just above this endpoint). Client supplies `agreementVersion`; worker
+    // hashes its own canonical text and stores that. Client's submitted
+    // textHash/agreementText are sanity-checked but NEVER trusted as the
+    // source of truth — preventing devtools-tampering attacks where a
+    // buyer could rewrite the contract before submitting.
     if (url.pathname === '/api/agreement/sign' && request.method === 'POST') {
       if (!isAllowedOrigin) return new Response(JSON.stringify({ error: 'Unauthorized origin' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       // Tightened rate limit: real members sign once per purchase. 5/2min
@@ -2586,8 +2693,13 @@ export default {
       const {
         paymentId, agreementVersion, signedAt, email, phone,
         signedName, legalName, isMinor, childName, parentSignature,
-        textHash, agreementText, consents, planSnapshot, userAgent,
+        consents, planSnapshot, userAgent,
+        // textHash + agreementText are accepted from the client for back-
+        // compat with old bundles, but neither is load-bearing — the worker
+        // re-derives both from CANONICAL_AGREEMENT_TEXTS[agreementVersion]
+        // below. Reassigned to canonical values for the rest of the handler.
       } = body || {};
+      let { textHash, agreementText } = body || {};
 
       if (!paymentId || typeof paymentId !== 'string') {
         return new Response(JSON.stringify({ error: 'paymentId required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -2626,36 +2738,54 @@ export default {
       if (!consents || consents.liability !== true || consents.planTerms !== true || consents.cardOnFile !== true) {
         return new Response(JSON.stringify({ error: 'all three consents must be granted' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
-      if (!textHash || typeof textHash !== 'string' || !/^[a-f0-9]{64}$/.test(textHash)) {
-        return new Response(JSON.stringify({ error: 'textHash must be a sha-256 hex string' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      // Server-authoritative legal text. Look up the canonical text for the
+      // pinned version, hash it server-side, and use BOTH as the values
+      // recorded + emailed. The client's submitted textHash/agreementText
+      // are sanity-checked against canonical (so a stale or tampered bundle
+      // surfaces as an error to the user, not a silent record corruption)
+      // but they are NEVER trusted as the source of truth.
+      const canonical = CANONICAL_AGREEMENT_TEXTS[agreementVersion];
+      if (!canonical) {
+        await logEvent('agreement', 'unknown-version', {
+          paymentId, agreementVersion,
+          email: typeof email === 'string' ? email.toLowerCase() : '',
+        }, env);
+        return new Response(JSON.stringify({
+          error: 'Unknown agreement version. The site may have been updated — please reload and try again.',
+        }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
-      if (!agreementText || typeof agreementText !== 'string' || agreementText.length < 100) {
-        return new Response(JSON.stringify({ error: 'agreementText required (the full text the user signed)' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      }
-      // Defense-in-depth integrity check: re-hash the supplied text and
-      // confirm it matches the supplied hash. If they don't match, the
-      // signed text and the claimed hash disagree — rejecting prevents a
-      // tampered email body from being archived under a "verified" hash.
-      {
-        const buf = await crypto.subtle.digest(
-          'SHA-256',
-          new TextEncoder().encode(agreementText),
-        );
-        const recomputed = Array.from(new Uint8Array(buf))
-          .map(b => b.toString(16).padStart(2, '0'))
-          .join('');
-        if (recomputed !== textHash) {
-          await logEvent('agreement', 'hash-mismatch', {
+      const canonicalHash = await sha256Hex(canonical);
+
+      // If the client sent a textHash, it must match canonical. Mismatch
+      // means either (a) a stale browser bundle (frontend updated, user's
+      // tab still on old version) or (b) tampering. Both warrant a reload-
+      // and-resign — we don't store anything if the user wasn't looking at
+      // the canonical text we'll archive.
+      if (typeof textHash === 'string' && textHash) {
+        if (!/^[a-f0-9]{64}$/.test(textHash)) {
+          return new Response(JSON.stringify({ error: 'textHash must be a sha-256 hex string' }), {
+            status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        if (textHash !== canonicalHash) {
+          await logEvent('agreement', 'canonical-hash-mismatch', {
             paymentId,
             email: typeof email === 'string' ? email.toLowerCase() : '',
-            claimed: textHash.slice(0, 16),
-            recomputed: recomputed.slice(0, 16),
+            agreementVersion,
+            clientHash: textHash.slice(0, 16),
+            canonicalHash: canonicalHash.slice(0, 16),
           }, env);
           return new Response(JSON.stringify({
-            error: 'agreementText does not match textHash — signed text was tampered or truncated',
+            error: 'Agreement text mismatch — please reload the page and re-sign.',
           }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
       }
+
+      // From here on the record + email use the canonical text + hash.
+      // Anything the client supplied is discarded — server is the source
+      // of truth for what the contract said.
+      agreementText = canonical;
+      textHash = canonicalHash;
       if (isMinor) {
         if (!childName || typeof childName !== 'string' || childName.trim().length < 2) {
           return new Response(JSON.stringify({ error: 'childName required for minor agreements' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

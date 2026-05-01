@@ -3,6 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Security headers via <meta http-equiv> — GitHub Pages doesn't expose
+      response-header configuration, so meta tags are the strongest layer
+      we can apply pre-Cloudflare-cutover. Frame-Ancestors and HSTS still
+      need real HTTP headers (set via Cloudflare once apex DNS is live).
+
+      CSP allow list:
+        - 'self' for our own bundled assets and pages.
+        - Square Web Payments SDK + sandbox hosts (script + connect).
+        - Google reCAPTCHA (loaded by squareMessages.ts) — script + frame.
+        - Worker origin for all /api/* + dedicated endpoints.
+      'unsafe-inline' on script + style is needed for Vite's module-
+      preload glue and React/Tailwind inline styles. A tighter hash- or
+      nonce-based policy is post-launch polish.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://web.squarecdn.com https://sandbox.web.squarecdn.com https://js.squareupsandbox.com https://www.google.com https://www.gstatic.com https://www.recaptcha.net https://recaptcha.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://alex-fitness-webhook.sense-fbf.workers.dev https://*.squareup.com https://*.squarecdn.com https://pci-connect.squareup.com https://*.google.com https://www.gstatic.com https://recaptcha.net https://www.recaptcha.net; frame-src https://web.squarecdn.com https://sandbox.web.squarecdn.com https://*.google.com https://recaptcha.net https://www.recaptcha.net; form-action 'self'; base-uri 'self';" />
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin" />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
     <link rel="icon" type="image/png" href="images/logo-favicon.png" />
     <link rel="apple-touch-icon" href="images/logo-circle.png" />
     <meta name="theme-color" content="#0B0B0D" />

@@ -9,23 +9,45 @@ import { getAdminToken, setAdminToken } from '@/api/challenges';
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 const TOKEN_ISSUED_KEY = 'alex_fitness_admin_token_issued';
-const TOKEN_TTL_DAYS = 30;
+// No auto-expiry on the admin token. Alex is a single-coach small business
+// owner — daily/weekly forced re-logins create more friction than they
+// prevent, and he can't manage rotation himself. Instead we surface a
+// "consider rotating" banner after 180 days that tells him to contact the
+// site builder (Kimi) to issue a new token. Manual rotation flow:
+//   1. wrangler secret put ADMIN_LOG_TOKEN  (new value)
+//   2. Alex enters the new token in the admin login
+// Worker also accepts the new token immediately on next request.
+const TOKEN_AGE_WARNING_DAYS = 180;
 
 export { getAdminToken, setAdminToken };
 
 /**
- * Returns true if a token is stored AND was issued within the last 30 days.
- * Forces a re-login on stolen-device timelines without nagging Alex daily.
+ * Returns true if an admin token is stored. Does NOT enforce TTL anymore —
+ * see TOKEN_AGE_WARNING_DAYS comment above. Use {@link getAdminTokenAgeWarning}
+ * for the soft-rotation nudge.
  */
 export function isAdminTokenFresh(): boolean {
-  if (!getAdminToken()) return false;
+  return !!getAdminToken();
+}
+
+/**
+ * Soft rotation reminder. Returns `null` when the token is fresh enough or
+ * we can't read the issue timestamp (privacy mode). Returns a structured
+ * warning when the token has been around longer than TOKEN_AGE_WARNING_DAYS.
+ *
+ * The intent is to render a banner in the admin panel that tells Alex to
+ * contact the site builder for a fresh token — the worker secret rotates
+ * server-side, then he enters the new value.
+ */
+export function getAdminTokenAgeWarning(): { daysOld: number; shouldWarn: boolean } | null {
+  if (!getAdminToken()) return null;
   try {
     const issuedAt = parseInt(localStorage.getItem(TOKEN_ISSUED_KEY) || '0', 10);
-    if (!issuedAt) return false;
-    const ageMs = Date.now() - issuedAt;
-    return ageMs < TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
+    if (!issuedAt) return null;
+    const daysOld = Math.floor((Date.now() - issuedAt) / (24 * 60 * 60 * 1000));
+    return { daysOld, shouldWarn: daysOld >= TOKEN_AGE_WARNING_DAYS };
   } catch {
-    return false;
+    return null;
   }
 }
 

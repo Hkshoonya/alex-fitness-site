@@ -8,7 +8,7 @@ import {
   type Trainer,
 } from '@/data/trainingPlans';
 import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus, getLastCatalogError } from '@/api/squareCatalog';
-import { initializeAllPaymentMethods, createCardPayment, storePurchase, type PaymentMethods } from '@/api/squarePayments';
+import { initializeAllPaymentMethods, createCardPayment, storePurchase, validateCoupon, type PaymentMethods } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
 import { getTeamMembers, type TeamMember } from '@/api/squareAvailability';
 import { asset } from '@/lib/assets';
@@ -52,6 +52,19 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
   const [lastSynced, setLastSynced] = useState<string | null>(null);
   const [catalogErrorMsg, setCatalogErrorMsg] = useState<string | null>(null);
   const [clientInfo, setClientInfo] = useState({ name: '', email: '', phone: '' });
+  // Coupon code state. `couponInput` is the raw text in the input field;
+  // `appliedCoupon` is the worker-validated discount (null until Apply
+  // succeeds). `couponError` shows messages like "not found" / "doesn't
+  // apply to this plan".
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState<{
+    code: string;
+    label: string;
+    discountAmountCents: number;
+    discountedAmountCents: number;
+  } | null>(null);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [isValidatingCoupon, setIsValidatingCoupon] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -202,6 +215,60 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     setStep('browse');
     setError(null);
     setClientInfo({ name: '', email: '', phone: '' });
+    setCouponInput('');
+    setAppliedCoupon(null);
+    setCouponError(null);
+    setIsValidatingCoupon(false);
+  };
+
+  // Drop the applied coupon if the user changes plan or frequency — it
+  // may not apply to the new selection, and any displayed total would be
+  // stale. The user can re-Apply.
+  useEffect(() => {
+    if (appliedCoupon) {
+      setAppliedCoupon(null);
+      setCouponError(null);
+    }
+    // Only depend on plan/frequency identity — not appliedCoupon (would loop).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlan?.id, selectedFrequency]);
+
+  const handleApplyCoupon = async () => {
+    if (!selectedPlan) return;
+    const code = couponInput.trim();
+    if (!code) return;
+    setIsValidatingCoupon(true);
+    setCouponError(null);
+    try {
+      const result = await validateCoupon({
+        code,
+        planId: selectedPlan.id,
+        frequencyIndex: selectedPlan.frequency.length > 0 ? selectedFrequency : null,
+      });
+      if (result.valid && result.discountAmountCents != null && result.discountedAmountCents != null) {
+        setAppliedCoupon({
+          code: result.code || code,
+          label: result.label || `${code} applied`,
+          discountAmountCents: result.discountAmountCents,
+          discountedAmountCents: result.discountedAmountCents,
+        });
+        setCouponError(null);
+      } else {
+        setAppliedCoupon(null);
+        setCouponError(result.error || 'Coupon not valid');
+      }
+    } catch (e) {
+      setAppliedCoupon(null);
+      setCouponError(e instanceof Error ? e.message : 'Validation failed');
+    } finally {
+      setIsValidatingCoupon(false);
+    }
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
+    setCouponError(null);
+    setCouponInput('');
   };
 
   const filteredPlans = selectedCategory === 'all'
@@ -252,6 +319,14 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     return selectedPlan.salePrice || selectedPlan.price;
   };
 
+  // Final price the user will be charged — base price minus any applied
+  // coupon. The worker re-derives this server-side; this is for display.
+  const getFinalPrice = (): number => {
+    const base = getCurrentPrice();
+    if (!appliedCoupon) return base;
+    return Math.max(0, Math.round(appliedCoupon.discountedAmountCents / 100));
+  };
+
   const handlePayment = async () => {
     if (!selectedPlan) return;
     setIsLoading(true);
@@ -285,6 +360,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
           trainerId: selectedTrainer.id,
           coachPreferenceId: selectedTrainer.squareTeamMemberId,
           coachPreferenceName: selectedTrainer.name,
+          couponCode: appliedCoupon?.code,
           cardToken: cardToken!,
           client: { email: clientInfo.email, name: clientInfo.name, phone: clientInfo.phone },
         });
@@ -331,6 +407,12 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
         clientName: clientInfo.name,
         clientEmail: clientInfo.email,
         clientPhone: clientInfo.phone,
+        // Coupon applied at checkout — values come from the worker's
+        // resolved response, never the typed code, so we can't store a
+        // discount the user didn't actually receive.
+        couponCode: appliedCoupon?.code,
+        couponLabel: appliedCoupon?.label,
+        couponDiscountAmount: appliedCoupon ? appliedCoupon.discountAmountCents / 100 : undefined,
       });
 
       // Register the purchase in worker KV. We send only paymentId + email
@@ -667,12 +749,76 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                     <span className="text-green-400">-{selectedTrainer.discount}%</span>
                   )}
                 </div>
+                {appliedCoupon && (
+                  <div className="flex justify-between text-green-400 mb-2 text-sm">
+                    <span className="flex items-center gap-2">
+                      <Tag size={14} /> Coupon: {appliedCoupon.code}
+                    </span>
+                    <span>-{formatPrice(appliedCoupon.discountAmountCents / 100)}</span>
+                  </div>
+                )}
                 <div className="border-t border-white/10 pt-2 mt-2">
                   <div className="flex justify-between text-white font-semibold text-lg">
                     <span>Total</span>
-                    <span>{formatPrice(getCurrentPrice())}</span>
+                    <span>
+                      {appliedCoupon ? (
+                        <>
+                          <span className="text-white/40 line-through text-sm font-normal mr-2">
+                            {formatPrice(getCurrentPrice())}
+                          </span>
+                          {formatPrice(getFinalPrice())}
+                        </>
+                      ) : (
+                        formatPrice(getCurrentPrice())
+                      )}
+                    </span>
                   </div>
                 </div>
+              </div>
+
+              {/* Coupon code entry. Validates against Square Discounts catalog
+                  via the worker — unknown / inapplicable codes return an error. */}
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-6">
+                <label className="block text-white/60 text-sm mb-2 flex items-center gap-2">
+                  <Tag size={14} /> Promo Code
+                </label>
+                {appliedCoupon ? (
+                  <div className="flex items-center justify-between bg-green-500/10 border border-green-500/30 rounded-lg px-3 py-2">
+                    <div className="flex items-center gap-2 text-green-400 text-sm">
+                      <Check size={14} />
+                      <span>{appliedCoupon.label}</span>
+                    </div>
+                    <button
+                      onClick={handleRemoveCoupon}
+                      className="text-white/50 hover:text-white text-xs underline"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={couponInput}
+                        onChange={e => { setCouponInput(e.target.value); setCouponError(null); }}
+                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleApplyCoupon(); } }}
+                        placeholder="e.g. SPRING20"
+                        className="flex-1 bg-white/5 border border-white/10 rounded-lg py-2 px-3 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E] transition-colors"
+                      />
+                      <button
+                        onClick={handleApplyCoupon}
+                        disabled={!couponInput.trim() || isValidatingCoupon}
+                        className="px-4 py-2 bg-white/10 hover:bg-white/15 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {isValidatingCoupon ? '…' : 'Apply'}
+                      </button>
+                    </div>
+                    {couponError && (
+                      <p className="text-red-400 text-xs mt-2">{couponError}</p>
+                    )}
+                  </>
+                )}
               </div>
 
               <div className="space-y-4">

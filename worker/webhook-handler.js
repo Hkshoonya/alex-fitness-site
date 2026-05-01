@@ -201,6 +201,126 @@ const PLAN_CATALOG = {
 
 const TRAINER_MULTIPLIERS = { alex1: 1.0, alex2: 0.8 };
 
+// ===== SQUARE DISCOUNTS (coupon codes) =====
+//
+// Coupons are not a separate Square primitive — they're catalog DISCOUNT
+// objects. We fetch the full DISCOUNT list from Square (cached 5 min in
+// module memory), match user-typed codes against `discount_data.name`
+// case-insensitively, and apply the discount type/value at charge time.
+// Square is the source of truth: create a discount in Square, the website
+// honors it on next cache refresh; delete or disable, it stops working.
+//
+// Per-plan restriction is honored when `applies_to_product_set_id` is set
+// on the discount — we fetch the product set and check if the plan's
+// Square item ID is in it. If unset, the discount applies to ANY plan.
+
+let _discountsCache = null;
+let _discountsCacheAt = 0;
+const DISCOUNTS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function getActiveDiscounts(env) {
+  const now = Date.now();
+  if (_discountsCache && (now - _discountsCacheAt) < DISCOUNTS_CACHE_TTL_MS) {
+    return _discountsCache;
+  }
+  try {
+    const resp = await fetch(`${getSquareApiBase(env)}/catalog/list?types=DISCOUNT`, {
+      headers: getSquareHeaders(env),
+    });
+    if (!resp.ok) {
+      // Fall back to the previous cache rather than failing checkout —
+      // discount fetch is non-critical.
+      return _discountsCache || [];
+    }
+    const data = await resp.json();
+    const objects = (data.objects || []).filter(o => o.type === 'DISCOUNT' && !o.is_deleted);
+    _discountsCache = objects;
+    _discountsCacheAt = now;
+    return objects;
+  } catch {
+    return _discountsCache || [];
+  }
+}
+
+function findDiscountByCode(discounts, code) {
+  const want = String(code || '').trim().toLowerCase();
+  if (!want) return null;
+  return discounts.find(d => (d.discount_data?.name || '').trim().toLowerCase() === want) || null;
+}
+
+function applyDiscountAmount(amountCents, discount) {
+  const dd = discount?.discount_data || {};
+  const type = dd.discount_type;
+  if (type === 'FIXED_PERCENTAGE') {
+    const pct = parseFloat(dd.percentage || '0');
+    if (!pct || pct <= 0 || pct > 100) return null;
+    const discountedCents = Math.round(amountCents * (1 - pct / 100));
+    return {
+      discountedAmountCents: discountedCents,
+      discountAmountCents: amountCents - discountedCents,
+      label: `${dd.name} — ${pct}% off`,
+    };
+  }
+  if (type === 'FIXED_AMOUNT') {
+    const amt = Number(dd.amount_money?.amount || 0);
+    if (!amt || amt <= 0) return null;
+    const discountedCents = Math.max(0, amountCents - amt);
+    return {
+      discountedAmountCents: discountedCents,
+      discountAmountCents: amountCents - discountedCents,
+      label: `${dd.name} — $${(amt / 100).toFixed(2)} off`,
+    };
+  }
+  // VARIABLE_PERCENTAGE / VARIABLE_AMOUNT can't be applied without a
+  // user-supplied value — treat as unsupported for self-serve checkout.
+  return null;
+}
+
+async function discountAppliesToPlan(discount, planId, env) {
+  const productSetId = discount?.discount_data?.applies_to_product_set_id;
+  if (!productSetId) return true; // unrestricted — applies to any plan
+  // The catalog stores per-item restrictions via PRODUCT_SET. We look up
+  // the set and check if any item in it is the plan's Square item ID.
+  // Today no PLAN_CATALOG entry carries a squareItemId on the worker side,
+  // so this branch will reject — meaning a restricted discount can't pass
+  // until we wire item IDs into PLAN_CATALOG. That's intentional: a
+  // discount with a restriction shouldn't silently become universal.
+  try {
+    const resp = await fetch(`${getSquareApiBase(env)}/catalog/object/${encodeURIComponent(productSetId)}`, {
+      headers: getSquareHeaders(env),
+    });
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    const set = data.object?.product_set_data;
+    if (!set) return false;
+    const items = [...(set.product_ids_any || []), ...(set.product_ids_all || [])];
+    const planSquareItemId = PLAN_CATALOG[planId]?.squareItemId;
+    return planSquareItemId ? items.includes(planSquareItemId) : false;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveCoupon(env, couponCode, planId, baseAmountCents) {
+  const code = String(couponCode || '').trim();
+  if (!code) return null;
+  const discounts = await getActiveDiscounts(env);
+  const discount = findDiscountByCode(discounts, code);
+  if (!discount) return { ok: false, error: `Coupon "${code}" not found` };
+  const applies = await discountAppliesToPlan(discount, planId, env);
+  if (!applies) return { ok: false, error: `Coupon "${code}" doesn't apply to this plan` };
+  const applied = applyDiscountAmount(baseAmountCents, discount);
+  if (!applied) return { ok: false, error: `Coupon "${code}" has an unsupported type` };
+  return {
+    ok: true,
+    discountId: discount.id,
+    discountName: discount.discount_data?.name || code,
+    label: applied.label,
+    discountAmountCents: applied.discountAmountCents,
+    discountedAmountCents: applied.discountedAmountCents,
+  };
+}
+
 /**
  * Resolve a {planId, frequencyIndex, trainerId} tuple to the authoritative
  * amount, session count, and metadata. Returns { ok: false, error } for any
@@ -1542,6 +1662,10 @@ export default {
       // claim so old payments without these fields are still valid.
       const coachPreferenceId = typeof body.coachPreferenceId === 'string' ? body.coachPreferenceId.trim().slice(0, 60) : '';
       const coachPreferenceName = typeof body.coachPreferenceName === 'string' ? body.coachPreferenceName.trim().slice(0, 80) : '';
+      // Optional coupon code — matched against Square Discounts catalog by
+      // name (case-insensitive). Re-validated server-side on every charge,
+      // so the browser can't lie about the discount amount.
+      const couponCode = typeof body.couponCode === 'string' ? body.couponCode.trim().slice(0, 40) : '';
 
       if (!cardToken || !email || !planId || !trainerId) {
         return new Response(JSON.stringify({
@@ -1565,10 +1689,31 @@ export default {
           status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
-      const { amountCents, planName, sessions, duration, planWeeks } = purchase;
+      const { planName, sessions, duration, planWeeks } = purchase;
+      let amountCents = purchase.amountCents;
       const validUntil = new Date(
         Date.now() + (planWeeks || 12) * 7 * 24 * 60 * 60 * 1000,
       ).toISOString();
+
+      // Apply coupon if present. Discount is re-derived server-side from
+      // Square's catalog so the browser can't fake it. Reject the whole
+      // checkout if the coupon was supplied but doesn't validate — the
+      // user typed something explicit and shouldn't be silently charged
+      // full price.
+      let couponInfo = null;
+      if (couponCode) {
+        const couponResult = await resolveCoupon(env, couponCode, planId, amountCents);
+        if (!couponResult || !couponResult.ok) {
+          await logEvent('error', 'checkout-coupon-failed', {
+            email, planId, couponCode, err: couponResult?.error || 'unknown',
+          }, env);
+          return new Response(JSON.stringify({
+            error: couponResult?.error || `Coupon "${couponCode}" not valid`,
+          }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        amountCents = couponResult.discountedAmountCents;
+        couponInfo = couponResult;
+      }
 
       // Plan claim baked into Square payment.note as JSON. /credit-grant
       // re-fetches the payment and parses this back to authorize the credit
@@ -1578,6 +1723,8 @@ export default {
       const planClaim = JSON.stringify({
         coachPreferenceName: coachPreferenceName || null,
         coachPreferenceId: coachPreferenceId || null,
+        couponCode: couponInfo ? couponInfo.discountName : null,
+        couponDiscountCents: couponInfo ? couponInfo.discountAmountCents : null,
         planId, frequencyIndex: frequencyIndex ?? null, trainerId, email,
       });
 
@@ -1675,10 +1822,12 @@ export default {
         const pd = await payResp.json();
         const paymentId = pd.payment?.id;
 
-        await logEvent('payment', `Checkout success: ${email} → $${amountCents / 100} (${planName})${coachPreferenceName ? ` — coach: ${coachPreferenceName}` : ''}`, {
+        await logEvent('payment', `Checkout success: ${email} → $${amountCents / 100} (${planName})${coachPreferenceName ? ` — coach: ${coachPreferenceName}` : ''}${couponInfo ? ` — coupon: ${couponInfo.discountName} (-$${couponInfo.discountAmountCents / 100})` : ''}`, {
           paymentId, customerId, cardId, amountCents, email, planId, trainerId, frequencyIndex,
           coachPreferenceId: coachPreferenceId || null,
           coachPreferenceName: coachPreferenceName || null,
+          couponCode: couponInfo ? couponInfo.discountName : null,
+          couponDiscountCents: couponInfo ? couponInfo.discountAmountCents : null,
         }, env);
 
         return new Response(JSON.stringify({
@@ -1687,6 +1836,11 @@ export default {
           // Server-resolved values — frontend uses these for storePurchase()
           // so localStorage agrees with what was actually charged.
           amountCents, sessions, duration, planName, validUntil,
+          couponApplied: couponInfo ? {
+            code: couponInfo.discountName,
+            label: couponInfo.label,
+            discountAmountCents: couponInfo.discountAmountCents,
+          } : null,
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (e) {
         await logEvent('error', 'checkout-charge-unexpected', { email, err: e?.message }, env);
@@ -1694,6 +1848,61 @@ export default {
           status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
+    }
+
+    // GET /checkout/validate-coupon?code=X&planId=Y&frequencyIndex=Z
+    //
+    // Pre-checkout coupon preview. Same Square-discount lookup as the
+    // charge path, but read-only — the frontend uses it to show the
+    // discount label + new total before the user submits payment. The
+    // actual amount applied at charge is re-derived server-side anyway,
+    // so this endpoint is informational only and safe to expose.
+    if (url.pathname === '/checkout/validate-coupon' && request.method === 'GET') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      // Light rate-limit so this can't be used to enumerate every code
+      // in the catalog by spamming.
+      if (!await checkRateLimit(request, 'validate-coupon', 30, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const code = (url.searchParams.get('code') || '').trim().slice(0, 40);
+      const planId = (url.searchParams.get('planId') || '').trim().slice(0, 40);
+      const frequencyParam = url.searchParams.get('frequencyIndex');
+      const frequencyIndex = frequencyParam !== null && frequencyParam !== '' ? Number(frequencyParam) : null;
+
+      if (!code || !planId) {
+        return new Response(JSON.stringify({ valid: false, error: 'code and planId required' }), {
+          status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // Resolve plan price first (uniform 'alex1' pricing slot — coupon
+      // preview doesn't need the actual coach selection).
+      const purchase = resolvePurchase({ planId, frequencyIndex, trainerId: 'alex1' });
+      if (!purchase.ok) {
+        return new Response(JSON.stringify({ valid: false, error: purchase.error }), {
+          status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const result = await resolveCoupon(env, code, planId, purchase.amountCents);
+      if (!result || !result.ok) {
+        return new Response(JSON.stringify({
+          valid: false,
+          error: result?.error || `Coupon "${code}" not found`,
+        }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        valid: true,
+        code: result.discountName,
+        label: result.label,
+        baseAmountCents: purchase.amountCents,
+        discountAmountCents: result.discountAmountCents,
+        discountedAmountCents: result.discountedAmountCents,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     // POST /credit-grant — frontend calls this after a successful
@@ -1826,12 +2035,25 @@ export default {
       // any case where the catalog or Square data has drifted between the two
       // endpoints — a hard guarantee that "credits granted" can never exceed
       // "money paid". Currency is also pinned to USD.
+      //
+      // When a coupon was applied at /checkout/charge, the paid amount is
+      // (catalog - discount). Re-resolve the same coupon here so the
+      // expected amount accounts for it. We trust the discount NAME from
+      // the claim (it was written server-side), not the discount value —
+      // we recompute the value from Square's live catalog.
       const paidAmount = Number(paymentData.payment?.amount_money?.amount);
       const paidCurrency = paymentData.payment?.amount_money?.currency;
-      if (paidCurrency !== 'USD' || paidAmount !== purchase.amountCents) {
+      let expectedAmountCents = purchase.amountCents;
+      if (claim.couponCode) {
+        const couponResult = await resolveCoupon(env, claim.couponCode, claim.planId, purchase.amountCents);
+        if (couponResult && couponResult.ok) {
+          expectedAmountCents = couponResult.discountedAmountCents;
+        }
+      }
+      if (paidCurrency !== 'USD' || paidAmount !== expectedAmountCents) {
         await logEvent('error', 'credit-grant-amount-mismatch', {
           paymentId, email, claim,
-          expectedCents: purchase.amountCents, paidCents: paidAmount, paidCurrency,
+          expectedCents: expectedAmountCents, paidCents: paidAmount, paidCurrency,
         }, env);
         return new Response(JSON.stringify({
           error: 'Payment amount does not match plan price — credits not granted',

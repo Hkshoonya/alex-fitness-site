@@ -169,6 +169,40 @@ export const createGenericCardPayment = async (params: {
 // Saving the card on the same round-trip is what enables auto-invoice
 // CARD_ON_FILE at credit exhaustion to actually charge — without a saved
 // card, published invoices required manual client payment.
+// Validate a coupon code against the worker's Square Discounts catalog
+// before submitting payment. Returns the resolved discount label + new
+// total so the UI can preview the coupon. The actual discount is re-
+// applied server-side at /checkout/charge — this preview is informational
+// only.
+export const validateCoupon = async (params: {
+  code: string;
+  planId: string;
+  frequencyIndex: number | null;
+}): Promise<{
+  valid: boolean;
+  code?: string;
+  label?: string;
+  baseAmountCents?: number;
+  discountAmountCents?: number;
+  discountedAmountCents?: number;
+  error?: string;
+}> => {
+  const workerUrl = import.meta.env.VITE_WORKER_URL || '';
+  if (!workerUrl) return { valid: false, error: 'Worker URL not configured' };
+  const qs = new URLSearchParams({
+    code: params.code,
+    planId: params.planId,
+    frequencyIndex: params.frequencyIndex !== null ? String(params.frequencyIndex) : '',
+  });
+  try {
+    const r = await fetch(`${workerUrl}/checkout/validate-coupon?${qs}`);
+    const data = await r.json();
+    return data;
+  } catch (e) {
+    return { valid: false, error: e instanceof Error ? e.message : 'Validation failed' };
+  }
+};
+
 export const createCardPayment = async (params: {
   planId: string;
   // null for flat-price plans (app-only, online-monthly, online-3month)
@@ -182,6 +216,9 @@ export const createCardPayment = async (params: {
   // pre-date this feature.
   coachPreferenceId?: string;
   coachPreferenceName?: string;
+  // Optional Square coupon code — re-validated server-side. Discount
+  // amount comes from Square's catalog, not the client.
+  couponCode?: string;
   cardToken: string;
   client: { email: string; name: string; phone?: string };
 }): Promise<{
@@ -196,6 +233,7 @@ export const createCardPayment = async (params: {
   duration?: number;
   planName?: string;
   validUntil?: string;
+  couponApplied?: { code: string; label: string; discountAmountCents: number } | null;
   error?: string;
 }> => {
   if (!SQUARE_APPLICATION_ID) {
@@ -223,6 +261,7 @@ export const createCardPayment = async (params: {
         trainerId: params.trainerId,
         coachPreferenceId: params.coachPreferenceId || '',
         coachPreferenceName: params.coachPreferenceName || '',
+        couponCode: params.couponCode || '',
       }),
     });
     const data = await response.json();
@@ -239,6 +278,7 @@ export const createCardPayment = async (params: {
       duration: data.duration,
       planName: data.planName,
       validUntil: data.validUntil,
+      couponApplied: data.couponApplied || null,
     };
   } catch (error) {
     console.error('Payment error:', error);
@@ -267,6 +307,12 @@ export const storePurchase = (purchase: {
   clientName?: string;
   clientEmail?: string;
   clientPhone?: string;
+  // Coupon applied at checkout (Square Discount). For receipts + admin
+  // visibility. Always populated from the worker's resolved value, never
+  // the client's typed code.
+  couponCode?: string;
+  couponLabel?: string;
+  couponDiscountAmount?: number; // dollars (not cents)
 }) => {
   let purchases: unknown[] = [];
   try {

@@ -2657,7 +2657,11 @@ export default {
 
     if (url.pathname === '/book-consultation' && request.method === 'POST') {
       if (!isAllowedOrigin) return new Response(JSON.stringify({ error: 'Unauthorized origin' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
-      if (!await checkRateLimit(request, 'book-consultation', 20, env)) {
+      // C-1 fix (audit 2026-05-01): tightened per-IP rate from 20/min → 3/min
+      // to push attackers toward proxy rotation, where the per-email cap below
+      // catches them. Real users book one consult; 3/min is generous headroom
+      // for retries and spec-tap fat-fingers.
+      if (!await checkRateLimit(request, 'book-consultation', 3, env)) {
         return new Response(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
       let body;
@@ -2667,6 +2671,30 @@ export default {
       const { name = '', email = '', phone = '', goals = '', startAt, duration, teamMemberId, serviceVariationId } = body || {};
       if (!email || !startAt || !duration || !teamMemberId) {
         return new Response(JSON.stringify({ success: false, reason: 'missing-fields' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      // C-1 fix: same email regex used in /portal/request-magic-link and
+      // /book-session. Stops the trivial "a1@x.x, a2@x.x, ..." spam pattern
+      // that creates a flood of distinct Square Customer records.
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return new Response(JSON.stringify({ success: false, reason: 'invalid-email' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // C-1 fix: per-email daily cap. Three consultation bookings from the
+      // same email in a single day is far more than any legitimate user
+      // ever needs (typical: 1; edge case: rebook after no-show = 2). Set
+      // to 3 to cap blast radius without catching real users.
+      {
+        const today = new Date().toISOString().slice(0, 10);
+        const capKey = `consult-cap:${email.toLowerCase()}:${today}`;
+        const c = parseInt(await kvGet(capKey, env) || '0', 10) || 0;
+        if (c >= 3) {
+          await logEvent('booking', 'consult-cap-hit', { email: email.toLowerCase(), count: c }, env);
+          return new Response(JSON.stringify({ success: false, reason: 'daily-cap-reached' }), {
+            status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        await kvPut(capKey, String(c + 1), { expirationTtl: 86400 }, env);
       }
       const idempotencyKey = `cons-${startAt}-${email.toLowerCase()}-${duration}`;
       const cached = await kvGet(`booking-idem:${idempotencyKey}`, env);
@@ -2896,6 +2924,23 @@ export default {
         return new Response(JSON.stringify({ success: false, reason: 'invalid-email' }), {
           status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
+      }
+      // C-2 fix (audit 2026-05-01): per-target-email cap independent of IP.
+      // The per-IP rate limit above only stops one attacker from one address;
+      // a botnet rotating IPs could still hit Resend's quota by spamming
+      // links to ANY victim address. This bucket caps each email at 1 link
+      // per 10 minutes — generous for legitimate retries, fatal for spam.
+      // Returns success-shaped 200 (not 429) so an attacker can't enumerate
+      // which addresses have been targeted.
+      {
+        const emailCapKey = `portal-mlink:${email}:${Math.floor(Date.now() / 600000)}`;
+        if (await kvGet(emailCapKey, env)) {
+          return new Response(JSON.stringify({
+            success: true,
+            note: 'If a matching account exists, a magic link has been sent.',
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        await kvPut(emailCapKey, '1', { expirationTtl: 600 }, env);
       }
       if (!env.RESEND_API_KEY) {
         await logEvent('error', 'portal-resend-not-configured', { email }, env);
@@ -4147,6 +4192,14 @@ export default {
     // to localStorage, so users get an immediate "wrong token" error instead
     // of saving a bad token and getting opaque 401s on every action later.
     if (url.pathname === '/admin/verify' && request.method === 'GET') {
+      // H-1 fix (audit 2026-05-01): rate-limit token verification to block
+      // brute-force guessing. 10 attempts per 2 minutes per IP is plenty
+      // for honest typos and impossible for online brute force.
+      if (!await checkRateLimit(request, 'admin-verify', 10, env)) {
+        return new Response(JSON.stringify({ ok: false, reason: 'rate-limited' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       if (!env.ADMIN_LOG_TOKEN) {
         return new Response(JSON.stringify({ ok: false, reason: 'not-configured' }), {
           status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -4190,6 +4243,16 @@ export default {
       if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
         return new Response('Unauthorized', { status: 401, headers: corsHeaders });
       }
+      // H-2 fix (audit 2026-05-01): IP-level rate limit on the refund
+      // endpoint. With a stolen token, an attacker could otherwise print
+      // ~$8K/min in credits via repeated bumpTotal:true calls. 20/min/IP
+      // caps the spree at network speed; the per-userId daily cap below
+      // caps it per victim account.
+      if (!await checkRateLimit(request, 'admin-refund', 20, env)) {
+        return new Response(JSON.stringify({ error: 'Too many requests' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       let body;
       try { body = await request.json(); } catch {
         return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
@@ -4225,6 +4288,30 @@ export default {
             status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
+      }
+
+      // H-2 fix: per-userId daily refund cap. Real workflow tops out at ~2
+      // refunds per client per day (a no-show forgiven, then a follow-up
+      // mistake corrected). Setting the cap at 20 leaves generous headroom
+      // for legitimate batch corrections while making "stolen token grants
+      // 100 credits per call repeatedly" impossible. Audit log captures
+      // every cap-hit so abuse is visible.
+      {
+        const today = new Date().toISOString().slice(0, 10);
+        const dayCapKey = `admin-refund-day:${userId}:${today}`;
+        const refundedToday = parseInt(await kvGet(dayCapKey, env) || '0', 10) || 0;
+        if (refundedToday + sessions > 20) {
+          await logEvent('admin', 'refund-cap-hit', {
+            userId, refundedToday, requested: sessions, ip: request.headers.get('CF-Connecting-IP') || '',
+          }, env);
+          return new Response(JSON.stringify({
+            error: `Daily refund cap reached for userId ${userId} (${refundedToday}/20 sessions today). Increase manually if legitimate.`,
+          }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        // Pre-increment so concurrent refunds inside the same window all
+        // see the new value. KV is eventually consistent so this isn't
+        // perfect — but the IP rate limit upstream throttles concurrency.
+        await kvPut(dayCapKey, String(refundedToday + sessions), { expirationTtl: 86400 }, env);
       }
 
       const creditKey = `credits:${userId}`;

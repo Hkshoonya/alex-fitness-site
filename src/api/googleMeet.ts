@@ -27,6 +27,10 @@ export async function createMeetEvent(params: {
   attendeeEmail: string;
   attendeeName: string;
   description?: string;
+  // Optional phone — when supplied, the worker enriches the calendar
+  // description with a phone-backup block (Alex's phone + this one)
+  // so either side can call if video isn't working.
+  attendeePhone?: string;
 }): Promise<{ success: boolean; meeting?: MeetingDetails; error?: string }> {
 
   if (!WORKER_URL) {

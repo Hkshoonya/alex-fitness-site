@@ -184,6 +184,11 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
           durationMinutes: sessionDuration,
           attendeeEmail: bookingData.email,
           attendeeName: bookingData.name,
+          // Passing phone lets the worker add a "PHONE BACKUP" block to
+          // the calendar event description — gives both sides a fallback
+          // if Meet doesn't work, and surfaces the client's number on
+          // Alex's calendar so he can call them directly.
+          attendeePhone: bookingData.phone,
           description: `${mode === 'consultation' ? 'Free consultation' : 'Training session'} with Alex Davis Fitness\n\nGoals: ${bookingData.goals || 'Not specified'}`,
         });
         if (meetResult.success && meetResult.meeting) {

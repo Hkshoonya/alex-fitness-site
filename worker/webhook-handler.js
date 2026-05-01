@@ -4118,6 +4118,7 @@ export default {
         'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN',
         'GOOGLE_CALENDAR_ID', 'GOOGLE_PLACES_API_KEY', 'GOOGLE_PLACE_ID',
         'GOOGLE_MAPS_JAVASCRIPT_API_KEY',
+        'ALEX_PHONE',
         'RESEND_API_KEY', 'PORTAL_FROM_EMAIL', 'PORTAL_SITE_URL',
         'ADMIN_LOG_TOKEN',
         'TZ_INPERSON_APPOINTMENT_TYPE_ID', 'TZ_VIRTUAL_APPOINTMENT_TYPE_ID',
@@ -6625,6 +6626,25 @@ async function createGoogleMeetEvent(params, env) {
     attendees.push({ email: calId });
   }
 
+  // Enrich the description with a phone-backup block when both Alex's
+  // phone (env var) and the client's phone (from booking) are available.
+  // Lives in the calendar event description, which Google echoes into:
+  //   1. The invite email both sides receive (sendUpdates: 'all')
+  //   2. The calendar event detail panel (so Alex sees the client's phone
+  //      directly on his calendar)
+  //   3. Reminder popup body
+  // If either phone is missing, the block is silently omitted — no
+  // half-formed "Alex: undefined" lines.
+  let enrichedDescription = params.description || '';
+  if (env.ALEX_PHONE && params.attendeePhone) {
+    const clientLabel = params.attendeeName || 'Client';
+    enrichedDescription +=
+      `\n\nPHONE BACKUP (if video doesn't connect):` +
+      `\n- Alex (coach): ${env.ALEX_PHONE}` +
+      `\n- ${clientLabel}: ${params.attendeePhone}` +
+      `\n\nEither side can call to switch to a phone session.`;
+  }
+
   const eventResp = await fetch(
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(hostCalendarId)}/events?conferenceDataVersion=1&sendUpdates=all`,
     {
@@ -6635,7 +6655,7 @@ async function createGoogleMeetEvent(params, env) {
       },
       body: JSON.stringify({
         summary: params.title || 'Training Session',
-        description: params.description || '',
+        description: enrichedDescription,
         start: { dateTime: startTime.toISOString(), timeZone: TIMEZONE },
         end: { dateTime: endTime.toISOString(), timeZone: TIMEZONE },
         attendees,

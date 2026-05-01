@@ -1455,12 +1455,27 @@ export default {
         return new Response('Unauthorized', { status: 401, headers: corsHeaders });
       }
       const data = await request.json();
+      // endDate is the only field that drives the public "active" filter
+      // (GET /challenges → c.endDate > now). An empty/invalid value silently
+      // produces an invisible-but-stored zombie challenge. Reject at ingress.
+      const endDateRaw = data.endDate || data.end_date || '';
+      const endDateMs = new Date(endDateRaw).getTime();
+      if (!endDateRaw || Number.isNaN(endDateMs)) {
+        return new Response(JSON.stringify({ error: 'endDate is required and must be a valid date (e.g. 2026-12-31)' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (endDateMs <= Date.now()) {
+        return new Response(JSON.stringify({ error: 'endDate must be in the future' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       const challenge = {
         id: `ch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         title: data.title || '',
         description: data.description || '',
         startDate: data.startDate || data.start_date || '',
-        endDate: data.endDate || data.end_date || '',
+        endDate: endDateRaw,
         duration: data.duration || '4 Weeks',
         prize: data.prize || null,
         // Distinguish "zero spots" from "no spot limit" — `|| null` coerced
@@ -2167,7 +2182,10 @@ export default {
     //                                production use, verify a domain in Resend
     //                                and set this to e.g. "Alex Davis Fitness
     //                                <noreply@alexsfitness.com>".
-    //   - PORTAL_SITE_URL          — optional, defaults to the gh-pages URL.
+    //   - PORTAL_SITE_URL          — REQUIRED. Origin where the SPA is served
+    //                                (e.g. "https://alexsfitness.com" or the
+    //                                gh-pages preview URL during staging).
+    //                                Used to build magic-link callback URLs.
 
     if (url.pathname === '/portal/request-magic-link' && request.method === 'POST') {
       if (!isAllowedOrigin) {
@@ -2220,7 +2238,21 @@ export default {
         });
       }
 
-      const siteUrl = env.PORTAL_SITE_URL || 'https://hkshoonya.github.io/alex-fitness-site';
+      // PORTAL_SITE_URL must be set explicitly. We used to fall back to the
+      // gh-pages staging URL, which silently broke after the apex cutover —
+      // every magic-link email pointed back to a dead staging origin. Hard-
+      // fail with 503 so the misconfiguration surfaces immediately.
+      const siteUrl = env.PORTAL_SITE_URL;
+      if (!siteUrl) {
+        await logEvent('error', 'portal-site-url-not-configured', { email }, env);
+        return new Response(JSON.stringify({
+          success: false,
+          reason: 'portal-not-configured',
+          detail: 'Portal site URL is not configured. Please contact support.',
+        }), {
+          status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
       const link = `${siteUrl}/#/portal?token=${token}`;
       const fromEmail = env.PORTAL_FROM_EMAIL || 'Alex Davis Fitness <onboarding@resend.dev>';
 
@@ -2446,9 +2478,9 @@ export default {
       return new Response(JSON.stringify({
         success: true,
         sessionToken,
-        customer: customer ? {
-          name: `${customer.given_name || ''} ${customer.family_name || ''}`.trim() || tokenData.email,
-          email: customer.email_address || tokenData.email,
+        customer: primary ? {
+          name: `${primary.given_name || ''} ${primary.family_name || ''}`.trim() || tokenData.email,
+          email: primary.email_address || tokenData.email,
         } : null,
         bookings,
       }), {
@@ -3551,15 +3583,32 @@ export default {
   // ===== CRON: periodic sync tasks =====
   // Multiple cron expressions in wrangler.toml — dispatch by event.cron:
   //   "*/15 * * * *" → every 15 min: TZ→SQ appointments + credit deductions
-  //   "0 4 * * *"    → daily 04:00 UTC: people-sync reconciler (TZ↔SQ identity)
+  //   "0 4 * * *"    → daily 04:00 UTC: people-sync 'link' phase
+  //   "5 4 * * *"    → daily 04:05 UTC: people-sync 'reconcile' phase
+  //   "10 4 * * *"   → daily 04:10 UTC: people-sync 'create' phase
+  // Phase splitting prevents subrequest-cap exhaustion during backlog
+  // convergence. The 5-min stagger lets each phase release the psync:lock
+  // before the next one fires (lock release is explicit at end-of-run, well
+  // under the 5-min gap).
   async scheduled(event, env, ctx) {
     const cron = event.cron || '';
     if (cron === '0 4 * * *') {
-      // Daily reconciler: keep TZ ↔ SQ identity fields in lockstep.
       ctx.waitUntil(
-        runPeopleSync(env, { dryRun: false, createMissing: true, sqCreateGate: 'with-bookings' })
-          .then(report => logEvent('sync', 'people-sync-cron-completed', report.summary || report, env))
-          .catch(err => logEvent('error', 'people-sync-cron-failed', { err: err?.message }, env))
+        runPeopleSync(env, { dryRun: false, createMissing: false, phase: 'link' })
+          .then(report => logEvent('sync', 'people-sync-link-completed', report.summary || report, env))
+          .catch(err => logEvent('error', 'people-sync-link-failed', { err: err?.message }, env))
+      );
+    } else if (cron === '5 4 * * *') {
+      ctx.waitUntil(
+        runPeopleSync(env, { dryRun: false, createMissing: false, phase: 'reconcile' })
+          .then(report => logEvent('sync', 'people-sync-reconcile-completed', report.summary || report, env))
+          .catch(err => logEvent('error', 'people-sync-reconcile-failed', { err: err?.message }, env))
+      );
+    } else if (cron === '10 4 * * *') {
+      ctx.waitUntil(
+        runPeopleSync(env, { dryRun: false, createMissing: true, sqCreateGate: 'with-bookings', phase: 'create' })
+          .then(report => logEvent('sync', 'people-sync-create-completed', report.summary || report, env))
+          .catch(err => logEvent('error', 'people-sync-create-failed', { err: err?.message }, env))
       );
     } else {
       // Default 15-min tick (and any unknown schedule defaults here too).

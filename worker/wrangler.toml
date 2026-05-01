@@ -27,9 +27,14 @@ SQ_SERVICE_BY_TZ_TYPE = '{"8116657":"66QDZG33XW3F62HR63P6VF5G","8116656":"DFDGPQ
 
 # Cron triggers:
 #   */15 * * * *  → every 15 min: Trainerize→Square appointment sync + credit deduction
-#   0 4 * * *     → daily 04:00 UTC: bidirectional people-sync (TZ↔SQ identity reconcile)
+#   0 4 * * *     → daily 04:00 UTC: people-sync 'link' phase (build linkage, persist KV)
+#   5 4 * * *     → daily 04:05 UTC: people-sync 'reconcile' phase (TZ↔SQ field updates)
+#   10 4 * * *    → daily 04:10 UTC: people-sync 'create' phase (create missing TZ/SQ)
+# Phase splitting (link/reconcile/create) keeps each invocation under the
+# Cloudflare Workers subrequest cap during backlog convergence. Minutes 5/10
+# avoid colliding with */15 (which fires at :00, :15, :30, :45).
 [triggers]
-crons = ["*/15 * * * *", "0 4 * * *"]
+crons = ["*/15 * * * *", "0 4 * * *", "5 4 * * *", "10 4 * * *"]
 
 # Square Webhook Events to subscribe to:
 # (configure these in Square Dashboard > Developer > Webhooks > Add endpoint)

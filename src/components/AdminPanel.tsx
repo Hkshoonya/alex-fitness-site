@@ -44,12 +44,28 @@ export default function AdminPanel() {
               <p className="text-white/50 text-xs leading-tight">Alex's Fitness Training</p>
             </div>
           </div>
-          <button
-            onClick={() => { clearAdminSession(); setAuthed(false); }}
-            className="text-white/50 hover:text-white text-sm flex items-center gap-2"
-          >
-            <LogOut size={14} /> Sign out
-          </button>
+          <div className="flex items-center gap-2">
+            {/*
+              Back-to-site uses hash-route navigation. `href="/"` would jump
+              to the GitHub Pages account root under sub-path deploys, taking
+              Alex off-site. `#/` clears the admin route and lands on the
+              homepage regardless of base path (works on both gh-pages and
+              apex deploys without modification).
+            */}
+            <a
+              href="#/"
+              className="text-white/60 hover:text-white text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 hover:border-[#FF4D2E]/40 hover:bg-[#FF4D2E]/5 transition-colors"
+              title="Back to website"
+            >
+              <ExternalLink size={13} /> View Site
+            </a>
+            <button
+              onClick={() => { clearAdminSession(); setAuthed(false); }}
+              className="text-white/50 hover:text-white text-sm flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-white/5 transition-colors"
+            >
+              <LogOut size={14} /> Sign out
+            </button>
+          </div>
         </div>
 
         <nav className="max-w-6xl mx-auto px-6 flex gap-1">
@@ -67,7 +83,7 @@ export default function AdminPanel() {
 
       <footer className="max-w-6xl mx-auto px-6 py-8 text-white/30 text-xs flex items-center justify-between border-t border-white/5 mt-8">
         <span>Admin token expires after 30 days of inactivity.</span>
-        <a href="/" className="hover:text-white/60 flex items-center gap-1">
+        <a href="#/" className="hover:text-white/60 flex items-center gap-1">
           <ExternalLink size={11} /> Back to site
         </a>
       </footer>
@@ -1046,13 +1062,17 @@ function AnnouncementForm({
             className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
           />
         </FormField>
-        <FormField label="CTA Target" hint="#section-id, modal:booking, or url:https://...">
+        <FormField label="CTA Target" hint="Click a preset below or type a custom URL/anchor.">
           <input
             type="text"
             value={form.ctaTarget}
             onChange={e => setField('ctaTarget', e.target.value)}
-            placeholder="#plans"
+            placeholder="#plans or https://..."
             className="w-full bg-white/5 border border-white/10 rounded-lg py-2.5 px-4 text-white text-sm placeholder-white/30 focus:outline-none focus:border-[#FF4D2E]"
+          />
+          <CtaPresetChips
+            current={form.ctaTarget}
+            onPick={(value) => setField('ctaTarget', value)}
           />
         </FormField>
       </div>
@@ -1160,5 +1180,57 @@ function RadioPill({
       <span className="font-semibold block">{label}</span>
       {hint && <span className="text-[0.65rem] text-white/40">{hint}</span>}
     </button>
+  );
+}
+
+// CTA target presets — one click fills the form field with the right
+// anchor/modal-key string. Sectioned so Alex can scan by category.
+// Section IDs come from <section id="..."> tags in App.tsx; modal keys
+// match the openAnnouncementModal switch in App.tsx.
+const CTA_TARGET_PRESETS = {
+  Sections: [
+    { label: 'Plans', value: '#plans' },
+    { label: 'Studio', value: '#studio' },
+    { label: 'Transformations', value: '#transformations' },
+    { label: 'Reviews', value: '#testimonials' },
+    { label: 'Get Started', value: '#book' },
+  ],
+  Modals: [
+    { label: 'Booking', value: 'modal:booking' },
+    { label: 'Plans Shop', value: 'modal:shop' },
+    { label: 'Quick Message', value: 'modal:message' },
+    { label: 'About', value: 'modal:about' },
+  ],
+} as const;
+
+function CtaPresetChips({ current, onPick }: { current: string; onPick: (v: string) => void }) {
+  return (
+    <div className="mt-3 space-y-2">
+      {(Object.entries(CTA_TARGET_PRESETS) as [string, readonly { label: string; value: string }[]][]).map(([group, items]) => (
+        <div key={group}>
+          <p className="text-[0.6rem] uppercase tracking-[0.18em] text-white/30 font-semibold mb-1.5">{group}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {items.map(item => {
+              const active = current === item.value;
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => onPick(item.value)}
+                  className={`text-xs px-2.5 py-1 rounded-md border transition-colors ${
+                    active
+                      ? 'border-[#FF4D2E]/40 bg-[#FF4D2E]/15 text-[#FF4D2E]'
+                      : 'border-white/10 bg-white/[0.03] text-white/70 hover:bg-white/[0.07] hover:text-white'
+                  }`}
+                  title={item.value}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }

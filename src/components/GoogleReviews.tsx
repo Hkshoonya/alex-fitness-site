@@ -198,10 +198,14 @@ export default function GoogleReviews() {
               </div>
             </div>
 
-            {/* Source badge */}
-            <span className="text-[10px] text-white/30 bg-white/5 px-2 py-1 rounded capitalize">
-              {review.source}
-            </span>
+            {/* Source badge — only on live Google data. For local fallback
+                testimonials, claiming "google" or "facebook" as the source
+                would mislead readers about the data's provenance. */}
+            {isLive && (
+              <span className="text-[10px] text-white/30 bg-white/5 px-2 py-1 rounded capitalize">
+                {review.source}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -242,7 +246,9 @@ export default function GoogleReviews() {
               </p>
               <div className="flex items-center justify-between">
                 <span className="text-white/50 text-sm font-medium">{r.name}</span>
-                <span className="text-[10px] text-white/30 bg-white/5 px-2 py-0.5 rounded capitalize">{r.source}</span>
+                {isLive && (
+                  <span className="text-[10px] text-white/30 bg-white/5 px-2 py-0.5 rounded capitalize">{r.source}</span>
+                )}
               </div>
             </div>
           ))}

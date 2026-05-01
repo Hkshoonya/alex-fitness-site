@@ -174,6 +174,14 @@ export const createCardPayment = async (params: {
   // null for flat-price plans (app-only, online-monthly, online-3month)
   frequencyIndex: number | null;
   trainerId: 'alex1' | 'alex2';
+  // Coach preference signaling. With Square as the source of truth for
+  // who's coaching, multiple coaches may map to the same pricing slot
+  // (`alex1`). These two fields tell Alex who the client picked so he
+  // can assign the right trainer manually. Echoed in the Square payment
+  // note. Optional for backwards compat with checkout flows that
+  // pre-date this feature.
+  coachPreferenceId?: string;
+  coachPreferenceName?: string;
   cardToken: string;
   client: { email: string; name: string; phone?: string };
 }): Promise<{
@@ -213,6 +221,8 @@ export const createCardPayment = async (params: {
         planId: params.planId,
         frequencyIndex: params.frequencyIndex,
         trainerId: params.trainerId,
+        coachPreferenceId: params.coachPreferenceId || '',
+        coachPreferenceName: params.coachPreferenceName || '',
       }),
     });
     const data = await response.json();
@@ -240,6 +250,11 @@ export const createCardPayment = async (params: {
 export const storePurchase = (purchase: {
   planId: string;
   trainerId: 'alex1' | 'alex2';
+  // Coach preference signaling — see createCardPayment params for context.
+  // Surfaced in PostPurchaseBooking so Alex sees which coach the client
+  // wanted before he assigns the booking.
+  coachPreferenceId?: string;
+  coachPreferenceName?: string;
   paymentId: string;
   amount: number;
   purchaseDate: string;

@@ -11,6 +11,7 @@ import { getTrainingPlans, refreshCatalog, getCatalogCacheStatus, getLastCatalog
 import { initializeAllPaymentMethods, createCardPayment, storePurchase, type PaymentMethods } from '@/api/squarePayments';
 import { provisionNewClientWithPlan } from '@/api/trainerize';
 import { getTeamMembers, type TeamMember } from '@/api/squareAvailability';
+import { asset } from '@/lib/assets';
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 // Recurring auto-pay (purchaseAndSubscribe) is deferred — see handlePayment.
@@ -63,11 +64,16 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
     return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
 
-  // Sync trainer cards from Square Team Members. Same source of truth as
-  // BookingModal — head coach fills the alex1 slot, first non-head coach fills
-  // alex2. Slot id stays catalog-bound (worker pricing contract). If Square
-  // has no associate coach, the alex2 card is hidden so we never render
-  // placeholder photos for a coach who doesn't actually exist.
+  // Square is the source of truth for who's coaching. Every active non-
+  // consultation Square Team Member gets a card. Pricing is uniform (all
+  // coaches charge Alex's full plan price) — the picker is a preference
+  // signal so Alex knows which coach the client wants. The actual coach
+  // identity travels to the worker via `coachPreferenceId/Name` and ends
+  // up in the Square payment note.
+  //
+  // The `id: 'alex1'` slot is preserved as the worker pricing key for
+  // backwards compat (TRAINER_MULTIPLIERS in webhook-handler.js). All
+  // coaches resolve to it now → uniform pricing without a worker change.
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
@@ -75,24 +81,37 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
       try {
         const team = await getTeamMembers();
         if (cancelled) return;
-        const head = team.find((m: TeamMember) => m.role === 'head-coach');
-        const associate = team.find((m: TeamMember) => m.role !== 'head-coach' && m.role !== 'consultation');
-        const merged = trainers
-          .map((catalog) => {
-            const sq = catalog.id === 'alex1' ? head : associate;
-            if (!sq) return catalog;
+        const fallbackHead = trainers.find(t => t.isHead) || trainers[0];
+        const merged: Trainer[] = team
+          .filter((m: TeamMember) => m.role !== 'consultation')
+          .map((m: TeamMember) => {
+            const isHead = m.role === 'head-coach';
             return {
-              ...catalog,
-              name: sq.name || catalog.name,
-              title: sq.title || catalog.title,
-              image: sq.image || catalog.image,
-              specialties: sq.specialties.length > 0 ? sq.specialties : catalog.specialties,
+              id: 'alex1' as const,
+              squareTeamMemberId: m.squareTeamMemberId || m.id,
+              isHead,
+              name: m.name,
+              title: m.title || (isHead ? 'Head Coach & Founder' : 'Trainer'),
+              image: m.image || (isHead ? fallbackHead.image : asset('/images/coach-portrait.jpg')),
+              bio: isHead
+                ? fallbackHead.bio
+                : 'Certified personal trainer at Alex\'s Fitness, working alongside Alex Davis to deliver the same proven programs.',
+              experience: isHead ? fallbackHead.experience : '',
+              specialties: m.specialties.length > 0
+                ? m.specialties
+                : (isHead ? fallbackHead.specialties : ['Personal Training', 'Strength', 'Conditioning']),
+              priceMultiplier: 1.0,
+              discount: 0,
             };
           })
-          .filter((t) => t.id !== 'alex2' || !!associate);
+          .sort((a, b) => (b.isHead ? 1 : 0) - (a.isHead ? 1 : 0));
         if (merged.length === 0) return;
         setLiveTrainers(merged);
-        setSelectedTrainer((prev) => merged.find((t) => t.id === prev.id) || merged[0]);
+        setSelectedTrainer((prev) => {
+          const sameSquareId = prev.squareTeamMemberId
+            && merged.find((t) => t.squareTeamMemberId === prev.squareTeamMemberId);
+          return sameSquareId || merged[0];
+        });
       } catch {
         // Stay on the static fallback — already set as initial state.
       }
@@ -264,6 +283,8 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
           planId: selectedPlan.id,
           frequencyIndex: selectedPlan.frequency.length > 0 ? selectedFrequency : null,
           trainerId: selectedTrainer.id,
+          coachPreferenceId: selectedTrainer.squareTeamMemberId,
+          coachPreferenceName: selectedTrainer.name,
           cardToken: cardToken!,
           client: { email: clientInfo.email, name: clientInfo.name, phone: clientInfo.phone },
         });
@@ -295,6 +316,8 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
       storePurchase({
         planId: selectedPlan.id,
         trainerId: selectedTrainer.id,
+        coachPreferenceId: selectedTrainer.squareTeamMemberId,
+        coachPreferenceName: selectedTrainer.name,
         paymentId,
         amount: serverAmount,
         purchaseDate: new Date().toISOString(),
@@ -572,12 +595,17 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
               <p className="text-white/60 mb-6">Choose who you want to train with:</p>
 
               <div className="space-y-4">
-                {liveTrainers.map((trainer) => (
+                {liveTrainers.map((trainer) => {
+                  const cardKey = trainer.squareTeamMemberId || trainer.id;
+                  const isSelected = trainer.squareTeamMemberId
+                    ? selectedTrainer.squareTeamMemberId === trainer.squareTeamMemberId
+                    : selectedTrainer.id === trainer.id;
+                  return (
                   <div
-                    key={trainer.id}
+                    key={cardKey}
                     onClick={() => handleTrainerSelect(trainer)}
                     className={`bg-white/5 border rounded-xl p-5 cursor-pointer transition-all hover:bg-white/[0.07] ${
-                      selectedTrainer.id === trainer.id
+                      isSelected
                         ? 'border-[#FF4D2E] bg-[#FF4D2E]/5'
                         : 'border-white/10 hover:border-white/20'
                     }`}
@@ -589,7 +617,7 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                           <div>
                             <h3 className="text-white font-semibold flex items-center gap-2">
                               {trainer.name}
-                              {trainer.id === 'alex1' && (
+                              {trainer.isHead && (
                                 <span className="bg-[#FF4D2E] text-white text-xs px-2 py-0.5 rounded-full">Head Trainer</span>
                               )}
                             </h3>
@@ -608,7 +636,8 @@ export default function TrainingPlansShop({ isOpen, onClose, onPurchaseComplete 
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
               <button onClick={() => selectedPlan.frequency.length > 0 ? setStep('configure') : setStep('browse')} className="mt-6 text-white/60 hover:text-white text-sm flex items-center gap-1">

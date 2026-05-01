@@ -1534,6 +1534,14 @@ export default {
       // frequencyIndex is null for flat-price plans (app/online); a number for
       // frequency-variant plans (4-week / 12-week trainer plans).
       const frequencyIndex = body.frequencyIndex;
+      // Coach preference signaling — Square is the source of truth for who's
+      // coaching, but multiple coaches may share the same pricing slot
+      // ('alex1'). These fields tell Alex which specific coach the client
+      // picked. Echoed in the Square payment note so Alex sees it in his
+      // Square Dashboard. Optional: empty strings collapse to null in the
+      // claim so old payments without these fields are still valid.
+      const coachPreferenceId = typeof body.coachPreferenceId === 'string' ? body.coachPreferenceId.trim().slice(0, 60) : '';
+      const coachPreferenceName = typeof body.coachPreferenceName === 'string' ? body.coachPreferenceName.trim().slice(0, 80) : '';
 
       if (!cardToken || !email || !planId || !trainerId) {
         return new Response(JSON.stringify({
@@ -1565,7 +1573,11 @@ export default {
       // Plan claim baked into Square payment.note as JSON. /credit-grant
       // re-fetches the payment and parses this back to authorize the credit
       // grant — the client never gets to retell the plan story after paying.
+      // coachPreferenceName is placed FIRST so Alex sees the picked coach at
+      // a glance when he opens the payment in his Square Dashboard.
       const planClaim = JSON.stringify({
+        coachPreferenceName: coachPreferenceName || null,
+        coachPreferenceId: coachPreferenceId || null,
         planId, frequencyIndex: frequencyIndex ?? null, trainerId, email,
       });
 
@@ -1663,8 +1675,10 @@ export default {
         const pd = await payResp.json();
         const paymentId = pd.payment?.id;
 
-        await logEvent('payment', `Checkout success: ${email} → $${amountCents / 100} (${planName})`, {
+        await logEvent('payment', `Checkout success: ${email} → $${amountCents / 100} (${planName})${coachPreferenceName ? ` — coach: ${coachPreferenceName}` : ''}`, {
           paymentId, customerId, cardId, amountCents, email, planId, trainerId, frequencyIndex,
+          coachPreferenceId: coachPreferenceId || null,
+          coachPreferenceName: coachPreferenceName || null,
         }, env);
 
         return new Response(JSON.stringify({

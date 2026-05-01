@@ -18,20 +18,34 @@ export interface TrainingPlan {
 }
 
 export interface Trainer {
+  // Pricing slot id ('alex1' = full price). With Square as source of truth
+  // for coach identity, all coaches uniformly use 'alex1' and pricing comes
+  // from the worker; the actual coach identity travels via `squareTeamMemberId`.
   id: 'alex1' | 'alex2';
+  /** Square Team Member ID — the real coach identity (shown to Alex via
+   *  Square payment note + stored purchase). Optional only because the
+   *  static fallback predates Square sync. */
+  squareTeamMemberId?: string;
+  /** Marks the head coach (renders the "Head Trainer" badge). */
+  isHead?: boolean;
   name: string;
   title: string;
   image: string;
   bio: string;
   experience: string;
   specialties: string[];
+  /** Display-only fallback. The authoritative price comes from the worker. */
   priceMultiplier: number;
+  /** Display-only fallback. Discounts come from Square (Step 2). */
   discount: number;
 }
 
+// Static fallback. Used only when Square is unreachable — production data
+// comes from `getTeamMembers()` and is merged at runtime.
 export const trainers: Trainer[] = [
   {
     id: 'alex1',
+    isHead: true,
     name: 'Alex Davis',
     title: 'Head Trainer & Founder',
     image: asset('/images/alex-portrait.jpg'),
@@ -40,17 +54,6 @@ export const trainers: Trainer[] = [
     specialties: ['Strength Training', 'Body Transformation', 'Corrective Exercise', 'Nutrition Coaching'],
     priceMultiplier: 1.0,
     discount: 0,
-  },
-  {
-    id: 'alex2',
-    name: 'Alex Martinez',
-    title: 'Associate Trainer',
-    image: asset('/images/coach-portrait.jpg'),
-    bio: 'Certified personal trainer with 8+ years of experience. Specializes in HIIT, boxing, and functional fitness training.',
-    experience: '8+ Years',
-    specialties: ['HIIT', 'Boxing', 'Functional Fitness', 'Weight Loss'],
-    priceMultiplier: 0.8,
-    discount: 20,
   },
 ];
 

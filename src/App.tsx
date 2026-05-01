@@ -322,13 +322,12 @@ function App() {
   }, []);
 
   // Preview hatch — open MemberAgreement with mock data when the hash is
-  // `#/preview-agreement`. Lets Alex (and us) eyeball the legal flow without
-  // going through Square checkout. Fully read-only against the worker
-  // (paymentId starts with `_preview_` so any real `/credit-grant` would
-  // reject it). Removing the hash closes it; signing locally posts to the
-  // worker but the worker accepts the preview hash and stores it like any
-  // other record (visible in admin if we add a retrieval endpoint).
+  // `#/preview-agreement`. DEV-ONLY. Production builds silently strip the
+  // hash and no-op so a leaked link or bookmark cannot trigger an agreement
+  // sign on the live site. The worker also rejects `_preview_*` paymentIds
+  // (skips KV + email) as a second layer in case the frontend is bypassed.
   useEffect(() => {
+    if (!import.meta.env.DEV) return;
     const checkPreview = () => {
       if (window.location.hash !== '#/preview-agreement') return;
       setAgreementResume({
@@ -347,6 +346,17 @@ function App() {
     checkPreview();
     window.addEventListener('hashchange', checkPreview);
     return () => window.removeEventListener('hashchange', checkPreview);
+  }, []);
+
+  // Production hardening — strip the preview hash if it shows up on a
+  // production build (e.g. someone bookmarked the dev URL). Replaces the
+  // hash with `#/` so a refresh doesn't re-trigger anything, and the early
+  // return above means the dev-only effect can't run anyway.
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    if (window.location.hash === '#/preview-agreement') {
+      history.replaceState(null, '', window.location.pathname + '#/');
+    }
   }, []);
 
   useEffect(() => {

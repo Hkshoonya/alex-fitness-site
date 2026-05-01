@@ -2461,7 +2461,10 @@ export default {
     // version pin and let the frontend code be the canonical source.
     if (url.pathname === '/api/agreement/sign' && request.method === 'POST') {
       if (!isAllowedOrigin) return new Response(JSON.stringify({ error: 'Unauthorized origin' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      if (!await checkRateLimit(request, 'agreement-sign', 30, env)) {
+      // Tightened rate limit: real members sign once per purchase. 5/2min
+      // per IP is plenty for the legitimate flow + retry, while making
+      // bot spam (one email per accepted POST) materially harder.
+      if (!await checkRateLimit(request, 'agreement-sign', 5, env)) {
         return new Response(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
       let body;
@@ -2476,6 +2479,28 @@ export default {
 
       if (!paymentId || typeof paymentId !== 'string') {
         return new Response(JSON.stringify({ error: 'paymentId required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      // Reject obvious test/preview/mock paymentIds. The dev preview hash
+      // (`#/preview-agreement`) is now DEV-only on the frontend, so a
+      // `_preview_*` paymentId reaching the worker means the frontend gate
+      // was bypassed — almost certainly a bot probing the endpoint. We
+      // return success-shaped 200 (so any honest dev probe doesn't error)
+      // but write nothing to KV and send no email. Matches the "smoke test"
+      // / `_smoke_*` ID convention for the same reason.
+      if (
+        paymentId.startsWith('_preview_') ||
+        paymentId.startsWith('_smoke_') ||
+        paymentId.startsWith('mock_')
+      ) {
+        await logEvent('agreement', 'preview-rejected', {
+          paymentId: paymentId.slice(0, 60),
+          ip: request.headers.get('CF-Connecting-IP') || '',
+        }, env);
+        return new Response(JSON.stringify({
+          ok: true,
+          preview: true,
+          note: 'preview/mock paymentId — not stored, no email sent',
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
       if (!agreementVersion || typeof agreementVersion !== 'string') {
         return new Response(JSON.stringify({ error: 'agreementVersion required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

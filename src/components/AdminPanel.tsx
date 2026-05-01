@@ -2,13 +2,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Shield, LogOut, Plus, X, Check, Trash2, Pencil, Calendar, Users, Tag,
   Mail, Phone, ChevronDown, Loader2, AlertCircle, Award, ExternalLink,
-  Megaphone, Upload, Image as ImageIcon, Lightbulb,
+  Megaphone, Upload, Image as ImageIcon, Lightbulb, Database, RefreshCw,
 } from 'lucide-react';
 import {
   isAdminTokenFresh, verifyAdminToken, saveAdminSession, clearAdminSession,
   getChallengeSignups, getTrainerizePrograms, assignTrainerizeProgram,
   describeTrainerizeReason, refundCredit,
-  type ChallengeSignup, type TrainerizeProgram,
+  getCreditMap, clearCreditMap,
+  type ChallengeSignup, type TrainerizeProgram, type CreditMapEntry,
 } from '@/api/admin';
 import {
   getActiveChallenges, addChallenge, removeChallenge, updateChallenge,
@@ -790,7 +791,7 @@ function CreditsTab() {
   };
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-4xl">
       <AdminTipsBox
         tips={[
           'Use this when a client missed a session you want to forgive (sick, emergency, scheduling mix-up).',
@@ -799,7 +800,7 @@ function CreditsTab() {
         ]}
       />
 
-      <h2 className="text-white text-xl font-semibold mt-6 mb-4">Refund a Session Credit</h2>
+      <h2 className="text-white text-xl font-semibold mt-6 mb-4 max-w-2xl">Refund a Session Credit</h2>
 
       <div className="bg-white/5 border border-white/10 rounded-xl p-6 space-y-5">
         <div>
@@ -886,6 +887,269 @@ function CreditsTab() {
             {result.message}
           </div>
         )}
+      </div>
+
+      <CreditCatalogMapSection />
+    </div>
+  );
+}
+
+/**
+ * Catalog credit map — auto-learning view.
+ *
+ * Replaces curl /admin/credit-map for Alex. Shows three columns:
+ *   • Env: manual overrides set via wrangler secret CREDIT_CATALOG_MAP
+ *   • Learned: auto-populated from prior orders (most common case)
+ *   • Effective: env wins on conflict — what the worker actually uses
+ *
+ * The clear button wipes only the learned map (env is not touchable from
+ * here for safety — that requires wrangler). Audit log captures the
+ * snapshot for recovery.
+ */
+function CreditCatalogMapSection() {
+  const [data, setData] = useState<{
+    env: Record<string, CreditMapEntry>;
+    learned: Record<string, CreditMapEntry>;
+    effective: Record<string, CreditMapEntry>;
+    counts: { env: number; learned: number; effective: number };
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [lastClearResult, setLastClearResult] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const resp = await getCreditMap();
+    if (!resp.ok) {
+      setError(resp.error || 'Failed to load credit map');
+      setData(null);
+    } else {
+      setData({
+        env: resp.env || {},
+        learned: resp.learned || {},
+        effective: resp.effective || {},
+        counts: resp.counts || { env: 0, learned: 0, effective: 0 },
+      });
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleClear = async () => {
+    setClearing(true);
+    setLastClearResult(null);
+    const resp = await clearCreditMap();
+    if (resp.ok) {
+      setLastClearResult(`Cleared ${resp.cleared ?? 0} learned variations. Future orders will re-learn via name matching.`);
+      await load();
+    } else {
+      setLastClearResult(`Clear failed: ${resp.error}`);
+    }
+    setClearing(false);
+    setConfirmingClear(false);
+  };
+
+  const learnedEntries = data ? Object.entries(data.learned) : [];
+  const envEntries = data ? Object.entries(data.env) : [];
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-white text-xl font-semibold flex items-center gap-2">
+          <Database size={20} className="text-[#FF4D2E]" />
+          Catalog Credit Map
+        </h2>
+        <button
+          onClick={load}
+          disabled={loading}
+          className="text-white/60 hover:text-white text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 hover:border-white/20 transition-colors disabled:opacity-50"
+          title="Refresh"
+        >
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          Refresh
+        </button>
+      </div>
+
+      <AdminTipsBox
+        tips={[
+          'The worker auto-learns each Square product\'s credit value the first time someone buys it. After the first sale of a product, future orders match by Square ID — so renaming the product is safe.',
+          'Env overrides take precedence — set them via wrangler secret CREDIT_CATALOG_MAP if a learned entry was wrong. Until then, learned entries are what get applied.',
+          'Clearing the learned map forces every variation to re-learn from name matching on its next sale. Only do this if a misfire needs full reset.',
+        ]}
+      />
+
+      {loading && (
+        <div className="bg-white/5 border border-white/10 rounded-xl p-6 text-center text-white/50 mt-4 flex items-center justify-center gap-2">
+          <Loader2 size={16} className="animate-spin" />
+          Loading credit map…
+        </div>
+      )}
+
+      {error && !loading && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 mt-4 flex items-start gap-2">
+          <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+          <p className="text-red-300 text-sm">{error}</p>
+        </div>
+      )}
+
+      {data && !loading && !error && (
+        <div className="mt-4 space-y-5">
+          {/* Stat strip */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+              <p className="text-white/40 text-xs uppercase tracking-wider">Env overrides</p>
+              <p className="text-2xl font-bold text-white mt-1">{data.counts.env}</p>
+              <p className="text-white/50 text-xs mt-0.5">Manual, wrangler-set</p>
+            </div>
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+              <p className="text-white/40 text-xs uppercase tracking-wider">Learned</p>
+              <p className="text-2xl font-bold text-white mt-1">{data.counts.learned}</p>
+              <p className="text-white/50 text-xs mt-0.5">Auto-learned from orders</p>
+            </div>
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+              <p className="text-white/40 text-xs uppercase tracking-wider">Effective</p>
+              <p className="text-2xl font-bold text-white mt-1">{data.counts.effective}</p>
+              <p className="text-white/50 text-xs mt-0.5">What the worker uses</p>
+            </div>
+          </div>
+
+          {/* Env overrides table */}
+          {envEntries.length > 0 && (
+            <CreditMapTable
+              title="Env Overrides"
+              subtitle="From CREDIT_CATALOG_MAP wrangler secret. Always wins."
+              entries={envEntries}
+              showUsage={false}
+            />
+          )}
+
+          {/* Learned table */}
+          {learnedEntries.length > 0 ? (
+            <CreditMapTable
+              title="Auto-Learned Variations"
+              subtitle="Captured from successful name-matched orders."
+              entries={learnedEntries}
+              showUsage={true}
+            />
+          ) : (
+            <div className="bg-white/5 border border-white/10 rounded-xl p-5 text-sm text-white/50">
+              No learned variations yet. The first sale of each plan / credits product will populate this list.
+            </div>
+          )}
+
+          {/* Clear button */}
+          {learnedEntries.length > 0 && (
+            <div className="border-t border-white/10 pt-5">
+              <p className="text-white/60 text-sm mb-3">
+                Wipe all auto-learned variations? Future orders will re-learn from name matching. Env overrides are unaffected.
+              </p>
+              {!confirmingClear ? (
+                <button
+                  onClick={() => setConfirmingClear(true)}
+                  className="text-red-300 hover:text-red-200 text-sm flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 hover:bg-red-500/10 transition-colors"
+                >
+                  <Trash2 size={14} />
+                  Clear learned map
+                </button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleClear}
+                    disabled={clearing}
+                    className="bg-red-500 hover:bg-red-400 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-lg flex items-center gap-1.5"
+                  >
+                    {clearing ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                    Yes, clear all {learnedEntries.length} entries
+                  </button>
+                  <button
+                    onClick={() => setConfirmingClear(false)}
+                    disabled={clearing}
+                    className="text-white/60 hover:text-white text-sm px-3 py-2"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+              {lastClearResult && (
+                <p className={`mt-3 text-sm ${lastClearResult.startsWith('Clear failed') ? 'text-red-300' : 'text-green-300'}`}>
+                  {lastClearResult}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CreditMapTable({
+  title,
+  subtitle,
+  entries,
+  showUsage,
+}: {
+  title: string;
+  subtitle: string;
+  entries: [string, CreditMapEntry][];
+  showUsage: boolean;
+}) {
+  return (
+    <div className="bg-white/[0.03] border border-white/10 rounded-xl overflow-hidden">
+      <div className="px-5 py-3 border-b border-white/10">
+        <h3 className="text-white font-semibold text-sm">{title}</h3>
+        <p className="text-white/50 text-xs mt-0.5">{subtitle}</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="text-white/40 text-[10px] uppercase tracking-wider">
+            <tr className="border-b border-white/5">
+              <th className="text-left px-5 py-2.5 font-semibold">Product</th>
+              <th className="text-left px-3 py-2.5 font-semibold">Variation ID</th>
+              <th className="text-right px-3 py-2.5 font-semibold">Credits</th>
+              <th className="text-right px-3 py-2.5 font-semibold">Duration</th>
+              {showUsage && <>
+                <th className="text-right px-3 py-2.5 font-semibold">Sales</th>
+                <th className="text-right px-5 py-2.5 font-semibold">Last seen</th>
+              </>}
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map(([variationId, entry]) => (
+              <tr key={variationId} className="border-b border-white/5 last:border-0 hover:bg-white/[0.02]">
+                <td className="px-5 py-2.5 text-white">
+                  <div className="font-medium truncate max-w-xs">{entry.name || '—'}</div>
+                  {entry.source && (
+                    <div className="text-white/40 text-[10px] uppercase tracking-wider mt-0.5">
+                      {entry.source}
+                    </div>
+                  )}
+                </td>
+                <td className="px-3 py-2.5 text-white/60 font-mono text-[11px] truncate max-w-[140px]">
+                  {variationId}
+                </td>
+                <td className="px-3 py-2.5 text-right text-white font-semibold">
+                  {entry.credits}
+                </td>
+                <td className="px-3 py-2.5 text-right text-white/70">
+                  {entry.duration ? `${entry.duration}m` : '—'}
+                </td>
+                {showUsage && <>
+                  <td className="px-3 py-2.5 text-right text-white/70">
+                    {entry.count ?? '—'}
+                  </td>
+                  <td className="px-5 py-2.5 text-right text-white/50 text-xs">
+                    {entry.lastSeen ? new Date(entry.lastSeen).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '—'}
+                  </td>
+                </>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

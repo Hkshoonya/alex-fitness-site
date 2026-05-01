@@ -141,6 +141,70 @@ export async function refundCredit(params: {
   }
 }
 
+// =============================================================================
+// Credit catalog map (M-1 self-learning admin)
+// =============================================================================
+
+export interface CreditMapEntry {
+  credits: number;
+  duration?: number;
+  source?: 'session-credits' | 'training-plan' | string;
+  name?: string;
+  firstSeen?: string;
+  lastSeen?: string;
+  count?: number;
+}
+
+export interface CreditMapResponse {
+  ok: boolean;
+  error?: string;
+  env?: Record<string, CreditMapEntry>;
+  learned?: Record<string, CreditMapEntry>;
+  effective?: Record<string, CreditMapEntry>;
+  counts?: { env: number; learned: number; effective: number };
+}
+
+/**
+ * Fetch the current credit catalog map. Returns three views:
+ *   - env: manual overrides set via wrangler secret CREDIT_CATALOG_MAP
+ *   - learned: auto-populated from prior orders (variation_id → credits/duration)
+ *   - effective: env wins on conflict; this is what the worker actually uses
+ */
+export async function getCreditMap(): Promise<CreditMapResponse> {
+  if (!WORKER_URL) return { ok: false, error: 'Worker not configured' };
+  try {
+    const resp = await fetch(`${WORKER_URL}/admin/credit-map`, { headers: adminHeaders() });
+    if (resp.status === 401) return { ok: false, error: 'Admin token expired — please log in again.' };
+    if (resp.status === 429) return { ok: false, error: 'Too many requests — try again in a moment.' };
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return { ok: false, error: data.error || `Failed (${resp.status})` };
+    return { ok: true, ...data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+  }
+}
+
+/**
+ * Wipe the auto-learned credit map. Env overrides are unaffected. Use this
+ * if a previously-misfired learning needs to be re-learned from scratch.
+ * Worker logs the snapshot of what was cleared for audit recovery.
+ */
+export async function clearCreditMap(): Promise<{ ok: boolean; cleared?: number; error?: string }> {
+  if (!WORKER_URL) return { ok: false, error: 'Worker not configured' };
+  try {
+    const resp = await fetch(`${WORKER_URL}/admin/credit-map/clear`, {
+      method: 'POST',
+      headers: adminHeaders(),
+    });
+    if (resp.status === 401) return { ok: false, error: 'Admin token expired — please log in again.' };
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return { ok: false, error: data.error || `Failed (${resp.status})` };
+    return { ok: true, cleared: data.cleared };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+  }
+}
+
 export interface TrainerizeProgram {
   id: number;
   name: string;

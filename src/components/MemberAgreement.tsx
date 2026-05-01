@@ -121,6 +121,10 @@ export default function MemberAgreement({
     const signedAt = new Date().toISOString();
 
     // Body sent to /api/agreement/sign. Worker stores all of this immutably.
+    // We send `agreementText` alongside `textHash` so the worker can re-hash
+    // server-side and verify integrity (defense-in-depth) AND can embed the
+    // exact signed text in the notification email + KV record without having
+    // to maintain a duplicate copy of the legal text.
     const body = {
       paymentId,
       agreementVersion: AGREEMENT_VERSION,
@@ -133,6 +137,7 @@ export default function MemberAgreement({
       childName: isMinor ? childName.trim() : null,
       parentSignature: isMinor ? parentSignature.trim() : null,
       textHash,
+      agreementText: FULL_AGREEMENT_TEXT,
       consents: {
         liability: accepted,
         planTerms: accepted,

@@ -565,6 +565,181 @@ async function logEvent(category, message, data, env) {
 }
 
 /**
+ * Email Alex (and CC the member) a copy of a signed Member Agreement.
+ *
+ * Triggered from /api/agreement/sign right after the record is durably
+ * stored in KV. Sent via Resend (same provider used for the magic-link
+ * portal email — same key, same from-address).
+ *
+ * Failure is non-fatal at the call site: logEvent('agreement-email-failed')
+ * is the only side effect. The KV record is the source of truth either way.
+ */
+async function sendSignedAgreementEmail({
+  alexEmail,
+  fromEmail,
+  memberEmail,
+  record,
+  env,
+}) {
+  if (!env.RESEND_API_KEY) {
+    await logEvent('error', 'agreement-email-resend-not-configured', {
+      paymentId: record.paymentId,
+    }, env);
+    return;
+  }
+
+  const memberLabel = record.isMinor
+    ? `${record.childName} (minor) — signed by ${record.legalName}`
+    : record.legalName;
+
+  // Plan summary block. Not all fields are guaranteed in the snapshot
+  // (legacy purchases may have missing keys), so guard each field.
+  const plan = record.planSnapshot || {};
+  const planRows = [
+    plan.planName ? ['Plan', plan.planName] : null,
+    plan.sessions != null ? ['Sessions', `${plan.sessions} × ${plan.durationMinutes || 60} min`] : null,
+    plan.amountPaid != null ? ['Amount paid', `$${Number(plan.amountPaid).toFixed(2)}`] : null,
+    plan.trainerName ? ['Trainer', plan.trainerName] : null,
+    plan.paymentDate ? ['Payment date', new Date(plan.paymentDate).toLocaleString()] : null,
+  ].filter(Boolean);
+
+  const planRowsHtml = planRows
+    .map(([k, v]) => `<tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">${escapeHtml(k)}</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(String(v))}</td></tr>`)
+    .join('');
+
+  const minorRowsHtml = record.isMinor
+    ? `<tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Minor (child)</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(record.childName || '')}</td></tr>
+<tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Parent / guardian</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(record.legalName || '')}</td></tr>`
+    : '';
+
+  const html = `<!doctype html>
+<html><body style="margin:0;padding:0;background:#0B0B0D;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#fff;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0B0D;padding:32px 0;">
+    <tr><td align="center">
+      <table width="640" cellpadding="0" cellspacing="0" style="background:#111;border:1px solid rgba(255,255,255,0.08);border-radius:16px;overflow:hidden;max-width:640px;width:100%;">
+        <tr><td style="padding:32px 32px 16px;">
+          <h1 style="margin:0 0 4px;font-size:13px;color:#FF4D2E;letter-spacing:0.1em;text-transform:uppercase;">Alex Davis Fitness</h1>
+          <h2 style="margin:0;font-size:22px;color:#fff;font-weight:700;">Member Agreement signed</h2>
+          <p style="margin:8px 0 0;color:rgba(255,255,255,0.6);font-size:13px;">
+            Recorded ${new Date(record.recordedAt).toLocaleString()} · Version ${escapeHtml(record.agreementVersion)}
+          </p>
+        </td></tr>
+
+        <tr><td style="padding:0 32px 24px;">
+          <h3 style="margin:0 0 12px;font-size:14px;color:#fff;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:8px;">Member</h3>
+          <table cellpadding="0" cellspacing="0">
+            <tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Name</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(memberLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Email</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(record.email)}</td></tr>
+            ${record.phone ? `<tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Phone</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(record.phone)}</td></tr>` : ''}
+            ${minorRowsHtml}
+          </table>
+        </td></tr>
+
+        ${planRows.length > 0 ? `<tr><td style="padding:0 32px 24px;">
+          <h3 style="margin:0 0 12px;font-size:14px;color:#fff;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:8px;">Plan</h3>
+          <table cellpadding="0" cellspacing="0">${planRowsHtml}</table>
+        </td></tr>` : ''}
+
+        <tr><td style="padding:0 32px 24px;">
+          <h3 style="margin:0 0 12px;font-size:14px;color:#fff;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:8px;">Signature &amp; evidence</h3>
+          <table cellpadding="0" cellspacing="0">
+            <tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Signed name</td><td style="padding:6px 0;color:#fff;font-size:13px;font-weight:600;">${escapeHtml(record.signedName)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Signed at</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(record.signedAt)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">IP</td><td style="padding:6px 0;color:#fff;font-size:13px;">${escapeHtml(record.network?.ip || '—')} (${escapeHtml(record.network?.country || '?')})</td></tr>
+            <tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">Payment ID</td><td style="padding:6px 0;color:#fff;font-size:13px;font-family:Menlo,Monaco,monospace;word-break:break-all;">${escapeHtml(record.paymentId)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0;color:rgba(255,255,255,0.5);font-size:13px;">SHA-256 hash</td><td style="padding:6px 0;color:#fff;font-size:11px;font-family:Menlo,Monaco,monospace;word-break:break-all;">${escapeHtml(record.textHash)}</td></tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:0 32px 32px;">
+          <h3 style="margin:0 0 12px;font-size:14px;color:#fff;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:8px;">Full signed text</h3>
+          <pre style="margin:0;padding:16px;background:#0B0B0D;border:1px solid rgba(255,255,255,0.06);border-radius:8px;color:rgba(255,255,255,0.75);font-size:12px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;white-space:pre-wrap;word-wrap:break-word;">${escapeHtml(record.agreementText || '')}</pre>
+        </td></tr>
+
+        <tr><td style="padding:0 32px 32px;">
+          <p style="margin:0;color:rgba(255,255,255,0.4);font-size:11px;line-height:1.5;">
+            This is an automatic record of a signed Member Agreement. The hash, signed name, IP, and full text above prove what the member agreed to under version ${escapeHtml(record.agreementVersion)} of the agreement. Reply to this email to discuss with the member directly.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+
+  // Plain-text fallback — every email client can render this; useful for
+  // archival / search inside Gmail.
+  const text = [
+    'ALEX DAVIS FITNESS',
+    'Member Agreement signed',
+    `Recorded ${record.recordedAt} · Version ${record.agreementVersion}`,
+    '',
+    '— MEMBER —',
+    `Name: ${memberLabel}`,
+    `Email: ${record.email}`,
+    record.phone ? `Phone: ${record.phone}` : '',
+    record.isMinor ? `Minor: ${record.childName}` : '',
+    record.isMinor ? `Parent / guardian: ${record.legalName}` : '',
+    '',
+    '— PLAN —',
+    ...planRows.map(([k, v]) => `${k}: ${v}`),
+    '',
+    '— SIGNATURE & EVIDENCE —',
+    `Signed name: ${record.signedName}`,
+    `Signed at: ${record.signedAt}`,
+    `IP: ${record.network?.ip || '—'} (${record.network?.country || '?'})`,
+    `Payment ID: ${record.paymentId}`,
+    `SHA-256 hash: ${record.textHash}`,
+    '',
+    '— FULL SIGNED TEXT —',
+    record.agreementText || '',
+    '',
+    '— ARCHIVED —',
+    `Stored in worker KV at agreement:${record.paymentId}`,
+    'Reply to discuss with the member directly.',
+  ].filter(s => s !== '').join('\n');
+
+  const subject = record.isMinor
+    ? `Signed agreement: ${record.childName} (minor) — ${plan.planName || 'Plan'}`
+    : `Signed agreement: ${record.signedName} — ${plan.planName || 'Plan'}`;
+
+  const emailRes = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: fromEmail,
+      to: [alexEmail],
+      cc: [memberEmail],
+      reply_to: memberEmail,
+      subject,
+      html,
+      text,
+    }),
+  });
+
+  if (!emailRes.ok) {
+    const detail = await emailRes.text();
+    throw new Error(`resend ${emailRes.status}: ${detail.slice(0, 200)}`);
+  }
+}
+
+/**
+ * Tiny HTML escape — only for inline values inside the agreement email.
+ * Resend doesn't sanitize for us; user-provided strings (signed name,
+ * email, phone) need to be escaped before being injected into HTML.
+ */
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
  * Find a Trainerize user by email → returns integer userID or null
  * Required because tags, messages, and notes all need userID (not email)
  */
@@ -2296,7 +2471,7 @@ export default {
       const {
         paymentId, agreementVersion, signedAt, email, phone,
         signedName, legalName, isMinor, childName, parentSignature,
-        textHash, consents, planSnapshot, userAgent,
+        textHash, agreementText, consents, planSnapshot, userAgent,
       } = body || {};
 
       if (!paymentId || typeof paymentId !== 'string') {
@@ -2316,6 +2491,33 @@ export default {
       }
       if (!textHash || typeof textHash !== 'string' || !/^[a-f0-9]{64}$/.test(textHash)) {
         return new Response(JSON.stringify({ error: 'textHash must be a sha-256 hex string' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (!agreementText || typeof agreementText !== 'string' || agreementText.length < 100) {
+        return new Response(JSON.stringify({ error: 'agreementText required (the full text the user signed)' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      // Defense-in-depth integrity check: re-hash the supplied text and
+      // confirm it matches the supplied hash. If they don't match, the
+      // signed text and the claimed hash disagree — rejecting prevents a
+      // tampered email body from being archived under a "verified" hash.
+      {
+        const buf = await crypto.subtle.digest(
+          'SHA-256',
+          new TextEncoder().encode(agreementText),
+        );
+        const recomputed = Array.from(new Uint8Array(buf))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join('');
+        if (recomputed !== textHash) {
+          await logEvent('agreement', 'hash-mismatch', {
+            paymentId,
+            email: typeof email === 'string' ? email.toLowerCase() : '',
+            claimed: textHash.slice(0, 16),
+            recomputed: recomputed.slice(0, 16),
+          }, env);
+          return new Response(JSON.stringify({
+            error: 'agreementText does not match textHash — signed text was tampered or truncated',
+          }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
       }
       if (isMinor) {
         if (!childName || typeof childName !== 'string' || childName.trim().length < 2) {
@@ -2356,6 +2558,10 @@ export default {
         childName: isMinor && childName ? childName.trim() : null,
         parentSignature: isMinor && parentSignature ? parentSignature.trim() : null,
         textHash,
+        // Full signed text — stored alongside the hash so a future audit
+        // can reconstruct exactly what was agreed without depending on the
+        // frontend file at retrieval time. Hash already verified above.
+        agreementText,
         consents: {
           liability: !!consents.liability,
           planTerms: !!consents.planTerms,
@@ -2381,6 +2587,26 @@ export default {
         isMinor: !!isMinor,
         hashPrefix: textHash.slice(0, 12),
       }, env);
+
+      // Email a copy of the signed agreement to Alex (and CC the member so
+      // they have it for their own records). Best-effort — failure to email
+      // does NOT roll back the storage; the record is durable in KV either
+      // way and Alex can retrieve it via admin if the email blip drops one.
+      try {
+        await sendSignedAgreementEmail({
+          alexEmail: env.ALEX_EMAIL || 'alexdavisfit@gmail.com',
+          fromEmail: env.PORTAL_FROM_EMAIL || 'Alex Davis Fitness <onboarding@resend.dev>',
+          memberEmail: email,
+          record,
+          env,
+        });
+      } catch (e) {
+        await logEvent('error', 'agreement-email-failed', {
+          paymentId,
+          email: email.toLowerCase(),
+          err: e?.message || String(e),
+        }, env);
+      }
 
       return new Response(JSON.stringify({
         ok: true,

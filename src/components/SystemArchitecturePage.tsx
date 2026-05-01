@@ -338,7 +338,7 @@ const SECURITY_ITEMS: FeeLine[] = [
   { title: 'Square access token rotation',             detail: 'Token rotated · old prod token revoked · end-to-end verified.' },
   { title: 'Webhook signing-key rotation',             detail: 'New SQUARE_WEBHOOK_SIGNATURE_KEY · live test event verified.' },
   { title: 'Trainerize + Google OAuth + admin token rotation', detail: 'All worker secrets rotated and live-verified pre-launch.' },
-  { title: 'Admin token freshness + constant-time compare', detail: '30-day TTL · X-Admin-Token verified per write · timing-safe comparison.' },
+  { title: 'Admin token: soft rotation + constant-time compare', detail: 'No auto-expiry (single-coach UX) · 180-day rotation reminder · X-Admin-Token verified per write · timing-safe comparison.' },
   { title: 'PCI scope contained to browser',           detail: 'Web Payments SDK tokenizes card client-side · no PAN ever touches the worker or KV.' },
 ];
 

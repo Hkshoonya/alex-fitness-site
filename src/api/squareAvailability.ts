@@ -552,7 +552,12 @@ export async function createBooking(
   // never creates Square bookings directly anymore — the worker is the
   // only path that touches Square's /v2/bookings.
   purchaseToken?: string,
-): Promise<{ success: boolean; bookingId?: string; error?: string }> {
+  // Phase 6 (audit 2026-05-01 #1): Meet creation now happens server-side
+  // AFTER booking succeeds. Caller passes title/description; if absent,
+  // no Meet is created. The standalone /api/google/meet client function
+  // was removed for the same reason — Meet without booking is gone.
+  meetParams?: { title: string; description?: string },
+): Promise<{ success: boolean; bookingId?: string; error?: string; meetLink?: string; meetEventId?: string; meetWarning?: string }> {
 
   if (!isConfigured()) {
     // Hard-fail in production. The mock path silently writes a fake booking
@@ -627,6 +632,11 @@ export async function createBooking(
         teamMemberId,
         serviceVariationId: finalServiceVariationId,
         ...(purchaseToken ? { purchaseToken } : {}),
+        ...(meetParams ? {
+          wantMeetLink: true,
+          meetTitle: meetParams.title,
+          meetDescription: meetParams.description || '',
+        } : {}),
       }),
     });
 
@@ -681,7 +691,12 @@ export async function createBooking(
     // Trainerize sync still happens server-side via the Square
     // booking.created webhook — no need to fire from the browser.
 
-    return { success: true, bookingId: data.bookingId };
+    return {
+      success: true,
+      bookingId: data.bookingId,
+      ...(data.meetLink ? { meetLink: data.meetLink, meetEventId: data.meetEventId } : {}),
+      ...(data.meetWarning ? { meetWarning: data.meetWarning } : {}),
+    };
   } catch (error) {
     try { localStorage.removeItem(AVAILABILITY_CACHE_KEY); } catch { /* private mode */ }
     return {

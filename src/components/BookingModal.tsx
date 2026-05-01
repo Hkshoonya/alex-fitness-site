@@ -3,10 +3,23 @@ import { X, ChevronLeft, ChevronRight, Clock, Calendar, Check, Phone, Mail, User
 import { format, addDays, startOfWeek, addWeeks, isSameDay, isToday } from 'date-fns';
 import { getAvailability, getTeamMembers, createBooking, CANCEL_NOTICE_HOURS, type TimeSlot, type TeamMember } from '@/api/squareAvailability';
 import { CoachAvatar } from '@/components/CoachAvatar';
-import { createMeetEvent, type MeetingDetails } from '@/api/googleMeet';
 import { DEFAULT_TEAM_MEMBER_ID, getConsultationServiceId, getServiceId } from '@/api/squareConfig';
 import { getPurchases } from '@/api/squarePayments';
 // Trainerize sync handled automatically inside createBooking
+//
+// Phase 6 (audit 2026-05-01 #1): Meet creation is no longer a separate
+// pre-booking client call. The previous standalone /api/google/meet
+// endpoint was removed because a forged-Origin curl could create real
+// Calendar invites without ever booking. Meet creation now happens
+// server-side INSIDE /book-consultation and /book-session AFTER the
+// Square booking is confirmed. We pass meetParams to createBooking and
+// read meetLink back from its response.
+
+interface MeetingDetails {
+  meetLink: string;
+  eventId: string;
+  calendarLink: string;
+}
 
 interface BookingModalProps {
   isOpen: boolean;
@@ -172,45 +185,15 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
 
     try {
       const coachId = mode === 'consultation' ? DEFAULT_COACH : (selectedCoach?.id || DEFAULT_COACH);
-      let meetLink = '';
-
-      if (sessionType === 'virtual') {
-        const title = mode === 'consultation'
-          ? `Free Consultation — ${bookingData.name}`
-          : `${sessionDuration} Min Session — ${bookingData.name}`;
-        const meetResult = await createMeetEvent({
-          title,
-          startAt: selectedStartAt,
-          durationMinutes: sessionDuration,
-          attendeeEmail: bookingData.email,
-          attendeeName: bookingData.name,
-          // Passing phone lets the worker add a "PHONE BACKUP" block to
-          // the calendar event description — gives both sides a fallback
-          // if Meet doesn't work, and surfaces the client's number on
-          // Alex's calendar so he can call them directly.
-          attendeePhone: bookingData.phone,
-          description: `${mode === 'consultation' ? 'Free consultation' : 'Training session'} with Alex Davis Fitness\n\nGoals: ${bookingData.goals || 'Not specified'}`,
-        });
-        if (meetResult.success && meetResult.meeting) {
-          setMeetDetails(meetResult.meeting);
-          meetLink = meetResult.meeting.meetLink;
-        } else {
-          // Google Meet generation failed (worker OAuth not yet configured,
-          // API error, etc.). Surface on the success screen so the user
-          // knows Alex will send a link manually instead of wondering
-          // where it is.
-          setMeetFallbackMessage(
-            "We couldn't auto-generate a Meet link — Alex will send one to your email before the session."
-          );
-        }
-      }
 
       const label = mode === 'consultation' ? 'Free Consultation' : `${sessionDuration} Min Session`;
-      // Only include "Meet: <url>" when we actually have a link. When createMeetEvent
-      // fails, meetLink is '' — leaving the prefix in would render an ugly
-      // "Meet: \n…" in Square's customer_note.
+      // The Meet link is no longer baked into Square's customer_note since
+      // Meet creation runs server-side AFTER the booking is created. The
+      // Calendar invite (sent via sendUpdates: 'all' from the worker) is
+      // the canonical surface where both Alex and the client see the
+      // link, so the customer_note now only carries the modality + label.
       const goalsPrefix = sessionType === 'virtual'
-        ? (meetLink ? `[Virtual][${label}] Meet: ${meetLink}` : `[Virtual][${label}]`)
+        ? `[Virtual][${label}]`
         : `[In-Studio][${label}]`;
       // Pick the right Square service variation. Consultation maps to the
       // free 30-min consultation item; paid sessions use the duration-based
@@ -239,15 +222,38 @@ export default function BookingModal({ isOpen, onClose, showChoice = false }: Bo
           return;
         }
       }
+      const meetTitle = mode === 'consultation'
+        ? `Free Consultation — ${bookingData.name}`
+        : `${sessionDuration} Min Session — ${bookingData.name}`;
+      const meetDescription = `${mode === 'consultation' ? 'Free consultation' : 'Training session'} with Alex Davis Fitness\n\nGoals: ${bookingData.goals || 'Not specified'}`;
+      const meetParams = sessionType === 'virtual'
+        ? { title: meetTitle, description: meetDescription }
+        : undefined;
+
       const result = await createBooking(coachId, selectedStartAt, sessionDuration, {
         name: bookingData.name,
         email: bookingData.email,
         phone: bookingData.phone,
         goals: `${goalsPrefix}${bookingData.goals ? `\n${bookingData.goals}` : ''}`,
-      }, serviceVariationId, purchaseToken);
+      }, serviceVariationId, purchaseToken, meetParams);
 
       if (result.success) {
         setBookingError(null);
+        // Worker creates the Meet AFTER the booking succeeds, then folds
+        // meetLink + (optional) meetWarning into the booking response.
+        // When the link is present, populate meetDetails so the success
+        // screen renders the link block. When the worker reports a warning
+        // (Google Calendar API blip, OAuth not configured), surface the
+        // friendly fallback message instead — booking still stands.
+        if (result.meetLink) {
+          setMeetDetails({
+            meetLink: result.meetLink,
+            eventId: result.meetEventId || '',
+            calendarLink: '',
+          });
+        } else if (sessionType === 'virtual' && result.meetWarning) {
+          setMeetFallbackMessage(result.meetWarning);
+        }
         setStep('success');
       } else {
         setBookingError(result.error || 'Booking failed. Please try again or contact us directly.');

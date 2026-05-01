@@ -1618,75 +1618,24 @@ export default {
       }
     }
 
-    // ===== GOOGLE MEET API (server-side — secrets never exposed to frontend) =====
+    // ===== GOOGLE MEET API — REMOVED Phase 6 (audit 2026-05-01 #1) =====
     //
-    // Pre-launch defense-in-depth (audit 2026-05-01): a forged-Origin curl
-    // could previously fire 20/min × 1440 min = 28,800 calendar invites/day
-    // per attacker IP, polluting Alex's calendar and burning Google Calendar
-    // API quota with no booking ever placed. Multi-layer caps now:
-    //   - 5/min per IP    (was 20)  — short bursts
-    //   - 30/day per IP             — sustained from one attacker
-    //   - 20/day per attendee email — bots rotating IPs but blasting one inbox
-    // Real flow: BookingModal fires Meet creation once per booking. Daily
-    // caps far exceed any honest user.
+    // Previous design: standalone POST /api/google/meet, origin-gated, with
+    // per-IP and per-email daily caps. Even with caps, a forged-Origin curl
+    // could create real Calendar invites BEFORE any booking existed, polluting
+    // Alex's calendar and burning Google API quota. Caps treated the symptom;
+    // the underlying issue was that "create a Meet" did not require any proof
+    // of a real booking.
     //
-    // Post-launch refactor: move Meet creation INSIDE /book-session and
-    // /book-consultation so it only fires after a booking is confirmed.
-    // Removes the pre-booking attack vector entirely.
-    if (url.pathname === '/api/google/meet' && request.method === 'POST') {
-      if (!isAllowedOrigin) {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 403, headers: corsHeaders });
-      }
-      if (!await checkRateLimit(request, 'google-meet', 5, env)) {
-        return new Response(JSON.stringify({ error: 'Too many requests' }), {
-          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-      const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-      const today = new Date().toISOString().slice(0, 10);
-      // Per-IP daily cap.
-      {
-        const key = `meet-ip-cap:${ip}:${today}`;
-        const c = parseInt(await kvGet(key, env) || '0', 10) || 0;
-        if (c >= 30) {
-          await logEvent('booking', 'meet-ip-cap-hit', { ip, count: c }, env);
-          return new Response(JSON.stringify({ success: false, error: 'Too many meeting links from this network today.' }), {
-            status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
-        }
-        await kvPut(key, String(c + 1), { expirationTtl: 86400 }, env);
-      }
-      // Parse early so we can apply the per-attendee-email cap.
-      let params;
-      try { params = await request.json(); }
-      catch {
-        return new Response(JSON.stringify({ success: false, error: 'Invalid JSON' }), {
-          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-      const attendeeEmail = (params?.attendeeEmail || '').toString().trim().toLowerCase().slice(0, 254);
-      if (attendeeEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(attendeeEmail)) {
-        const key = `meet-email-cap:${attendeeEmail}:${today}`;
-        const c = parseInt(await kvGet(key, env) || '0', 10) || 0;
-        if (c >= 20) {
-          await logEvent('booking', 'meet-email-cap-hit', { attendeeEmail, count: c }, env);
-          return new Response(JSON.stringify({ success: false, error: 'Too many meeting links for this email today.' }), {
-            status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
-        }
-        await kvPut(key, String(c + 1), { expirationTtl: 86400 }, env);
-      }
-      try {
-        const meeting = await createGoogleMeetEvent(params, env);
-        return new Response(JSON.stringify(meeting), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ success: false, error: e.message }), {
-          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-    }
+    // New design: Meet creation is inlined into /book-consultation and
+    // /book-session AFTER Square confirms the booking. The frontend signals
+    // wantMeetLink:true on virtual sessions and reads meetLink from the
+    // booking response. The standalone endpoint is gone — there is no
+    // legitimate caller that needs to create a Meet without a booking.
+    //
+    // Existing daily caps (meet-ip-cap, meet-email-cap KV keys) are no longer
+    // checked — the booking endpoints' own rate limits + per-email caps
+    // serve the same role. Stale KV entries simply expire.
 
     // ===== GOOGLE MAPS EMBED — returns iframe src URL =====
     // The Maps Embed API serves an interactive map iframe given a place ID.
@@ -2738,6 +2687,50 @@ export default {
       if (!consents || consents.liability !== true || consents.planTerms !== true || consents.cardOnFile !== true) {
         return new Response(JSON.stringify({ error: 'all three consents must be granted' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
+
+      // Bind the agreement to a real, paid purchase. Audit (2026-05-01 Phase 6)
+      // pointed out that without this check, a forged-Origin curl could
+      // POST any string paymentId + arbitrary email and (a) create fake
+      // legal records in KV and (b) trigger a Resend email to any victim
+      // address. Mirrors the same binding /book-session uses at line 3103:
+      // /credit-grant always writes `credit-grant:{paymentId}` carrying the
+      // buyer's email, so by the time MemberAgreement renders that record
+      // exists. Missing record → no real purchase. Email mismatch →
+      // someone else's payment is being claimed. Either is a 403.
+      //
+      // Race-protection note: /credit-grant is the very first POST after
+      // tokenization completes, and MemberAgreement only mounts once the
+      // payment promise resolves. The grant record is in-flight at most
+      // for the duration of one fetch — never observed missing in the
+      // legitimate flow, but if it ever is, the user just retries.
+      const grantRaw = await kvGet(`credit-grant:${paymentId}`, env);
+      if (!grantRaw) {
+        await logEvent('agreement', 'unknown-payment', {
+          paymentId: paymentId.slice(0, 60),
+          email: email.toLowerCase(),
+          ip: request.headers.get('CF-Connecting-IP') || '',
+        }, env);
+        return new Response(JSON.stringify({
+          error: 'No matching payment found for this agreement.',
+        }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      let _grant;
+      try { _grant = JSON.parse(grantRaw); } catch {
+        return new Response(JSON.stringify({
+          error: 'Payment record corrupted — please contact support.',
+        }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      if (!_grant.email || String(_grant.email).toLowerCase() !== email.toLowerCase()) {
+        await logEvent('agreement', 'email-mismatch', {
+          paymentId: paymentId.slice(0, 60),
+          submittedEmail: email.toLowerCase(),
+          grantEmail: _grant.email ? String(_grant.email).toLowerCase().slice(0, 60) : '',
+          ip: request.headers.get('CF-Connecting-IP') || '',
+        }, env);
+        return new Response(JSON.stringify({
+          error: 'The email you entered doesn’t match the payer on file. Use the same email you paid with.',
+        }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
       // Server-authoritative legal text. Look up the canonical text for the
       // pinned version, hash it server-side, and use BOTH as the values
       // recorded + emailed. The client's submitted textHash/agreementText
@@ -2910,7 +2903,17 @@ export default {
       try { body = await request.json(); } catch {
         return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
-      const { name = '', email = '', phone = '', goals = '', startAt, duration, teamMemberId, serviceVariationId } = body || {};
+      const {
+        name = '', email = '', phone = '', goals = '',
+        startAt, duration, teamMemberId, serviceVariationId,
+        // Phase 6: Meet creation now happens AFTER booking succeeds, in
+        // this same handler. The standalone /api/google/meet endpoint was
+        // removed to eliminate the pre-booking forged-Origin abuse vector
+        // (audit 2026-05-01 #1). Frontend signals it wants a Meet link
+        // for virtual sessions by setting wantMeetLink:true.
+        wantMeetLink = false,
+        meetTitle, meetDescription,
+      } = body || {};
       if (!email || !startAt || !duration || !teamMemberId) {
         return new Response(JSON.stringify({ success: false, reason: 'missing-fields' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
@@ -2950,13 +2953,30 @@ export default {
           customerId, isNewClient: isNew,
           startAt, duration, teamMemberId, serviceVariationId, idempotencyKey,
         });
-        const responseBody = JSON.stringify(result.success
-          ? { success: true, bookingId: result.bookingId }
-          : { success: false, reason: 'square-error', status: result.status, detail: (result.error || '').slice(0, 300) });
-        if (result.success) {
-          await kvPut(`booking-idem:${idempotencyKey}`, responseBody, { expirationTtl: 600 }, env);
-          await logEvent('booking', `Consultation booked: ${email}`, { email, bookingId: result.bookingId }, env);
+        if (!result.success) {
+          return new Response(JSON.stringify({
+            success: false, reason: 'square-error', status: result.status,
+            detail: (result.error || '').slice(0, 300),
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
+        // Meet creation runs ONLY after Square confirms the booking. Best-effort:
+        // if Calendar API fails, the booking still stands and we surface a
+        // warning so the UI can show "Alex will send a link manually".
+        const meetMeta = await maybeCreateMeetForBooking(env, {
+          wantMeetLink, meetTitle, meetDescription,
+          startAt, duration,
+          attendeeEmail: email, attendeeName: name, attendeePhone: phone,
+        });
+        const responseBody = JSON.stringify({
+          success: true, bookingId: result.bookingId,
+          ...(meetMeta.meetLink ? { meetLink: meetMeta.meetLink, meetEventId: meetMeta.eventId, calendarLink: meetMeta.calendarLink } : {}),
+          ...(meetMeta.warning ? { meetWarning: meetMeta.warning } : {}),
+        });
+        await kvPut(`booking-idem:${idempotencyKey}`, responseBody, { expirationTtl: 600 }, env);
+        await logEvent('booking', `Consultation booked: ${email}`, {
+          email, bookingId: result.bookingId,
+          meetCreated: !!meetMeta.meetLink, meetWarning: meetMeta.warning || '',
+        }, env);
         return new Response(responseBody, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (e) {
         await logEvent('error', 'book-consultation-failed', { email, err: e?.message }, env);
@@ -3079,7 +3099,15 @@ export default {
       try { body = await request.json(); } catch {
         return new Response(JSON.stringify({ success: false, reason: 'invalid-json' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
-      const { name = '', email = '', phone = '', goals = '', startAt, duration, teamMemberId, serviceVariationId, purchaseToken } = body || {};
+      const {
+        name = '', email = '', phone = '', goals = '',
+        startAt, duration, teamMemberId, serviceVariationId, purchaseToken,
+        // Phase 6: Meet creation now happens AFTER booking succeeds (audit
+        // 2026-05-01 #1). Same shape as /book-consultation. The standalone
+        // /api/google/meet route was removed.
+        wantMeetLink = false,
+        meetTitle, meetDescription,
+      } = body || {};
       if (!email || !startAt || !duration || !teamMemberId || !purchaseToken) {
         return new Response(JSON.stringify({ success: false, reason: 'missing-fields' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
@@ -3207,12 +3235,25 @@ export default {
 
         await env.CHALLENGES_KV.delete(lockKey);
 
+        // Meet creation runs ONLY after Square confirms the booking AND credit
+        // is decremented. Best-effort: Calendar API failure does NOT roll
+        // back the booking or refund the credit — booking is the durable
+        // artifact, Alex sends the link manually if needed.
+        const meetMeta = await maybeCreateMeetForBooking(env, {
+          wantMeetLink, meetTitle, meetDescription,
+          startAt, duration,
+          attendeeEmail: email, attendeeName: name, attendeePhone: phone,
+        });
+
         const responseBody = JSON.stringify({
           success: true, bookingId: result.bookingId, remainingCredits: remainingAfter, source: creditsSource,
+          ...(meetMeta.meetLink ? { meetLink: meetMeta.meetLink, meetEventId: meetMeta.eventId, calendarLink: meetMeta.calendarLink } : {}),
+          ...(meetMeta.warning ? { meetWarning: meetMeta.warning } : {}),
         });
         await kvPut(`booking-idem:${idempotencyKey}`, responseBody, { expirationTtl: 600 }, env);
         await logEvent('booking', `Session booked: ${email} → ${result.bookingId}`, {
           email, bookingId: result.bookingId, remainingAfter, source: creditsSource,
+          meetCreated: !!meetMeta.meetLink, meetWarning: meetMeta.warning || '',
         }, env);
 
         return new Response(responseBody, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -7702,6 +7743,52 @@ async function safeEqual(a, b) {
 }
 
 // ===== GOOGLE MEET (server-side) =====
+
+/**
+ * Phase 6 wrapper. Called inline by /book-consultation and /book-session
+ * AFTER Square confirms the booking. Returns one of:
+ *   - { meetLink, eventId, calendarLink }            success
+ *   - { warning: string }                             configured-but-failed
+ *   - {}                                              wantMeetLink=false
+ *
+ * Failures are NEVER fatal to the booking — the Square booking is the
+ * durable artifact, the Meet is convenience. If Calendar API blips or
+ * Google OAuth isn't configured, we surface a warning string so the
+ * frontend can show "Alex will send a link manually" without losing
+ * the user's session.
+ */
+async function maybeCreateMeetForBooking(env, opts) {
+  if (!opts || !opts.wantMeetLink) return {};
+  // Trust the booking handler's own validation — by the time we're here
+  // the email/phone have already been validated by /book-consultation or
+  // /book-session, and the booking is real.
+  try {
+    const meeting = await createGoogleMeetEvent({
+      title: opts.meetTitle || 'Training Session',
+      description: opts.meetDescription || '',
+      startAt: opts.startAt,
+      durationMinutes: opts.duration,
+      attendeeEmail: opts.attendeeEmail,
+      attendeeName: opts.attendeeName,
+      attendeePhone: opts.attendeePhone,
+    }, env);
+    if (meeting && meeting.success && meeting.meeting) {
+      return {
+        meetLink: meeting.meeting.meetLink,
+        eventId: meeting.meeting.eventId,
+        calendarLink: meeting.meeting.calendarLink,
+      };
+    }
+    return {
+      warning: meeting?.error || 'Could not generate a Meet link automatically. Alex will email one before your session.',
+    };
+  } catch (e) {
+    // Never let a Calendar API throw take down the booking response.
+    return {
+      warning: 'Could not generate a Meet link automatically. Alex will email one before your session.',
+    };
+  }
+}
 
 /**
  * Create a Google Calendar event with Meet link.

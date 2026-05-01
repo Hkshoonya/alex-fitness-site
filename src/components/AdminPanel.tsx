@@ -150,7 +150,7 @@ export default function AdminPanel() {
 
       <footer className="max-w-6xl mx-auto px-6 py-8 text-white/30 text-xs border-t border-white/5 mt-8">
         <div className="flex items-center justify-between">
-          <span>Admin token expires after 30 days of inactivity.</span>
+          <span>Admin token doesn't expire — you'll see a soft rotation reminder after 180 days. Contact Kimi for a fresh one.</span>
           <a href="#/" className="hover:text-white/60 flex items-center gap-1">
             <ExternalLink size={11} /> Back to site
           </a>

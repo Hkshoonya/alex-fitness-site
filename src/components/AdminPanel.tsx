@@ -36,8 +36,9 @@ import {
 } from '@/api/transformations';
 import { compressImage } from '@/lib/imageUpload';
 import { CoachAvatar } from '@/components/CoachAvatar';
+import SystemArchitecturePage from '@/components/SystemArchitecturePage';
 
-type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'stories' | 'transformations' | 'signups' | 'credits';
+type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'stories' | 'transformations' | 'signups' | 'credits' | 'system';
 
 export default function AdminPanel() {
   const [authed, setAuthed] = useState(isAdminTokenFresh());
@@ -106,6 +107,7 @@ export default function AdminPanel() {
           <TabButton active={tab === 'transformations'} onClick={() => setTab('transformations')} label="Transformations" />
           <TabButton active={tab === 'signups'} onClick={() => setTab('signups')} label="Signups" />
           <TabButton active={tab === 'credits'} onClick={() => setTab('credits')} label="Credits" />
+          <TabButton active={tab === 'system'} onClick={() => setTab('system')} label="System" />
         </nav>
       </header>
 
@@ -118,6 +120,7 @@ export default function AdminPanel() {
         {tab === 'transformations' && <TransformationsTab />}
         {tab === 'signups' && <SignupsTab />}
         {tab === 'credits' && <CreditsTab />}
+        {tab === 'system' && <SystemArchitecturePage />}
       </main>
 
       <footer className="max-w-6xl mx-auto px-6 py-8 text-white/30 text-xs border-t border-white/5 mt-8">

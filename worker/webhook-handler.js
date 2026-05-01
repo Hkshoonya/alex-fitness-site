@@ -2964,6 +2964,97 @@ export default {
       });
     }
 
+    // ===== COACH PHOTOS API =====
+    // GET /coach-photos — public, returns { teamId: dataUrl, ... }
+    // POST /admin/coach-photo — admin, body { teamId, dataUrl }
+    // DELETE /admin/coach-photo/:teamId — admin
+
+    if (url.pathname === '/coach-photos' && request.method === 'GET') {
+      if (!await checkRateLimit(request, 'coach-photos-get', 240, env)) {
+        return new Response('Too many requests', { status: 429, headers: corsHeaders });
+      }
+      const photos = await getAllCoachPhotos(env);
+      return new Response(JSON.stringify(photos), {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          // Edge cache 5 min — admin uploads propagate within a minute
+          // and the response can be ~1MB so caching matters for cost.
+          'Cache-Control': 'public, max-age=300',
+        },
+      });
+    }
+
+    if (url.pathname === '/admin/coach-photo' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      let data;
+      try { data = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const teamId = String(data?.teamId || '').trim();
+      const dataUrl = String(data?.dataUrl || '');
+      // Square Team Member IDs are typically [A-Za-z0-9_]+ — be permissive.
+      if (!teamId || !/^[A-Za-z0-9_\-]+$/.test(teamId) || teamId.length > 64) {
+        return new Response(JSON.stringify({ error: 'Invalid teamId' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (!COACH_PHOTO_PREFIX_RE.test(dataUrl)) {
+        return new Response(JSON.stringify({ error: 'dataUrl must be a base64 image (jpeg/png/webp)' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (dataUrl.length > MAX_COACH_PHOTO_BYTES) {
+        return new Response(JSON.stringify({
+          error: `Image too large (${Math.round(dataUrl.length / 1024)}KB). Max ${Math.round(MAX_COACH_PHOTO_BYTES / 1024)}KB after compression.`,
+        }), { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const lock = await withLock('lock:coach-photos-write', 10, env, () => setCoachPhoto(teamId, dataUrl, env));
+      if (!lock.ok) {
+        return new Response(JSON.stringify({ error: 'Coach photos are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ teamId, ok: true }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname.startsWith('/admin/coach-photo/') && request.method === 'DELETE') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const teamId = url.pathname.split('/admin/coach-photo/')[1];
+      if (!teamId) {
+        return new Response(JSON.stringify({ error: 'teamId required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const delLock = await withLock('lock:coach-photos-write', 10, env, () => removeCoachPhoto(teamId, env));
+      if (!delLock.ok) {
+        return new Response(JSON.stringify({ error: 'Coach photos are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ deleted: teamId }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== ADMIN: list Trainerize appointment types =====
     // GET /admin/trainerize-appointment-types — returns types available to
     // this API key so Alex can pick the in-person ID and set
@@ -6050,6 +6141,42 @@ async function deleteAnnouncement(id, env) {
   const all = await getAllAnnouncements(env);
   const filtered = all.filter(a => a.id !== id);
   await kvPut('announcements', JSON.stringify(filtered), {}, env);
+}
+
+// ============================================================
+// COACH PHOTOS — admin-uploaded headshots stored as base64 data
+// URLs in a single KV index. Browser-side compression caps each
+// at ~150KB so the full map stays well under KV's 25MB value limit
+// even for 50+ coaches.
+// ============================================================
+
+const MAX_COACH_PHOTO_BYTES = 500_000; // 500KB raw cap (per data URL)
+const COACH_PHOTO_PREFIX_RE = /^data:image\/(jpeg|png|webp);base64,/;
+
+async function getAllCoachPhotos(env) {
+  if (!env.CHALLENGES_KV) return {};
+  try {
+    const raw = await kvGet('coach-photos:index', env);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function setCoachPhoto(teamId, dataUrl, env) {
+  if (!env.CHALLENGES_KV) return;
+  const all = await getAllCoachPhotos(env);
+  all[teamId] = dataUrl;
+  await kvPut('coach-photos:index', JSON.stringify(all), {}, env);
+}
+
+async function removeCoachPhoto(teamId, env) {
+  if (!env.CHALLENGES_KV) return;
+  const all = await getAllCoachPhotos(env);
+  delete all[teamId];
+  await kvPut('coach-photos:index', JSON.stringify(all), {}, env);
 }
 
 /**

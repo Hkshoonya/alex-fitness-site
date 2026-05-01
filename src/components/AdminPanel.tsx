@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Shield, LogOut, Plus, X, Check, Trash2, Pencil, Calendar, Users, Tag,
   Mail, Phone, ChevronDown, Loader2, AlertCircle, Award, ExternalLink,
-  Megaphone,
+  Megaphone, Upload,
 } from 'lucide-react';
 import {
   isAdminTokenFresh, verifyAdminToken, saveAdminSession, clearAdminSession,
@@ -20,8 +20,12 @@ import {
   getAnnouncementStatus,
   type Announcement,
 } from '@/api/announcements';
+import { getTeamMembers, refreshTeamMembers, type TeamMember } from '@/api/squareAvailability';
+import { getCoachPhotos, uploadCoachPhoto, deleteCoachPhoto } from '@/api/coachPhotos';
+import { compressImage } from '@/lib/imageUpload';
+import { CoachAvatar } from '@/components/CoachAvatar';
 
-type Tab = 'challenges' | 'announcements' | 'signups';
+type Tab = 'challenges' | 'announcements' | 'coaches' | 'signups';
 
 export default function AdminPanel() {
   const [authed, setAuthed] = useState(isAdminTokenFresh());
@@ -68,9 +72,10 @@ export default function AdminPanel() {
           </div>
         </div>
 
-        <nav className="max-w-6xl mx-auto px-6 flex gap-1">
+        <nav className="max-w-6xl mx-auto px-6 flex gap-1 overflow-x-auto">
           <TabButton active={tab === 'challenges'} onClick={() => setTab('challenges')} label="Challenges" />
           <TabButton active={tab === 'announcements'} onClick={() => setTab('announcements')} label="Announcements" />
+          <TabButton active={tab === 'coaches'} onClick={() => setTab('coaches')} label="Coaches" />
           <TabButton active={tab === 'signups'} onClick={() => setTab('signups')} label="Signups" />
         </nav>
       </header>
@@ -78,6 +83,7 @@ export default function AdminPanel() {
       <main className="max-w-6xl mx-auto px-6 py-8">
         {tab === 'challenges' && <ChallengesTab />}
         {tab === 'announcements' && <AnnouncementsTab />}
+        {tab === 'coaches' && <CoachesTab />}
         {tab === 'signups' && <SignupsTab />}
       </main>
 
@@ -1252,6 +1258,213 @@ function CtaPresetChips({ current, onPick }: { current: string; onPick: (v: stri
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ============================================================
+// COACHES TAB — upload/replace/remove headshot for each Square
+// team member. Coach list comes from Square (the source of truth);
+// this tab just owns the photo override per coach.
+// ============================================================
+
+function CoachesTab() {
+  const [coaches, setCoaches] = useState<TeamMember[]>([]);
+  const [photos, setPhotos] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [team, p] = await Promise.all([getTeamMembers(), getCoachPhotos()]);
+      setCoaches(team.filter(m => m.role !== 'consultation'));
+      setPhotos(p);
+    } catch {
+      setError('Could not load coach list. Try refreshing.');
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleResync = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await refreshTeamMembers();
+      const [team, p] = await Promise.all([getTeamMembers(), getCoachPhotos()]);
+      setCoaches(team.filter(m => m.role !== 'consultation'));
+      setPhotos(p);
+    } catch {
+      setError('Refresh failed.');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div>
+          <h2 className="font-display font-bold text-2xl mb-1">Coaches</h2>
+          <p className="text-white/40 text-sm max-w-2xl">
+            Coaches sync automatically from Square Team Members. Add or remove coaches in Square Dashboard
+            to update this list. Use the upload button below to override a coach's photo (otherwise their
+            initials show on the website).
+          </p>
+        </div>
+        <button
+          onClick={handleResync}
+          className="text-white/60 hover:text-white text-xs flex items-center gap-2 px-3 py-2 rounded-lg border border-white/10 hover:border-[#FF4D2E]/40 transition-colors"
+        >
+          {loading ? <Loader2 size={13} className="animate-spin" /> : <Users size={13} />}
+          Resync from Square
+        </button>
+      </div>
+
+      {error && (
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" /> {error}
+        </p>
+      )}
+
+      {loading && coaches.length === 0 && (
+        <div className="text-white/50 text-sm flex items-center gap-2 py-12 justify-center">
+          <Loader2 size={16} className="animate-spin" /> Loading coaches...
+        </div>
+      )}
+
+      {!loading && coaches.length === 0 && (
+        <div className="border border-dashed border-white/10 rounded-2xl p-12 text-center">
+          <Users size={28} className="mx-auto mb-3 text-white/30" />
+          <p className="text-white/40 text-sm">
+            No coaches found in Square. Add team members in Square Dashboard, then click "Resync from Square".
+          </p>
+        </div>
+      )}
+
+      {coaches.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {coaches.map(c => {
+            const adminPhoto = photos[c.id] || (c.squareTeamMemberId ? photos[c.squareTeamMemberId] : undefined);
+            // The displayed image priority follows the same chain as the
+            // public site, so admin sees exactly what visitors see.
+            const displayedImage = adminPhoto ?? c.image;
+            return (
+              <CoachPhotoCard
+                key={c.id}
+                coach={c}
+                hasAdminPhoto={!!adminPhoto}
+                displayedImage={displayedImage}
+                onChange={() => load()}
+                onError={setError}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CoachPhotoCard({ coach, hasAdminPhoto, displayedImage, onChange, onError }: {
+  coach: TeamMember;
+  hasAdminPhoto: boolean;
+  displayedImage?: string;
+  onChange: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = async (file: File) => {
+    onError(null);
+    setBusy(true);
+    try {
+      const result = await compressImage(file, { maxEdge: 600, quality: 0.85 });
+      const teamId = coach.squareTeamMemberId || coach.id;
+      const res = await uploadCoachPhoto(teamId, result.dataUrl);
+      if (!res.ok) {
+        onError(res.error || 'Upload failed.');
+        setBusy(false);
+        return;
+      }
+      onChange();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Could not process image.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRemove = async () => {
+    if (!confirm(`Remove uploaded photo for ${coach.name}? They'll show with their initials until you upload another.`)) return;
+    onError(null);
+    setBusy(true);
+    const teamId = coach.squareTeamMemberId || coach.id;
+    const ok = await deleteCoachPhoto(teamId);
+    if (!ok) onError('Delete failed.');
+    onChange();
+    setBusy(false);
+  };
+
+  return (
+    <div className="bg-white/[0.03] border border-white/10 rounded-xl p-5 flex items-center gap-4">
+      <CoachAvatar
+        name={coach.name}
+        image={displayedImage}
+        isHeadCoach={coach.role === 'head-coach'}
+        className="w-16 h-16 flex-shrink-0"
+      />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <p className="font-semibold truncate">{coach.name}</p>
+          {coach.role === 'head-coach' && (
+            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold text-[#FF4D2E] bg-[#FF4D2E]/10">
+              Head Coach
+            </span>
+          )}
+          {hasAdminPhoto && (
+            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full font-semibold text-green-400 bg-green-500/10">
+              Custom photo
+            </span>
+          )}
+        </div>
+        <p className="text-white/40 text-xs truncate">{coach.title || 'Trainer'}</p>
+        <div className="flex gap-2 mt-3">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+              e.target.value = '';
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy}
+            className="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF4D2E]/15 border border-[#FF4D2E]/30 text-[#FF4D2E] hover:bg-[#FF4D2E]/25 disabled:opacity-50 transition-colors"
+          >
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+            {hasAdminPhoto ? 'Replace' : 'Upload'}
+          </button>
+          {hasAdminPhoto && (
+            <button
+              type="button"
+              onClick={handleRemove}
+              disabled={busy}
+              className="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-white/60 hover:text-red-400 hover:border-red-500/30 disabled:opacity-50 transition-colors"
+            >
+              <Trash2 size={12} /> Remove
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

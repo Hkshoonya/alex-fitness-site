@@ -3,6 +3,7 @@
 
 import { asset } from '@/lib/assets';
 import { getSquareConfig, getSquareHeaders, getServiceId, SQUARE_API_BASE } from '@/api/squareConfig';
+import { getCoachPhotos } from '@/api/coachPhotos';
 
 const { locationId: SQUARE_LOCATION_ID } = getSquareConfig();
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
@@ -10,9 +11,10 @@ const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 // Bump the suffix when COACH_IMAGE_MAP changes so existing visitors with
 // stale cached team data refresh and see new photos on next load instead
 // of waiting 24h for natural expiry.
-// v3 invalidates legacy caches that contained the fake "Alex Martinez"
-// placeholder + the orphaned "consultation" pseudo-coach record.
-const TEAM_CACHE_KEY = 'alex_fitness_team_v3';
+// v4 invalidates v3 caches so admin-uploaded photos (new feature) get
+// merged into the team data on the next page load instead of waiting
+// 24h for the natural expiry.
+const TEAM_CACHE_KEY = 'alex_fitness_team_v4';
 const AVAILABILITY_CACHE_KEY = 'alex_fitness_availability';
 const TEAM_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24h for team members
 const AVAILABILITY_CACHE_DURATION = 15 * 60 * 1000; // 15 min for availability
@@ -235,7 +237,12 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
     }
   }
 
-  const squareTeam = await fetchTeamFromSquare();
+  // Fetch in parallel — Square team list + admin-uploaded photo overrides.
+  // Photo merging happens after both resolve.
+  const [squareTeam, adminPhotos] = await Promise.all([
+    fetchTeamFromSquare(),
+    getCoachPhotos().catch(() => ({} as Record<string, string>)),
+  ]);
 
   if (squareTeam.length > 0) {
     // Square is the source of truth for who exists. Enrich each result
@@ -243,25 +250,31 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
     // matches FALLBACK_TEAM exactly (full-name match — first-name
     // substring matching caused wrong-coach enrichment historically, e.g.
     // "Alex Thompson" inheriting "Alex Davis" data).
+    //
+    // Image priority:
+    //   1. Admin-uploaded photo (via /coach-photos KV) — highest, lets
+    //      Alex own coach images without a code change
+    //   2. Hardcoded COACH_IMAGE_MAP / FALLBACK_TEAM (alex, eun)
+    //   3. undefined → CoachAvatar renders initials
     const enriched = squareTeam.map(sq => {
+      const adminPhoto = adminPhotos[sq.id] || (sq.squareTeamMemberId ? adminPhotos[sq.squareTeamMemberId] : undefined);
       const fallback = FALLBACK_TEAM.find(f =>
         f.name.toLowerCase().trim() === sq.name.toLowerCase().trim()
       );
       if (fallback) {
         return {
           ...sq,
-          // Square's image (or undefined for initials avatar) wins unless
-          // the local fallback has one — that handles the API-blip case.
-          image: sq.image ?? fallback.image,
+          image: adminPhoto ?? sq.image ?? fallback.image,
           specialties: fallback.specialties,
           role: fallback.role,
           title: fallback.title,
         };
       }
-      // No local fallback — use Square data as-is. New coach added in
-      // Square shows up with their initials avatar (until a photo is
-      // added to COACH_IMAGE_MAP).
-      return sq;
+      // No local fallback — use Square data + optional admin photo.
+      return {
+        ...sq,
+        image: adminPhoto ?? sq.image,
+      };
     });
 
     const cache: TeamCache = { members: enriched, fetchedAt: new Date().toISOString() };
@@ -270,10 +283,15 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
   }
 
   // API not configured / failed — degraded mode: only Alex (the owner)
-  // is guaranteed-known so the site doesn't render coach-less.
-  const cache: TeamCache = { members: FALLBACK_TEAM, fetchedAt: new Date().toISOString() };
+  // is guaranteed-known so the site doesn't render coach-less. Still
+  // honor any admin-uploaded photo override for Alex's known ID.
+  const fallbackWithAdminPhotos = FALLBACK_TEAM.map(f => {
+    const photo = adminPhotos[f.id];
+    return photo ? { ...f, image: photo } : f;
+  });
+  const cache: TeamCache = { members: fallbackWithAdminPhotos, fetchedAt: new Date().toISOString() };
   localStorage.setItem(TEAM_CACHE_KEY, JSON.stringify(cache));
-  return FALLBACK_TEAM;
+  return fallbackWithAdminPhotos;
 }
 
 /**

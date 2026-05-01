@@ -30,10 +30,14 @@ import {
   getClientPhotos, uploadClientPhoto, deleteClientPhoto,
   type ClientPhoto,
 } from '@/api/clientPhotos';
+import {
+  getTransformations, uploadTransformation, deleteTransformation,
+  type Transformation,
+} from '@/api/transformations';
 import { compressImage } from '@/lib/imageUpload';
 import { CoachAvatar } from '@/components/CoachAvatar';
 
-type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'stories' | 'signups';
+type Tab = 'challenges' | 'announcements' | 'coaches' | 'studio' | 'stories' | 'transformations' | 'signups';
 
 export default function AdminPanel() {
   const [authed, setAuthed] = useState(isAdminTokenFresh());
@@ -86,6 +90,7 @@ export default function AdminPanel() {
           <TabButton active={tab === 'coaches'} onClick={() => setTab('coaches')} label="Coaches" />
           <TabButton active={tab === 'studio'} onClick={() => setTab('studio')} label="Studio" />
           <TabButton active={tab === 'stories'} onClick={() => setTab('stories')} label="Stories" />
+          <TabButton active={tab === 'transformations'} onClick={() => setTab('transformations')} label="Transformations" />
           <TabButton active={tab === 'signups'} onClick={() => setTab('signups')} label="Signups" />
         </nav>
       </header>
@@ -96,6 +101,7 @@ export default function AdminPanel() {
         {tab === 'coaches' && <CoachesTab />}
         {tab === 'studio' && <StudioTab />}
         {tab === 'stories' && <StoriesTab />}
+        {tab === 'transformations' && <TransformationsTab />}
         {tab === 'signups' && <SignupsTab />}
       </main>
 
@@ -1861,6 +1867,148 @@ function StoryPhotoCard({ photo, onDelete }: { photo: ClientPhoto; onDelete: () 
         ) : (
           <p className="text-white/30 text-xs italic">No caption</p>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// TRANSFORMATIONS TAB — admin-managed before/after composite photos
+// for the homepage Transformations carousel. Single image per record;
+// Alex composites externally before upload (matches existing workflow
+// and avoids redesigning the gallery UX with a label/overlay surface).
+// ============================================================
+
+function TransformationsTab() {
+  const [photos, setPhotos] = useState<Transformation[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await getTransformations({ noCache: true });
+      setPhotos(list);
+    } catch {
+      setError('Could not load transformations. Try refreshing.');
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleFile = async (file: File) => {
+    setError(null);
+    setUploading(true);
+    try {
+      const result = await compressImage(file, { maxEdge: 1400, quality: 0.85, maxBytes: 780_000 });
+      const res = await uploadTransformation(result.dataUrl);
+      if (!res.ok) {
+        setError(res.error || 'Upload failed.');
+        setUploading(false);
+        return;
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not process image.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Remove this transformation? It will no longer appear in the homepage carousel.')) return;
+    setError(null);
+    const ok = await deleteTransformation(id);
+    if (!ok) setError('Delete failed. Try again.');
+    await load();
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div>
+          <h2 className="font-display font-bold text-2xl mb-1">Transformations</h2>
+          <p className="text-white/40 text-sm max-w-2xl">
+            These photos cycle in the <span className="text-white/70">Real Results</span> carousel on the homepage.
+            Upload your before/after composite as a single image. Newest uploads appear first.
+            If no transformations are uploaded, the page falls back to the default gallery.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-white/40 text-xs">{photos.length} {photos.length === 1 ? 'photo' : 'photos'}</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+              e.target.value = '';
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="text-xs flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#FF4D2E]/15 border border-[#FF4D2E]/30 text-[#FF4D2E] hover:bg-[#FF4D2E]/25 disabled:opacity-50 transition-colors"
+          >
+            {uploading ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+            {uploading ? 'Uploading…' : 'Upload Transformation'}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-start gap-2">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" /> {error}
+        </p>
+      )}
+
+      {loading && photos.length === 0 && (
+        <div className="text-white/50 text-sm flex items-center gap-2 py-12 justify-center">
+          <Loader2 size={16} className="animate-spin" /> Loading transformations...
+        </div>
+      )}
+
+      {!loading && photos.length === 0 && (
+        <div className="border border-dashed border-white/10 rounded-2xl p-12 text-center">
+          <ImageIcon size={28} className="mx-auto mb-3 text-white/30" />
+          <p className="text-white/50 text-sm mb-1">No transformations uploaded yet.</p>
+          <p className="text-white/30 text-xs">
+            The homepage is showing the default gallery until you upload here.
+          </p>
+        </div>
+      )}
+
+      {photos.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {photos.map((p) => (
+            <TransformationCard key={p.id} transformation={p} onDelete={() => handleDelete(p.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TransformationCard({ transformation, onDelete }: { transformation: Transformation; onDelete: () => void }) {
+  return (
+    <div className="group relative aspect-[4/3] rounded-xl overflow-hidden border border-white/10 bg-black">
+      <img src={transformation.dataUrl} alt="" className="w-full h-full object-cover" />
+      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-end justify-end p-2">
+        <button
+          type="button"
+          onClick={onDelete}
+          className="opacity-70 group-hover:opacity-100 text-xs flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-red-500/80 hover:bg-red-500 text-white backdrop-blur-sm transition-all"
+          title="Delete transformation"
+        >
+          <Trash2 size={12} /> Delete
+        </button>
       </div>
     </div>
   );

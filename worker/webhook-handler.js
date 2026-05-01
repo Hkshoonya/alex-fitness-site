@@ -3248,6 +3248,98 @@ export default {
       });
     }
 
+    // ===== TRANSFORMATIONS API =====
+    // GET /transformations — public, returns [{ id, dataUrl, createdAt }, ...]
+    // POST /admin/transformation — admin, body { dataUrl }
+    // DELETE /admin/transformation/:id — admin
+
+    if (url.pathname === '/transformations' && request.method === 'GET') {
+      if (!await checkRateLimit(request, 'transformations-get', 240, env)) {
+        return new Response('Too many requests', { status: 429, headers: corsHeaders });
+      }
+      const photos = await getAllTransformations(env);
+      return new Response(JSON.stringify(photos), {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=300',
+        },
+      });
+    }
+
+    if (url.pathname === '/admin/transformation' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      let data;
+      try { data = await request.json(); } catch {
+        return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const dataUrl = String(data?.dataUrl || '');
+      if (!TRANSFORMATION_PREFIX_RE.test(dataUrl)) {
+        return new Response(JSON.stringify({ error: 'dataUrl must be a base64 image (jpeg/png/webp)' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (dataUrl.length > MAX_TRANSFORMATION_BYTES) {
+        return new Response(JSON.stringify({
+          error: `Image too large (${Math.round(dataUrl.length / 1024)}KB). Max ${Math.round(MAX_TRANSFORMATION_BYTES / 1024)}KB after compression.`,
+        }), { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const photo = {
+        id: `tf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        dataUrl,
+        createdAt: new Date().toISOString(),
+      };
+      const lock = await withLock('lock:transformations-write', 15, env, () => addTransformation(photo, env));
+      if (!lock.ok) {
+        return new Response(JSON.stringify({ error: 'Transformations are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (lock.value?.error) {
+        return new Response(JSON.stringify({ error: lock.value.error }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(photo), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (url.pathname.startsWith('/admin/transformation/') && request.method === 'DELETE') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!env.ADMIN_LOG_TOKEN || request.headers.get('x-admin-token') !== env.ADMIN_LOG_TOKEN) {
+        return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
+      const id = url.pathname.split('/admin/transformation/')[1];
+      if (!id) {
+        return new Response(JSON.stringify({ error: 'id required' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const delLock = await withLock('lock:transformations-write', 10, env, () => removeTransformation(id, env));
+      if (!delLock.ok) {
+        return new Response(JSON.stringify({ error: 'Transformations are being updated — retry' }), {
+          status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ deleted: id }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // ===== ADMIN: list Trainerize appointment types =====
     // GET /admin/trainerize-appointment-types — returns types available to
     // this API key so Alex can pick the in-person ID and set
@@ -6456,6 +6548,49 @@ async function removeClientPhoto(id, env) {
   const filtered = all.filter(p => p.id !== id);
   if (filtered.length === all.length) return false;
   await kvPut('client-photos:list', JSON.stringify(filtered), {}, env);
+  return true;
+}
+
+// ============================================================
+// TRANSFORMATIONS — admin-managed before/after composite photos
+// for the homepage gallery. Records are single images (Alex
+// composites externally) so the existing fullscreen carousel UX
+// stays intact. Mirrors studio photos: single KV array, newest first.
+// ============================================================
+
+const MAX_TRANSFORMATION_BYTES = 800_000;
+const MAX_TRANSFORMATIONS = 30;
+const TRANSFORMATION_PREFIX_RE = /^data:image\/(jpeg|png|webp);base64,/;
+
+async function getAllTransformations(env) {
+  if (!env.CHALLENGES_KV) return [];
+  try {
+    const raw = await kvGet('transformations:list', env);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addTransformation(photo, env) {
+  if (!env.CHALLENGES_KV) return { error: 'Storage unavailable' };
+  const all = await getAllTransformations(env);
+  if (all.length >= MAX_TRANSFORMATIONS) {
+    return { error: `Limit ${MAX_TRANSFORMATIONS} transformations reached. Delete one first.` };
+  }
+  all.unshift(photo);
+  await kvPut('transformations:list', JSON.stringify(all), {}, env);
+  return { ok: true, photo };
+}
+
+async function removeTransformation(id, env) {
+  if (!env.CHALLENGES_KV) return false;
+  const all = await getAllTransformations(env);
+  const filtered = all.filter(p => p.id !== id);
+  if (filtered.length === all.length) return false;
+  await kvPut('transformations:list', JSON.stringify(filtered), {}, env);
   return true;
 }
 

@@ -4,14 +4,15 @@
 // Square Messages chat widget. Messages here land in his Square Messages
 // inbox and trigger push notifications on the Square POS app on his phone.
 //
-// (The previous implementation wrote to Alex's Square *customer note* —
-// passive storage that never triggered any notification, so messages went
-// undelivered.)
+// Pre-launch hardening (audit 2026-05-01): the actual Square POST is now
+// proxied through the worker at /api/messages/send so the seller_key never
+// appears in the browser bundle. The browser still generates a reCAPTCHA
+// token (Google's site key has to be in the bundle by design) and forwards
+// it; the worker performs the inbound POST with the seller_key from a
+// wrangler secret.
 
 const ALEX_PHONE = '8134210633';
-const ALEX_SELLER_KEY = 'LD0SGZXT6ZSSD';
-const BUSINESS_NAME = "Alex's Fitness Training";
-const MESSENGER_API = 'https://api.squareup.com/messenger/inbound/external';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
 // Square's public reCAPTCHA v3 site key, embedded in their messages-plugin
 // JS bundle. The key isn't domain-locked, so we can re-use it from our
@@ -65,7 +66,9 @@ async function getRecaptchaToken(): Promise<string> {
 }
 
 /**
- * Send a message to Alex via Square's messages-plugin backend.
+ * Send a message to Alex via the worker proxy. The worker forwards to
+ * Square's messenger/inbound/external with the seller_key (worker secret),
+ * applies rate + per-phone daily caps, and returns a normalized result.
  */
 export async function sendMessageToAlex(params: {
   senderName: string;
@@ -73,48 +76,33 @@ export async function sendMessageToAlex(params: {
   message: string;
 }): Promise<{ success: boolean; error?: string }> {
 
-  // Square requires E.164 format (`+18134210633`). Strip formatting,
-  // take last 10 digits, prefix `+1`.
   const tenDigits = params.senderPhone.replace(/\D/g, '').slice(-10);
-  const e164 = tenDigits.length === 10 ? `+1${tenDigits}` : '';
-  if (!e164) {
+  if (tenDigits.length !== 10) {
     return { success: false, error: 'Phone number must be 10 digits (US)' };
+  }
+  if (!WORKER_URL) {
+    return { success: false, error: `Messaging unavailable. Please text Alex at ${ALEX_PHONE}.` };
   }
 
   try {
-    const token = await getRecaptchaToken();
-    const resp = await fetch(MESSENGER_API, {
+    const recaptchaToken = await getRecaptchaToken();
+    const resp = await fetch(`${WORKER_URL}/api/messages/send`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        name: params.senderName,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        senderName: params.senderName,
+        senderPhone: tenDigits,
         message: params.message,
-        contact_id: e164,
-        contact_medium: 'SMS',
-        seller_key: ALEX_SELLER_KEY,
-        'g-recaptcha-response': token,
-        url: typeof window !== 'undefined' ? window.location.href : '',
-        business_name: BUSINESS_NAME,
-        source: 'SQUARE_ONLINE_SITE',
+        recaptchaToken,
       }),
     });
-
     const data = await resp.json().catch(() => ({}));
-
-    if (resp.ok && data.status === 'SUCCESS') {
+    if (resp.ok && data.success) {
       storeMessage(params);
       return { success: true };
     }
-
-    // Map Square's known error codes to user-friendly messages.
-    let errorMsg = 'Could not deliver message';
-    if (data.status === 'INVALID_PHONE_NUMBER') {
-      errorMsg = 'Please enter a valid US phone number';
-    } else if (data.debugText) {
-      errorMsg = `Square: ${String(data.debugText).slice(0, 120)}`;
-    }
-
     storeMessage(params);
+    const errorMsg = data.error || 'Could not deliver message';
     return {
       success: false,
       error: `${errorMsg}. Please try again or text Alex at ${ALEX_PHONE}.`,

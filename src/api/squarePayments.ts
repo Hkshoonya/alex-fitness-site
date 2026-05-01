@@ -127,6 +127,13 @@ export const createGenericCardPayment = async (params: {
   note: string;
 }): Promise<{ success: boolean; paymentId?: string; error?: string }> => {
   if (!SQUARE_APPLICATION_ID) {
+    // Production safety: never auto-succeed a "payment" with a mock ID.
+    // A misconfigured prod deploy with no SQUARE_APPLICATION_ID would
+    // otherwise issue free entries to whatever flow used this — challenges,
+    // events, etc. Fail loud in prod, keep the mock for local dev.
+    if (import.meta.env.PROD) {
+      return { success: false, error: 'Payments are temporarily unavailable. Please try again shortly.' };
+    }
     await new Promise(resolve => setTimeout(resolve, 1500));
     return { success: true, paymentId: `mock_payment_${Date.now()}` };
   }
@@ -237,6 +244,13 @@ export const createCardPayment = async (params: {
   error?: string;
 }> => {
   if (!SQUARE_APPLICATION_ID) {
+    // Same prod-safety guard as createGenericCardPayment — silent mock
+    // success on a real plan purchase would credit sessions on the worker
+    // side too (since /credit-grant looks for any payment "completed").
+    // Fail loud in prod, mock only in dev.
+    if (import.meta.env.PROD) {
+      return { success: false, error: 'Payments are temporarily unavailable. Please try again shortly.' };
+    }
     await new Promise(resolve => setTimeout(resolve, 2000));
     return { success: true, paymentId: `mock_payment_${Date.now()}` };
   }

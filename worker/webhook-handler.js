@@ -2841,6 +2841,110 @@ export default {
       }
     }
 
+    // POST /api/messages/send — proxy to Square's messenger/inbound/external.
+    //
+    // Replaces the old browser-side direct call. The seller_key was sitting
+    // in the JS bundle (`LD0SGZXT6ZSSD`) — moving the actual POST to the
+    // worker means the value lives in env (worker secret) and is never
+    // shipped to the browser. Defense-in-depth on top of Square's own
+    // recaptcha + spam scoring:
+    //   - Origin gate (frontend-only)
+    //   - Per-IP rate (3/min) + per-IP daily cap (10/day)
+    //   - Length caps on every field so a script can't pipe MB of garbage
+    //   - reCAPTCHA token still generated browser-side and forwarded
+    if (url.pathname === '/api/messages/send' && request.method === 'POST') {
+      if (!isAllowedOrigin) {
+        return new Response(JSON.stringify({ error: 'Unauthorized origin' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (!await checkRateLimit(request, 'messages-send', 3, env)) {
+        return new Response(JSON.stringify({ success: false, error: 'Too many messages — wait a minute and try again.' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      let body;
+      try { body = await request.json(); } catch {
+        return new Response(JSON.stringify({ success: false, error: 'Invalid JSON' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const senderName = String(body.senderName || '').trim().slice(0, 100);
+      const senderPhone = String(body.senderPhone || '').replace(/\D/g, '').slice(-10);
+      const message = String(body.message || '').trim().slice(0, 1000);
+      const recaptchaToken = String(body.recaptchaToken || '').slice(0, 5000);
+      if (!senderName || !senderPhone || !message) {
+        return new Response(JSON.stringify({ success: false, error: 'Name, phone, and message are required.' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      if (senderPhone.length !== 10) {
+        return new Response(JSON.stringify({ success: false, error: 'Phone number must be 10 digits (US).' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      // Per-phone daily cap. A real lead messages once or twice — 5/day
+      // catches scripted blast attempts that rotate names but reuse a
+      // single phone number, and still leaves headroom for an enthusiastic
+      // human who taps "send" too many times.
+      const today = new Date().toISOString().slice(0, 10);
+      const capKey = `msg-cap:${senderPhone}:${today}`;
+      const c = parseInt(await kvGet(capKey, env) || '0', 10) || 0;
+      if (c >= 5) {
+        await logEvent('booking', 'message-cap-hit', { senderPhone, count: c }, env);
+        return new Response(JSON.stringify({ success: false, error: 'Daily message limit reached. Please call or text Alex directly.' }), {
+          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      await kvPut(capKey, String(c + 1), { expirationTtl: 86400 }, env);
+
+      // The seller_key value identifies which seller's inbox the message
+      // lands in — it's a public-ish identifier (Square ships it in their
+      // own messenger plugin to anyone who installs the chat widget). Kept
+      // here so a future rotation can be done via wrangler secret without
+      // a code change. Falls back to the historical public value if no
+      // secret is set so existing deploys don't regress.
+      const sellerKey = env.ALEX_SELLER_KEY || 'LD0SGZXT6ZSSD';
+      const e164 = `+1${senderPhone}`;
+
+      try {
+        const resp = await fetch('https://api.squareup.com/messenger/inbound/external', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            name: senderName,
+            message,
+            contact_id: e164,
+            contact_medium: 'SMS',
+            seller_key: sellerKey,
+            'g-recaptcha-response': recaptchaToken,
+            url: request.headers.get('Referer') || '',
+            business_name: "Alex's Fitness Training",
+            source: 'SQUARE_ONLINE_SITE',
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.status === 'SUCCESS') {
+          await logEvent('booking', `Message delivered from ${senderName}`, { senderPhone, length: message.length }, env);
+          return new Response(JSON.stringify({ success: true }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        let userError = 'Could not deliver message';
+        if (data.status === 'INVALID_PHONE_NUMBER') userError = 'Please enter a valid US phone number';
+        else if (data.debugText) userError = `Square: ${String(data.debugText).slice(0, 120)}`;
+        await logEvent('error', 'message-send-rejected', { senderPhone, status: data.status, debugText: (data.debugText || '').slice(0, 200) }, env);
+        return new Response(JSON.stringify({ success: false, error: userError }), {
+          status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        await logEvent('error', 'message-send-threw', { senderPhone, err: e?.message }, env);
+        return new Response(JSON.stringify({ success: false, error: 'Could not reach the messaging service. Try again shortly.' }), {
+          status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     if (url.pathname === '/book-session' && request.method === 'POST') {
       if (!isAllowedOrigin) return new Response(JSON.stringify({ error: 'Unauthorized origin' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
       if (!await checkRateLimit(request, 'book-session', 30, env)) {

@@ -555,7 +555,15 @@ export async function createBooking(
 ): Promise<{ success: boolean; bookingId?: string; error?: string }> {
 
   if (!isConfigured()) {
-    // Mock booking
+    // Hard-fail in production. The mock path silently writes a fake booking
+    // to localStorage and returns success — fine for dev, but in prod it
+    // means a deploy with missing Square env vars would let attackers book
+    // sessions without a real Square appointment. Better to fail loudly
+    // than fail silently with a synthetic ID.
+    if (import.meta.env.PROD) {
+      return { success: false, error: 'Booking is not available right now. Please contact us directly.' };
+    }
+    // Mock booking (dev only)
     await new Promise(r => setTimeout(r, 1500));
     const bookingId = `bk_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 

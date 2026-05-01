@@ -265,36 +265,17 @@ export default function MemberAgreement({
         </label>
       </div>
 
-      {/* Three sections, collapsed by default. Each shows a one-line preview;
-          click "Read full text" to expand. The reader who wants to read it
-          all can; the reader who doesn't isn't buried in 30 paragraphs. */}
-      <div className="space-y-2">
-        <AgreementSection
-          icon={<Shield size={18} className="text-[#FF4D2E]" />}
-          title="1. Personal Training Liability Waiver"
-          preview="Voluntary participation in training; release of liability for injury, illness, and related risks."
-          body={LIABILITY_WAIVER_TEXT}
-        />
-        <AgreementSection
-          icon={<FileText size={18} className="text-[#FF4D2E]" />}
-          title="2. Fitness Plan & Cancellation Terms"
-          preview="One-time charge for this plan, 24-hour session cancellation rule, 7-day plan-pause notice."
-          body={PLAN_TERMS_TEXT}
-        />
-        <AgreementSection
-          icon={<CreditCard size={18} className="text-[#FF4D2E]" />}
-          title="3. Card-on-File Authorization"
-          preview="Card stays on file for future renewals — each future charge still requires your explicit confirmation."
-          body={CARD_AUTHORIZATION_TEXT}
-        />
-      </div>
+      {/* Single User Agreement collapsible — opens to reveal all three
+          sections inline with their own sub-headers. One click target, full
+          legal text on tap. */}
+      <UserAgreementBlock />
 
-      {/* Single combined acceptance — covers all three sections above. */}
+      {/* Single combined acceptance — covers everything in the User Agreement. */}
       <div className="bg-[#FF4D2E]/[0.06] border border-[#FF4D2E]/20 rounded-xl p-4">
         <ConsentRow
           checked={accepted}
           onChange={setAccepted}
-          label="I have read and accept all three sections above — the liability waiver, the plan terms, and the card-on-file authorization."
+          label="I have read and accept the User Agreement above (Liability Waiver, Plan Terms, and Card-on-File Authorization)."
         />
       </div>
 
@@ -422,17 +403,13 @@ export default function MemberAgreement({
   );
 }
 
-function AgreementSection({
-  icon,
-  title,
-  preview,
-  body,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  preview: string;
-  body: string;
-}) {
+/**
+ * Single collapsible "User Agreement" block. Header shows a one-line
+ * summary of what's inside; expanded view renders all three sub-sections
+ * with their own icons + titles so the structure is preserved. One click
+ * target instead of three — same legal text, less visual noise.
+ */
+function UserAgreementBlock() {
   const [open, setOpen] = useState(false);
   return (
     <div className="bg-white/[0.03] border border-white/10 rounded-xl overflow-hidden">
@@ -442,11 +419,13 @@ function AgreementSection({
         className="w-full flex items-center gap-3 p-4 text-left hover:bg-white/[0.02] transition-colors"
         aria-expanded={open}
       >
-        <span className="shrink-0">{icon}</span>
+        <span className="shrink-0 w-9 h-9 rounded-lg bg-[#FF4D2E]/15 flex items-center justify-center">
+          <FileText size={18} className="text-[#FF4D2E]" />
+        </span>
         <span className="flex-1 min-w-0">
-          <span className="block text-white font-semibold text-sm">{title}</span>
-          <span className="block text-white/50 text-xs mt-0.5 line-clamp-1">
-            {preview}
+          <span className="block text-white font-semibold text-sm">User Agreement</span>
+          <span className="block text-white/50 text-xs mt-0.5 line-clamp-2">
+            Liability waiver, fitness plan &amp; cancellation terms, and card-on-file authorization.
           </span>
         </span>
         <span className="shrink-0 text-white/60 text-xs flex items-center gap-1">
@@ -460,10 +439,48 @@ function AgreementSection({
         </span>
       </button>
       {open && (
-        <div className="px-4 pb-4 -mt-1 text-white/70 text-sm leading-relaxed whitespace-pre-line border-t border-white/5 pt-3">
-          {body}
+        <div className="border-t border-white/5 px-4 sm:px-5 py-4 space-y-5">
+          <SubSection
+            icon={<Shield size={16} className="text-[#FF4D2E]" />}
+            title="1. Personal Training Liability Waiver"
+            body={LIABILITY_WAIVER_TEXT}
+          />
+          <div className="border-t border-white/5" />
+          <SubSection
+            icon={<FileText size={16} className="text-[#FF4D2E]" />}
+            title="2. Fitness Plan & Cancellation Terms"
+            body={PLAN_TERMS_TEXT}
+          />
+          <div className="border-t border-white/5" />
+          <SubSection
+            icon={<CreditCard size={16} className="text-[#FF4D2E]" />}
+            title="3. Card-on-File Authorization"
+            body={CARD_AUTHORIZATION_TEXT}
+          />
         </div>
       )}
+    </div>
+  );
+}
+
+function SubSection({
+  icon,
+  title,
+  body,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2">
+        {icon}
+        <h5 className="text-white font-semibold text-sm">{title}</h5>
+      </div>
+      <p className="text-white/70 text-sm leading-relaxed whitespace-pre-line">
+        {body}
+      </p>
     </div>
   );
 }

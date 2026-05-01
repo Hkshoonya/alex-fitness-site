@@ -156,8 +156,16 @@ function parseSquareItem(item: any): TrainingPlan | null {
   features.push('Form correction & technique coaching');
   if (planWeeks >= 12) features.push('Progress tracking & check-ins');
 
-  // Generate stable ID from Square item ID
-  const id = `sq_${item.id}`;
+  // Match the Square item back to a static plan (by squareItemId) so the
+  // returned `id` is the worker-recognized catalog key (e.g. "4week-30min"),
+  // not "sq_<squareId>". This is what the worker's PLAN_CATALOG / coupon
+  // validator uses to look up plans. Falls back to the sq_<id> form when
+  // the Square item isn't represented in the static catalog (so the plan
+  // still renders, but operations like coupon validation will reject it
+  // with a clear "Unknown planId" error rather than silently misbehaving).
+  const localMatch = [...fourWeekPlans, ...twelveWeekPlans, ...onlinePlans]
+    .find(p => p.squareItemId === item.id);
+  const id = localMatch?.id || `sq_${item.id}`;
 
   return {
     id,

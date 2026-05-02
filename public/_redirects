@@ -1,0 +1,18 @@
+# Cloudflare Pages redirects
+#
+# The app uses HASH routing (#/about, #/admin, #/preview-agreement), so the
+# server only ever sees `/`, `/index.html`, or static asset paths. The
+# `/* /index.html 200` rule is belt-and-braces for any future path-based
+# route — without it, a deep link to /admin would 404.
+#
+# Format: <from> <to> <status>
+#   200 = "rewrite" (URL stays the same; serve other content)
+#   301 = "redirect" (browser updates URL to <to>)
+
+# ===== Naked → www, or vice versa, would go here if needed =====
+# (No redirect — Cloudflare DNS will handle apex/www at the DNS layer.)
+
+# ===== SPA fallback =====
+# Catch-all: any URL that doesn't match a static file falls back to
+# index.html, which boots the SPA and resolves the route client-side.
+/*  /index.html  200

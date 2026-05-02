@@ -1,0 +1,32 @@
+# Cloudflare Pages response headers
+#
+# Cloudflare Pages reads this file from the deploy output and applies the
+# rules to every matching response. Unlike GitHub Pages, this lets us set
+# real HTTP response headers (HSTS, X-Frame-Options, frame-ancestors via
+# CSP) that cannot be set via <meta http-equiv> in the HTML.
+#
+# Order matters in this file: more-specific paths should come BEFORE less-
+# specific ones. The `/*` block at the bottom is the catch-all baseline.
+
+# ===== Catch-all baseline =====
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=(self "https://web.squarecdn.com" "https://sandbox.web.squarecdn.com")
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://web.squarecdn.com https://sandbox.web.squarecdn.com https://js.squareupsandbox.com https://www.google.com https://www.gstatic.com https://www.recaptcha.net https://recaptcha.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://alex-fitness-webhook.sense-fbf.workers.dev https://*.squareup.com https://*.squarecdn.com https://pci-connect.squareup.com https://*.google.com https://www.gstatic.com https://recaptcha.net https://www.recaptcha.net; frame-src https://web.squarecdn.com https://sandbox.web.squarecdn.com https://*.google.com https://recaptcha.net https://www.recaptcha.net; form-action 'self'; base-uri 'self'; frame-ancestors 'none'; upgrade-insecure-requests
+
+# ===== Hashed assets — cache forever =====
+# Vite emits content-hashed filenames (index-[hash].js / index-[hash].css),
+# so a hash change implies a content change. Browsers can pin these for a
+# year and still pick up updates the moment the hash flips on a new build.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# ===== HTML — never cache long =====
+# Without this, browsers can pin index.html and miss the new asset hash on
+# the next deploy. Short cache + must-revalidate keeps the script tags
+# pointing at the latest hashed bundle.
+/
+  Cache-Control: public, max-age=0, must-revalidate
